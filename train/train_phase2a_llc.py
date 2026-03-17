@@ -19,9 +19,8 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
-from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -30,6 +29,7 @@ from debug.target_cursor import CursorBounds, TargetCursor
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goal_conditioning import GoalConditionedModulationExtractor
 from hierarchical.goals import GoalSampler
+from hierarchical.intent_policy import GoalIntentActorCriticPolicy, IntentPPO
 from hierarchical.llc_env import LLCEnv
 
 # Platform geometry (normalised)
@@ -43,9 +43,9 @@ MID_X = (PLATFORM_X_MAX + PLATFORM_X_MIN) / 2.0
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train LLC with continuous goals")
     p.add_argument("--stage", type=int, choices=[1, 2], default=1)
-    p.add_argument("--timesteps", type=int, default=400_000)
+    p.add_argument("--timesteps", type=int, default=1_000_000)
     p.add_argument("--learning-rate", type=float, default=3e-4)
-    p.add_argument("--n-steps", type=int, default=512)
+    p.add_argument("--n-steps", type=int, default=2048)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--gae-lambda", type=float, default=0.95)
@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--plot-every", type=int, default=5)
     p.add_argument("--moving-avg", type=int, default=30)
     p.add_argument("--top-goals", type=int, default=12)
+    p.add_argument("--intent-loss-coef", type=float, default=0.10)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--disable-target-cursor", action="store_true",
@@ -151,6 +152,8 @@ def make_llc_env(stage: int, max_episode_steps: int):
             segment_end_fail_penalty=0.0,
             segment_magnitude_ema_alpha=0.05,
             goal_error_mode="xy",
+            xy_goal_max_dx=(PLATFORM_X_MAX - PLATFORM_X_MIN),
+            xy_goal_max_dy=(PLATFORM_Y_MAX - PLATFORM_Y_MIN),
             mask_opponent_features=False,
             resample_goal_on_timer=False,
             terminate_on_goal_success=True,
@@ -218,6 +221,9 @@ class LLCGoalDashboardCallback(BaseCallback):
         self.episode_goal_success_events: list[float] = []
         self.episode_adaptive_bonus_mean: list[float] = []
         self.episode_segment_terminal_bonus_mean: list[float] = []
+        self.episode_intent_nav_rate: list[float] = []
+        self.episode_intent_attack_rate: list[float] = []
+        self.episode_intent_recover_rate: list[float] = []
 
         self.goal_segment_rewards: dict[str, list[float]] = defaultdict(list)
         self.goal_segment_lengths: dict[str, list[int]] = defaultdict(list)
@@ -239,6 +245,8 @@ class LLCGoalDashboardCallback(BaseCallback):
         self._ep_adaptive_bonus_sum = 0.0
         self._ep_segment_terminal_bonus_sum = 0.0
         self._ep_seen_goals: set[str] = set()
+        self._ep_intent_counts = np.zeros(3, dtype=np.float32)
+        self._intent_counts_total = np.zeros(3, dtype=np.float32)
 
         self._seg_goal_uid: int | None = None
         self._seg_goal_key: str | None = None
@@ -328,6 +336,15 @@ class LLCGoalDashboardCallback(BaseCallback):
             self._ep_goal_success_event_sum += float(info.get("goal_success_event", 0.0))
             self._ep_adaptive_bonus_sum += float(info.get("goal_success_bonus_adaptive", 0.0))
             self._ep_segment_terminal_bonus_sum += float(info.get("segment_terminal_bonus", 0.0))
+
+            intent_idx = -1
+            model = getattr(self, "model", None)
+            if model is not None and hasattr(model, "policy") and hasattr(model.policy, "last_intent_index"):
+                intent_idx = int(model.policy.last_intent_index)
+            if 0 <= intent_idx < 3:
+                self._ep_intent_counts[intent_idx] += 1.0
+                self._intent_counts_total[intent_idx] += 1.0
+
             self._ep_seen_goals.add(goal_bucket)
             self.goal_bucket_success_count[goal_bucket] += goal_success
             self.goal_bucket_total_count[goal_bucket] += 1
@@ -364,6 +381,9 @@ class LLCGoalDashboardCallback(BaseCallback):
                 self.episode_goal_success_events.append(float(self._ep_goal_success_event_sum / denom))
                 self.episode_adaptive_bonus_mean.append(float(self._ep_adaptive_bonus_sum / denom))
                 self.episode_segment_terminal_bonus_mean.append(float(self._ep_segment_terminal_bonus_sum / denom))
+                self.episode_intent_nav_rate.append(float(self._ep_intent_counts[0] / denom))
+                self.episode_intent_attack_rate.append(float(self._ep_intent_counts[1] / denom))
+                self.episode_intent_recover_rate.append(float(self._ep_intent_counts[2] / denom))
 
                 for gk in self._ep_seen_goals:
                     self.goal_episode_counts[gk] += 1
@@ -382,6 +402,7 @@ class LLCGoalDashboardCallback(BaseCallback):
                 self._ep_adaptive_bonus_sum = 0.0
                 self._ep_segment_terminal_bonus_sum = 0.0
                 self._ep_seen_goals = set()
+                self._ep_intent_counts = np.zeros(3, dtype=np.float32)
 
         return True
 
@@ -505,12 +526,27 @@ class LLCGoalDashboardCallback(BaseCallback):
             ax2.set_ylabel("success events/step")
 
         ax = axes[1, 2]
-        ax.axis("off")
+        intent_labels = ["navigate", "attack", "recover"]
+        intent_total = np.sum(self._intent_counts_total)
+        if intent_total > 0:
+            shares = 100.0 * (self._intent_counts_total / float(intent_total))
+            ax.bar(intent_labels, shares, color=["royalblue", "firebrick", "seagreen"], alpha=0.85)
+            ax.set_ylim(0, 100)
+            ax.set_ylabel("% of sampled intents")
+            ax.set_title("Intent Distribution (z histogram)")
+            ax.grid(True, axis="y", alpha=0.25)
+        else:
+            ax.set_title("Intent Distribution (z histogram)")
+            ax.text(0.1, 0.5, "No intent samples yet", transform=ax.transAxes)
+
         seg_counts = [len(v) for v in self.goal_segment_rewards.values()]
         seg_lens = [l for vals in self.goal_segment_lengths.values() for l in vals]
         unique_buckets = len(self.goal_segment_rewards)
         unique_raw_goals = len(self._raw_goal_keys)
         last_n = min(20, len(self.episode_rewards))
+        intent_recent_nav = 100.0 * float(np.mean(self.episode_intent_nav_rate[-last_n:])) if last_n else 0.0
+        intent_recent_attack = 100.0 * float(np.mean(self.episode_intent_attack_rate[-last_n:])) if last_n else 0.0
+        intent_recent_recover = 100.0 * float(np.mean(self.episode_intent_recover_rate[-last_n:])) if last_n else 0.0
         summary = (
             f"Episodes: {len(self.episode_rewards)}\n"
             f"Timesteps: {self.num_timesteps:,}\n"
@@ -524,13 +560,14 @@ class LLCGoalDashboardCallback(BaseCallback):
             f"Recent ({last_n}) goal success: {100.0 * float(np.mean(self.episode_goal_success_rate[-last_n:])) if last_n else 0.0:.1f}%\n"
             f"Recent ({last_n}) adaptive bonus: {float(np.mean(self.episode_adaptive_bonus_mean[-last_n:])) if last_n else 0.0:.3f}\n"
             f"Recent ({last_n}) segment end bonus: {float(np.mean(self.episode_segment_terminal_bonus_mean[-last_n:])) if last_n else 0.0:.3f}\n"
+            f"Recent ({last_n}) intent nav/atk/rec: {intent_recent_nav:.1f}% / {intent_recent_attack:.1f}% / {intent_recent_recover:.1f}%\n"
             f"Lane nav reward/success: {self._lane_summary('navigation')}\n"
             f"Lane combat reward/success: {self._lane_summary('combat_proxy')}\n"
             f"Lane shares (nav/combat): {self._lane_share('navigation'):.1f}% / {self._lane_share('combat_proxy'):.1f}%\n"
             f"\nXY mode buckets = lane:x_region:y_region\n"
             f"(e.g. navigation:center:above_stage)."
         )
-        ax.text(0.02, 0.98, summary, va="top", family="monospace", fontsize=11)
+        ax.text(0.02, -0.35, summary, transform=ax.transAxes, va="top", family="monospace", fontsize=10)
 
         plt.tight_layout()
         out_path = self.save_dir / f"llc_stage{self.stage}_goal_debug.png"
@@ -555,17 +592,23 @@ def main() -> None:
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    vec_env = VecMonitor(DummyVecEnv([lambda: make_llc_env(args.stage, args.max_episode_steps)]))
+    base_vec_env = VecMonitor(DummyVecEnv([lambda: make_llc_env(args.stage, args.max_episode_steps)]))
+
+    vecnorm_path = save_dir / f"{args.model_name}_stage{args.stage}.vecnormalize.pkl"
+    if args.resume and vecnorm_path.exists():
+        vec_env = VecNormalize.load(str(vecnorm_path), base_vec_env)
+    else:
+        vec_env = VecNormalize(base_vec_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
     policy_kwargs = dict(
         features_extractor_class=GoalConditionedModulationExtractor,
         features_extractor_kwargs=dict(features_dim=256),
-        net_arch=dict(pi=[256, 256], vf=[256, 256]),
+        net_arch=[],
     )
 
     if args.resume:
         print(f"[LLC] Resuming from {args.resume}")
-        model = PPO.load(
+        model = IntentPPO.load(
             args.resume,
             env=vec_env,
             learning_rate=args.learning_rate,
@@ -579,10 +622,11 @@ def main() -> None:
             max_grad_norm=args.max_grad_norm,
             seed=args.seed,
             device="cpu",
+            custom_objects={"intent_loss_coef": args.intent_loss_coef},
         )
     else:
-        model = PPO(
-            "MlpPolicy",
+        model = IntentPPO(
+            GoalIntentActorCriticPolicy,
             vec_env,
             learning_rate=args.learning_rate,
             n_steps=args.n_steps,
@@ -594,6 +638,7 @@ def main() -> None:
             vf_coef=args.vf_coef,
             max_grad_norm=args.max_grad_norm,
             seed=args.seed,
+            intent_loss_coef=args.intent_loss_coef,
             policy_kwargs=policy_kwargs,
             verbose=1,
             device="cpu",
@@ -629,6 +674,9 @@ def main() -> None:
 
     model_path = save_dir / f"{args.model_name}_stage{args.stage}.zip"
     model.save(str(model_path))
+    vec_norm = model.get_vec_normalize_env()
+    if vec_norm is not None:
+        vec_norm.save(str(vecnorm_path))
     print(f"[LLC] Saved model to {model_path}")
 
 

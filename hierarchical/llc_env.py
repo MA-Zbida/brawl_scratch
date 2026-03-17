@@ -59,6 +59,8 @@ class LLCEnv(gym.Wrapper):
         segment_end_fail_penalty: float = -0.05,
         segment_magnitude_ema_alpha: float = 0.05,
         goal_error_mode: str = "full",
+        xy_goal_max_dx: float = 1.0,
+        xy_goal_max_dy: float = 1.0,
         mask_opponent_features: bool = False,
         resample_goal_on_timer: bool = True,
         terminate_on_goal_success: bool = False,
@@ -94,6 +96,8 @@ class LLCEnv(gym.Wrapper):
         self.segment_end_fail_penalty = float(segment_end_fail_penalty)
         self.segment_magnitude_ema_alpha = float(segment_magnitude_ema_alpha)
         self.goal_error_mode = str(goal_error_mode)
+        self.xy_goal_max_dx = max(1e-6, float(xy_goal_max_dx))
+        self.xy_goal_max_dy = max(1e-6, float(xy_goal_max_dy))
         self.mask_opponent_features = bool(mask_opponent_features)
         self.resample_goal_on_timer = bool(resample_goal_on_timer)
         self.terminate_on_goal_success = bool(terminate_on_goal_success)
@@ -345,15 +349,13 @@ class LLCEnv(gym.Wrapper):
         masked[self._opponent_mask_indices] = 0.0
         return masked
 
-    @staticmethod
-    def goal_error(obs: np.ndarray, goal: np.ndarray, mode: str = "full") -> float:
+    def goal_error(self, obs: np.ndarray, goal: np.ndarray, mode: str = "full") -> float:
         if mode == "xy":
             player_x = StateSpec.get(obs, "player_x")
             player_y = StateSpec.get(obs, "player_y")
-            return float(
-                abs(player_x - goal[0])
-                + abs(player_y - goal[1])
-            )
+            dx = player_x - float(goal[0])
+            dy = player_y - float(goal[1])
+            return float(np.sqrt((dx / self.xy_goal_max_dx) ** 2 + (dy / self.xy_goal_max_dy) ** 2))
 
         if mode == "locomotion":
             signed_dx_center = StateSpec.get(obs, "signed_dx_to_stage_center")
@@ -391,5 +393,5 @@ class LLCEnv(gym.Wrapper):
     @staticmethod
     def goal_error_dim(mode: str = "full") -> int:
         if mode == "xy":
-            return 2
+            return 1
         return GOAL_DIM

@@ -1,31 +1,9 @@
-"""Centralised observation-vector layout registry.
-
-Every consumer (LLC, HSP, diagnostics) imports from here instead of
-hard-coding array indices. If the layout ever changes, this file is the
-single source of truth.
-
-Usage::
-
-    from feature_extractor.memory.state_spec import StateSpec
-
-    idx = StateSpec.index("rel_distance")
-    val = StateSpec.get(obs, "opponent_damage_pct")
-    px, py = StateSpec.get_multi(obs, "player_x", "player_y")
-"""
-
 from __future__ import annotations
 
 from typing import Sequence
-
 import numpy as np
 
-
 class StateSpec:
-    """Central registry mapping feature names → observation vector indices."""
-
-    # ── Canonical feature order ─────────────────────────────────────
-    # Changing this list changes the obs layout for ALL agents.
-    # After any edit: retrain LLC and HSP from scratch.
     FEATURES: list[str] = [
         # ── player (10) ─────────────────────────────────────────────
         "player_x",             # 0   normalised [0, 1]
@@ -95,45 +73,32 @@ class StateSpec:
 
     _INDEX: dict[str, int] = {name: i for i, name in enumerate(FEATURES)}
 
-    # ── public API ──────────────────────────────────────────────────
-
     @classmethod
     def dim(cls) -> int:
-        """Total observation dimensions."""
         return len(cls.FEATURES)
-
+    
     @classmethod
     def index(cls, name: str) -> int:
-        """Return the integer index of *name* in the observation vector.
-
-        Raises KeyError if the name is not in the registry.
-        """
         return cls._INDEX[name]
-
+    
     @classmethod
     def get(cls, obs: np.ndarray, name: str) -> float:
-        """Fetch a single named feature from a flat obs array."""
         return float(obs[cls._INDEX[name]])
-
+    
     @classmethod
     def get_multi(cls, obs: np.ndarray, *names: str) -> np.ndarray:
-        """Fetch multiple named features as a float32 array."""
         indices = [cls._INDEX[n] for n in names]
         return obs[indices].astype(np.float32)
-
+    
     @classmethod
     def names(cls) -> list[str]:
-        """Return a copy of the feature name list."""
         return list(cls.FEATURES)
-
+    
     @classmethod
     def validate_vector(cls, vec: np.ndarray) -> None:
-        """Assert that *vec* has the expected shape."""
         expected = cls.dim()
         actual = vec.shape[-1] if vec.ndim >= 1 else 0
         if actual != expected:
             raise ValueError(
-                f"Observation vector has {actual} dims, expected {expected}. "
-                f"Did you update StateSpec.FEATURES without rebuilding "
-                f"Memory.to_vector()?"
+                f"Observation vector has {actual} dim, expected {expected}"
             )

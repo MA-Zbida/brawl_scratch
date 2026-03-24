@@ -1,0 +1,199 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{geometry}
+\usepackage{setspace}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\geometry{margin=1in}
+\setstretch{1.12}
+
+\title{Technical Report: UVFA Status and Theoretical Design Rationale\\for a Hierarchical Brawlhalla Agent}
+\author{Project Analysis Report}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report evaluates whether the current low-level controller (LLC) training system implements a Universal Value Function Approximator (UVFA) formulation, and documents the theoretical principles, motifs, and design choices underpinning the project. The analysis is focused on a hierarchical reinforcement learning setup for Brawlhalla-like combat dynamics, where a high-level strategic planner (HSP) proposes goals and an LLC executes mechanics under goal conditioning. We conclude that the implemented LLC is UVFA-consistent in the actor-critic sense (goal-conditioned policy and value estimation), with structured goal conditioning, FiLM-based modulation, and progress-based reward shaping defined in feature space rather than Cartesian position space.
+\end{abstract}
+
+\section{Project Context and Objective}
+The project targets a difficult control domain: a fast, adversarial platform fighter with sparse terminal signals, highly state-dependent transitions, and coupled locomotion/combat objectives. The architecture is hierarchical:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{HSP (High-Level Strategic Planner):} selects macro-goals.
+    \item \textbf{LLC (Low-Level Controller):} executes short-horizon mechanics under those goals.
+\end{itemize}
+
+The strategic objective is not to learn isolated hard-coded modes, but to learn a reusable control law that transforms current state into desired state configurations across many tactical contexts (center control, recovery, spacing, pressure).
+
+\section{Executive Answer: Is This a UVFA?}
+\subsection{Short Answer}
+\textbf{Yes}, the current LLC implementation uses a UVFA-style formulation.
+
+\subsection{Why This Qualifies}
+A UVFA extends value approximation over both state and goal. In practical actor-critic implementations, this appears as:
+\begin{itemize}[leftmargin=1.5em]
+    \item Goal-conditioned observations: policy and critic receive both $s$ and $g$.
+    \item Shared parameterization across many goals: one network family serves an entire goal distribution.
+    \item Goal-conditioned value targets via reward/error tied to goal attainment.
+\end{itemize}
+
+The current LLC meets these conditions by concatenating state with a structured goal vector (target plus mask), computing reward from reduction in goal error, and training a single PPO policy/value under this augmented observation space.
+
+\subsection{Precision Note}
+Classical UVFA is often discussed as $Q(s,a,g)$. The current implementation uses PPO with a value baseline $V(s,g)$ and a policy $\pi(a\mid s,g)$, i.e., a universal actor-critic variant rather than explicit $Q$-learning. Conceptually and functionally, this remains UVFA-consistent.
+
+\section{Formal Problem Framing}
+\subsection{Goal-Conditioned Control Objective}
+The LLC solves:
+\[
+\pi(a\mid s,g)
+\]
+where $g$ is not a point coordinate but a \emph{target structure} over selected combat features.
+
+\subsection{Structured Goal Definition}
+Let $f(s)\in\mathbb{R}^{k}$ denote extracted, normalized goal-relevant features (e.g., stage-center distance, ledge distance, strike-range indicator, offstage status, frame advantage estimate). Let:
+\[
+g = (\mathbf{t},\mathbf{m}), \quad \mathbf{t}\in [0,1]^k,\ \mathbf{m}\in\{0,1\}^k
+\]
+where $\mathbf{t}$ is target feature values and $\mathbf{m}$ is a partial constraint mask.
+
+The instantaneous goal error is:
+\[
+\varepsilon(s,g)=\sum_{i=1}^{k} m_i\,|f_i(s)-t_i|
+\]
+This masked feature-space distance is the central task metric used by LLC and reused by HSP for macro-evaluation.
+
+\section{Theories Used and Their Motifs}
+\subsection{Hierarchical Reinforcement Learning (HRL)}
+\textbf{Theory:} decomposition of long-horizon decision making into strategic and motor layers.\\
+\textbf{Motif:} reduce temporal complexity and improve modularity. In platform fighters, strategic intent evolves slower than frame-level mechanics; hierarchy exploits this timescale separation.
+
+\subsection{Goal-Conditioned RL / UVFA}
+\textbf{Theory:} learn a universal control/value mapping over goals, not one policy per task.\\
+\textbf{Motif:} enable transfer and compositional generalization across tactical contexts by sharing parameters across a distribution of goals.
+
+\subsection{Partial Goal Specification}
+\textbf{Theory:} constraint-based control in subspaces; not all state dimensions need explicit targets.\\
+\textbf{Motif:} reduce hypothesis space and avoid over-constraining behavior. This is critical in combat where multiple equivalent motor realizations can satisfy tactical intent.
+
+\subsection{Potential-Style Progress Shaping}
+\textbf{Theory:} dense reward from reduction of a distance-to-goal potential.\\
+\textbf{Motif:} improve credit assignment under sparse outcomes. The reward is based on $\varepsilon_t-\varepsilon_{t+1}$, then clipped for stability.
+
+\subsection{FiLM Conditioning and Structured Inductive Bias}
+\textbf{Theory:} Feature-wise Linear Modulation conditions latent state processing on goal context via learned affine transforms.\\
+\textbf{Motif:} ``modulate mechanics, do not relearn from scratch.'' FiLM encourages smooth adaptation of shared motor primitives instead of hard switching between discrete skills.
+
+\subsection{PPO for Stable On-Policy Optimization}
+\textbf{Theory:} clipped policy updates to control destructive policy drift.\\
+\textbf{Motif:} maintain stable learning under noisy visual state estimation, non-stationary combat trajectories, and mixed objective shaping.
+
+\subsection{Curriculum-Like Goal Distribution}
+\textbf{Theory:} staged task distribution to scaffold learning from easier/structural objectives toward combat pressure objectives.\\
+\textbf{Motif:} first stabilize locomotion/recovery mechanics, then increase tactical density (pressure, spacing, advantage-seeking).
+
+\section{State Representation Philosophy}
+The state encoder is not fed raw pixels directly. Instead, the system computes a structured observation vector containing:
+\begin{itemize}[leftmargin=1.5em]
+    \item Kinematic terms (positions, velocities).
+    \item Combat terms (strike-range, frame advantage proxy, hitstun, dodge economy).
+    \item Recovery terms (distance to ledge, offstage status, edge occupation).
+    \item Temporal context (airborne duration, time-since-hit, relative velocity).
+\end{itemize}
+
+\textbf{Motif:} in fighting games, tactical correctness depends on relational geometry and frame context, not absolute coordinates alone. Structured features increase sample efficiency by aligning the input space with game mechanics.
+
+\section{Goal Design as Regions, Not Points}
+Goals are sampled as structured tasks:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Center Control:} low stage-center distance, grounded, not offstage.
+    \item \textbf{Recovery:} low ledge distance, offstage forced toward zero.
+    \item \textbf{Spacing:} medium relational distance, strike-range disabled.
+    \item \textbf{Pressure:} strike-range enabled, positive frame advantage target.
+\end{itemize}
+
+\textbf{Motif:} this converts tactical intent into state manifolds. Many action sequences can satisfy each manifold, which is appropriate for highly dynamic fighting exchanges.
+
+\section{Reward Design Rationale}
+The LLC reward is built around goal progress:
+\begin{itemize}[leftmargin=1.5em]
+    \item Compute previous and current masked goal error.
+    \item Reward positive progress (error reduction).
+    \item Clip reward to a bounded interval for variance control.
+    \item Add success bonus when entering low-error region.
+\end{itemize}
+
+\textbf{Motif:} encourage directional movement in task space while avoiding unbounded reward spikes and unstable gradient scales.
+
+\section{Architecture Rationale}
+The extractor follows a structured conditioning pipeline:
+\begin{enumerate}[leftmargin=1.5em]
+    \item Build state-augmented input from base state, masked goal error, mask, and alignment terms.
+    \item Encode state and goal separately.
+    \item Generate FiLM parameters $(\gamma,\beta)$ from goal latent.
+    \item Modulate state latent and add residual connection.
+\end{enumerate}
+
+\textbf{Motif:} keep a shared mechanical backbone while allowing continuous tactical modulation. This is a direct antidote to brittle intent-head switching.
+
+\section{Credit Assignment Improvements vs Earlier Attempts}
+\subsection{Compared with Pure Reward Shaping}
+Pure shaping often conflates task intent and motor execution, yielding unstable or contradictory gradients. The current design separates:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{What to achieve:} goal targets/masks.
+    \item \textbf{How to move there:} shared goal-conditioned policy.
+\end{itemize}
+This decomposition improves identifiability and credit assignment.
+
+\subsection{Compared with Discrete Intent Heads}
+Intent heads impose hard partitions over behavior, often causing sparse supervision problems and boundary artifacts between modes. The current FiLM approach uses continuous conditioning, reducing discontinuities and preserving gradient flow across the full behavior manifold.
+
+\section{Brawlhalla-Specific Control Motifs}
+The selected goal features map directly to practical fighting-game fundamentals:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Center control} improves survivability and option coverage.
+    \item \textbf{Recovery reliability} prevents stock bleed from edge states.
+    \item \textbf{Spacing discipline} controls risk-reward windows.
+    \item \textbf{Pressure with frame advantage} aligns with punish dynamics.
+\end{itemize}
+
+This alignment is crucial: the model optimizes toward mechanically meaningful sub-objectives rather than arbitrary geometric proxies.
+
+\section{System-Level Coherence}
+The hierarchy is coherent because HSP and LLC use the same goal-error semantics:
+\begin{itemize}[leftmargin=1.5em]
+    \item LLC trains on immediate reduction of structured goal error.
+    \item HSP evaluates macro-actions using accumulated LLC-style progress and combat terms.
+\end{itemize}
+
+\textbf{Motif:} objective consistency across levels prevents planner-controller mismatch.
+
+\section{Observed Residual Inconsistencies}
+A few non-critical but important consistency issues remain:
+\begin{itemize}[leftmargin=1.5em]
+    \item Some documentation text still references legacy 6D goals, while the implemented format is 14D (7 targets + 7 masks).
+    \item Legacy intent-policy module remains in repository though LLC training path now relies on standard PPO with FiLM extractor.
+    \item Certain monitoring/dashboard labels still reflect older nomenclature.
+\end{itemize}
+
+These do not invalidate UVFA usage but may confuse experimentation and reporting if left unresolved.
+
+\section{Conclusions}
+The project currently implements a principled, UVFA-consistent low-level control framework for hierarchical fighting-game RL:
+\begin{itemize}[leftmargin=1.5em]
+    \item Goal conditioning is explicit and structured.
+    \item Value/policy learning is universal over goals.
+    \item Reward is based on progress in feature-space error, improving credit assignment.
+    \item FiLM conditioning provides continuous behavioral modulation without discrete intent gating.
+\end{itemize}
+
+In methodological terms, the design successfully transitions from ``reward engineering for behaviors'' to ``learning state-to-target transformations under structured constraints,'' which is the key motif behind its theoretical coherence and expected sample-efficiency gains.
+
+\section*{Appendix: Theoretical Keywords Covered}
+Hierarchical RL (HRL), Goal-Conditioned RL, UVFA, Feature-Space Goal Metrics, Potential-Based/Progress Shaping, FiLM Conditioning, Inductive Bias, PPO Stability, Curriculum Goal Sampling, Tactical State Abstraction for Platform Fighters.
+
+\end{document}

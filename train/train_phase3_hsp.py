@@ -110,11 +110,21 @@ def main() -> None:
     print(f"[HSP] Starting in {args.delay:.0f}s - switch to Brawlhalla")
     time.sleep(args.delay)
 
-    model.learn(total_timesteps=args.timesteps, progress_bar=True)
+    interrupted = False
+    try:
+        model.learn(total_timesteps=args.timesteps, progress_bar=True)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n[HSP] KeyboardInterrupt detected. Saving interrupted checkpoint...")
+        interrupted_path = save_dir / f"{args.model_name}_interrupted.zip"
+        model.save(str(interrupted_path))
+        print(f"[HSP] Interrupted checkpoint saved to {interrupted_path}")
 
     path = save_dir / f"{args.model_name}.zip"
     model.save(str(path))
     print(f"[HSP] Saved model to {path}")
+    if interrupted:
+        print("[HSP] Final model also saved after interruption.")
 
 
 if __name__ == "__main__":

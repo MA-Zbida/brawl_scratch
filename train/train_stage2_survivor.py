@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 """Stage 2 LLC training: Survivor (Recovery & Platforms).
 
-Goal: return to ledge / recover from offstage.
-Masking: player_is_offstage, player_jumps_norm, dy_to_ledge, dist_to_nearest_ledge.
+Goal: return to stage / recover from offstage.
+Goal dim: 7 (unified); active features: dist_ledge (idx 1), grounded (idx 3).
+  dist_ledge = dist_to_nearest_ledge / 2.0, normalized [0,1]. Target ~0.04.
+  grounded   = player_grounded binary. Target 1.0.
 Curriculum: reset perturbation to force aerial/offstage-like starts.
 """
 
@@ -19,8 +21,10 @@ from train.llc_stage_common import StageGoalEnv, StageSpec, make_base_env, parse
 
 
 def _target_sampler(_: np.ndarray) -> np.ndarray:
-    # [player_is_offstage, player_jumps_norm, dy_to_ledge, dist_to_nearest_ledge]
-    return np.array([0.0, 0.75, 0.0, 0.0], dtype=np.float32)
+    # 7-dim: minimize dist_ledge + be grounded.
+    # Slight jitter on dist_ledge for variety; grounded is always 1.0.
+    dist_ledge_target = float(np.clip(np.random.uniform(0.02, 0.08), 0.02, 0.10))
+    return np.array([0.0, dist_ledge_target, 0.0, 1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
 
 def make_env(max_episode_steps: int):
@@ -28,8 +32,7 @@ def make_env(max_episode_steps: int):
     spec = StageSpec(
         stage_id=2,
         name="stage2_survivor",
-        feature_names=["player_is_offstage", "player_jumps_norm", "dy_to_ledge", "dist_to_nearest_ledge"],
-        mask=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
+        mask=np.array([0.0, 1.0, 0.0, 0.5, 0.0, 0.0, 0.0], dtype=np.float32),
         target_sampler=_target_sampler,
         min_goal_duration=16,
         max_goal_duration=32,

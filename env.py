@@ -370,6 +370,8 @@ class EnvConfig:
     profile_window_size: int = 120
     emit_detailed_info: bool = False
     action_repeat_steps: int = 1
+    action_repeat_min_steps: int = 4
+    action_repeat_max_steps: int = 6
     tap_latch_steps: int = 1
     max_episode_steps: int = 0  # truncate after this many steps (0 = no limit)
 
@@ -525,21 +527,14 @@ class BrawlDeepEnv(gym.Env):
             self.input_controller.tap(latched_tap_keys)
 
     def _get_effective_action(self, action: Sequence[int]) -> tuple[int, int, int, int]:
-        repeat_steps = max(1, int(self.config.action_repeat_steps))
-        clean_action = self._sanitize_action(action)
+        return self._sanitize_action(action)
 
-        if self._action_repeat_remaining <= 0:
-            self._repeated_action = (
-                int(clean_action[0]),
-                int(clean_action[1]),
-                int(clean_action[2]),
-                int(clean_action[3]),
-            )
-            self._action_repeat_remaining = repeat_steps
-
-        effective_action = self._repeated_action
-        self._action_repeat_remaining -= 1
-        return effective_action
+    def _sample_action_repeat_steps(self) -> int:
+        min_steps = max(1, int(getattr(self.config, "action_repeat_min_steps", 1)))
+        max_steps = max(min_steps, int(getattr(self.config, "action_repeat_max_steps", min_steps)))
+        if max_steps == min_steps:
+            return min_steps
+        return int(np.random.randint(min_steps, max_steps + 1))
 
     def _get_detections(self, frame, *, force_infer: bool = False) -> list:
         if frame is None:
@@ -583,9 +578,6 @@ class BrawlDeepEnv(gym.Env):
         """Fast lookup from relational features."""
         if not self.memory.weapon.exists:
             return float("inf")
-        # Feature 22 is rel_distance, but weapon_dx/dy are 26/27
-        # Actually, let's just use Memory's already calculated weapon_dx/dy 
-        # to avoid np.hypot which involves numpy scalar overhead
         return float((self.memory.weapon_dx**2 + self.memory.weapon_dy**2)**0.5)
 
     def _update_game_logic(self, detections, action_jump: bool, action_dodge: bool) -> None:
@@ -704,7 +696,7 @@ class BrawlDeepEnv(gym.Env):
         self._last_frame = self.frame_provider.get_frame()
         detections = self._get_detections(self._last_frame, force_infer=True)
 
-        self.memory.update_from_detections(detections, dt=1.0 / 20.0)
+        self.memory.update_from_detections(detections, dt=1.0 / 41.0)
         self.reward_provider.update_memory(self._last_frame, self.memory)
 
         obs = self._get_obs()
@@ -714,80 +706,91 @@ class BrawlDeepEnv(gym.Env):
 
     def step(self, action: Sequence[int]):
         step_start = time.perf_counter()
-        self._step_count += 1
         effective_action = self._get_effective_action(action)
-
-        # Grab frame — get_frame() always returns a valid frame (cached fallback)
-        self._last_frame = self.frame_provider.get_frame()
-        if self._last_frame is None:
-            # Only on very first call before DXCam has any frame
-            self.input_controller.set_pressed(set())
-            obs = self._last_obs if self._last_obs is not None else self._get_obs()
-            null_breakdown = {k: 0.0 for k in (
-                "dmg_dealt", "ko_reward", "ko_penalty",
-                "game_win", "game_loss", "weapon_held",
-                "approach", "proximity_bonus", "edge",
-                "total_reward",
-            )}
-            return obs, 0.0, False, False, {
-                "detections": [],
-                "effective_action": [0, 0, 0, 0],
-                "op_stock_lost_step": 0.0,
-                "self_stock_lost_step": 0.0,
-                "reward_breakdown": null_breakdown,
-            }
-
-        # ── Max-hold safety: force release cycle if same direction too long ──
-        movement_idx = int(effective_action[0])
-        if movement_idx == self._last_movement and movement_idx != 3:
-            self._movement_hold_count += 1
-        else:
-            self._movement_hold_count = 0
-        self._last_movement = movement_idx
-
-        if self._movement_hold_count >= self._max_movement_hold:
-            self.input_controller.set_pressed(set())  # full release
-            self._movement_hold_count = 0
-
-        self._apply_action(effective_action)
-        detections = self._get_detections(self._last_frame)
+        repeat_steps = self._sample_action_repeat_steps()
 
         action_jump = bool(effective_action[1] == 1)
         action_dodge = bool(effective_action[2] == 1)
         action_pick_throw = bool(effective_action[3] == 3)
 
-        step_now = time.perf_counter()
-        dt_for_dets = max(1e-6, step_now - self._last_step_time)
-        self.memory.update_from_detections(detections, dt=dt_for_dets)
-        dist_to_weapon = self._distance_player_to_weapon()
-        self.memory.update_player_weapon_from_action(action_pick_throw=action_pick_throw, dist_to_weapon=dist_to_weapon)
-        self.memory.update_action(effective_action)
-
-        self._update_game_logic(detections, action_jump=action_jump, action_dodge=action_dodge)
-
-        # ── Respawn guard: release all keys while player is dead/respawning ──
-        if not self.memory.player.exists or self.memory.player_respawn_timer > 0.0:
-            self.input_controller.set_pressed(set())
-
-        self.reward_provider.update_memory(self._last_frame, self.memory)
-
-        # Compute reward via breakdown (single call, no redundant work)
-        reward_breakdown = self._call_reward_method("get_reward_breakdown", detections)
-        if isinstance(reward_breakdown, dict):
-            reward = float(reward_breakdown.get("total_reward", 0.0))
-        else:
-            reward_raw = self._call_reward_method("get_reward", detections)
-            reward = float(reward_raw) if reward_raw is not None else 0.0
-            reward_breakdown = {"total_reward": reward}
-
+        reward = 0.0
+        reward_breakdown_total: dict[str, float] = {}
         terminated = False
-        if self.config.terminate_on_stock_out:
-            terminated = self.memory.self_stocks_left <= 0.0 or self.memory.op_stocks_left <= 0.0
+        truncated = False
+        detections = []
 
-        truncated = (
-            self.config.max_episode_steps > 0
-            and self._step_count >= self.config.max_episode_steps
-        )
+        for _ in range(repeat_steps):
+            self._step_count += 1
+
+            self._last_frame = self.frame_provider.get_frame()
+            if self._last_frame is None:
+                self.input_controller.set_pressed(set())
+                obs = self._last_obs if self._last_obs is not None else self._get_obs()
+                null_breakdown = {k: 0.0 for k in (
+                    "dmg_dealt", "ko_reward", "ko_penalty",
+                    "game_win", "game_loss", "weapon_held",
+                    "approach", "proximity_bonus", "edge",
+                    "total_reward",
+                )}
+                return obs, 0.0, False, False, {
+                    "detections": [],
+                    "effective_action": [0, 0, 0, 0],
+                    "op_stock_lost_step": 0.0,
+                    "self_stock_lost_step": 0.0,
+                    "reward_breakdown": null_breakdown,
+                }
+
+            movement_idx = int(effective_action[0])
+            if movement_idx == self._last_movement and movement_idx != 3:
+                self._movement_hold_count += 1
+            else:
+                self._movement_hold_count = 0
+            self._last_movement = movement_idx
+
+            if self._movement_hold_count >= self._max_movement_hold:
+                self.input_controller.set_pressed(set())
+                self._movement_hold_count = 0
+
+            self._apply_action(effective_action)
+            detections = self._get_detections(self._last_frame)
+
+            step_now = time.perf_counter()
+            dt_for_dets = max(1e-6, step_now - self._last_step_time)
+            self.memory.update_from_detections(detections, dt=dt_for_dets)
+            dist_to_weapon = self._distance_player_to_weapon()
+            self.memory.update_player_weapon_from_action(action_pick_throw=action_pick_throw, dist_to_weapon=dist_to_weapon)
+            self.memory.update_action(effective_action)
+
+            self._update_game_logic(detections, action_jump=action_jump, action_dodge=action_dodge)
+
+            if not self.memory.player.exists or self.memory.player_respawn_timer > 0.0:
+                self.input_controller.set_pressed(set())
+
+            self.reward_provider.update_memory(self._last_frame, self.memory)
+
+            reward_breakdown = self._call_reward_method("get_reward_breakdown", detections)
+            if isinstance(reward_breakdown, dict):
+                frame_reward = float(reward_breakdown.get("total_reward", 0.0))
+            else:
+                reward_raw = self._call_reward_method("get_reward", detections)
+                frame_reward = float(reward_raw) if reward_raw is not None else 0.0
+                reward_breakdown = {"total_reward": frame_reward}
+
+            reward += frame_reward
+            if isinstance(reward_breakdown, dict):
+                for key, value in reward_breakdown.items():
+                    reward_breakdown_total[key] = reward_breakdown_total.get(key, 0.0) + float(value)
+
+            if self.config.terminate_on_stock_out:
+                terminated = self.memory.self_stocks_left <= 0.0 or self.memory.op_stocks_left <= 0.0
+
+            truncated = (
+                self.config.max_episode_steps > 0
+                and self._step_count >= self.config.max_episode_steps
+            )
+            if terminated or truncated:
+                break
+
         obs = self._get_obs()
         self._last_obs = obs.copy()  # cache for None-frame fallback
         op_stock_lost_step = float(max(0.0, self.memory.prev_op_stocks_left - self.memory.op_stocks_left))
@@ -806,11 +809,12 @@ class BrawlDeepEnv(gym.Env):
             "player_respawn_timer": float(self.memory.player_respawn_timer),
             "self_delta_damage": float(self.memory.self_delta_damage),
             "op_delta_damage": float(self.memory.op_delta_damage),
-            "reward_breakdown": reward_breakdown,
+            "reward_breakdown": reward_breakdown_total if reward_breakdown_total else {"total_reward": reward},
+            "frame_skip": int(repeat_steps),
         }
         if self.config.emit_detailed_info:
             info["observation_state"] = self.observation_to_dict(obs)
-            info["reward"] = reward_breakdown
+            info["reward"] = reward_breakdown_total if reward_breakdown_total else {"total_reward": reward}
 
         step_time_taken = time.perf_counter() - step_start
         if self.config.profile_step_timing:
@@ -825,7 +829,9 @@ class BrawlDeepEnv(gym.Env):
                     "window_steps": int(self._step_time_count),
                     "yolo_infer_every_n_steps": int(max(1, int(self.config.yolo_infer_every_n_steps))),
                     "yolo_max_det": int(self.config.yolo_max_det),
-                    "action_repeat_steps": int(max(1, int(self.config.action_repeat_steps))),
+                    "action_repeat_steps": int(repeat_steps),
+                    "action_repeat_min_steps": int(max(1, int(getattr(self.config, "action_repeat_min_steps", 1)))),
+                    "action_repeat_max_steps": int(max(1, int(getattr(self.config, "action_repeat_max_steps", 1)))),
                     "tap_latch_steps": int(max(1, int(self.config.tap_latch_steps))),
                 }
                 self._step_time_sum = 0.0

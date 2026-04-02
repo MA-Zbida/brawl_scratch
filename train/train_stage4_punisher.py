@@ -2,8 +2,10 @@
 """Stage 4 LLC training: Punisher (Combat Basics).
 
 Goal: maximize advantage in close combat.
-Target: in_strike_range -> 1, frame_advantage_estimate -> high, rel_distance -> low.
-Masking: in_strike_range, opponent_hitstun, frame_advantage_estimate, rel_distance.
+Goal dim: 7 (unified); active features:
+  in_strike_range (idx 2): target 1.0 (always in range).
+  rel_distance    (idx 5): target ~0.12 (close, normalized).
+  frame_advantage (idx 6): target ~0.75 (normalized from [-1,1] range).
 Full action space enabled.
 """
 
@@ -20,8 +22,10 @@ from train.llc_stage_common import StageGoalEnv, StageSpec, make_base_env, parse
 
 
 def _target_sampler(_: np.ndarray) -> np.ndarray:
-    # [in_strike_range, opponent_hitstun, frame_advantage_estimate, rel_distance]
-    return np.array([1.0, 0.4, 0.8, 0.12], dtype=np.float32)
+    # 7-dim: in_strike_range=1, rel_distance close, frame_advantage high.
+    rel_dist_target = float(np.clip(np.random.uniform(0.08, 0.18), 0.05, 0.22))
+    frame_adv_target = float(np.clip(np.random.uniform(0.60, 1.0), 0.50, 1.0))
+    return np.array([0.0, 0.0, 1.0, 0.0, 0.0, rel_dist_target, frame_adv_target], dtype=np.float32)
 
 
 def make_env(max_episode_steps: int):
@@ -29,8 +33,7 @@ def make_env(max_episode_steps: int):
     spec = StageSpec(
         stage_id=4,
         name="stage4_punisher",
-        feature_names=["in_strike_range", "opponent_hitstun", "frame_advantage_estimate", "rel_distance"],
-        mask=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
+        mask=np.array([0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0], dtype=np.float32),
         target_sampler=_target_sampler,
         min_goal_duration=16,
         max_goal_duration=24,

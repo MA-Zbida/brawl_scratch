@@ -30,13 +30,12 @@ class Extract:
         self._cv2 = cv2
 
         model_path = Path(yolo_model)
-        if model_path.suffix.lower() != ".engine":
-            raise RuntimeError(f"Only TensorRT engine models are supported. Got: {yolo_model}")
         if not model_path.exists():
-            raise RuntimeError(f"TensorRT engine file not found: {yolo_model}")
+            raise RuntimeError(f"YOLO model file not found: {yolo_model}")
 
         self.yolo = YOLO(str(model_path), task="detect")
-        print(f"[YOLO] Loaded TensorRT engine: {model_path.as_posix()} (FP16)")
+        self._model_path = model_path
+        print(f"[YOLO] Loaded model: {model_path.as_posix()}")
 
     def _results_to_detections(self, results) -> List[Dict]:
         detections = []
@@ -74,8 +73,33 @@ class Extract:
             gray = self._cv2.cvtColor(model_input, self._cv2.COLOR_BGR2GRAY)
             model_input = self._cv2.cvtColor(gray, self._cv2.COLOR_GRAY2BGR)
 
-        results = self.yolo(model_input, max_det=self.max_det, verbose=self.verbose, conf=self.conf)
+        try:
+            results = self.yolo(model_input, max_det=self.max_det, verbose=self.verbose, conf=self.conf)
+        except MemoryError:
+            # TensorRT engine metadata version mismatch — fall back to ONNX or PT.
+            fallback = self._find_fallback(self._model_path)
+            print(f"[YOLO] TensorRT MemoryError — falling back to {fallback}")
+            self.yolo = YOLO(str(fallback), task="detect")
+            self._model_path = fallback
+            results = self.yolo(model_input, max_det=self.max_det, verbose=self.verbose, conf=self.conf)
         return self._results_to_detections(results)
+
+    @staticmethod
+    def _find_fallback(engine_path: Path) -> Path:
+        """Return the best non-.engine alternative in the same directory."""
+        for ext in (".onnx", ".pt"):
+            candidate = engine_path.with_suffix(ext)
+            if candidate.exists():
+                return candidate
+        # Try any .onnx / .pt in the same dir
+        parent = engine_path.parent
+        for ext in (".onnx", ".pt"):
+            matches = list(parent.glob(f"*{ext}"))
+            if matches:
+                return matches[0]
+        raise RuntimeError(
+            f"TensorRT engine failed and no .onnx/.pt fallback found in {parent}"
+        )
 
     def find_detection(self, detections, name) -> Optional[Dict[str, Any]]:
         candidates = [det for det in detections if det['class_name'] == name]

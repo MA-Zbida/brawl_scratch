@@ -147,7 +147,7 @@ class Memory:
         self,
         state: FighterState,
         detection: Optional[dict],
-        dt: float = 1.0 / 27.0,
+        dt: float = 1.0 / 41.0,
         max_vel: float = 3.0,
         max_missing: int = 10,
         y_offset: float = 0.0,
@@ -180,7 +180,7 @@ class Memory:
         if state.missing_frames > max_missing:
             state.exists = False
 
-    def update_from_detections(self, detections: List[dict], dt: float = 1.0 / 27.0) -> None:
+    def update_from_detections(self, detections: List[dict], dt: float = 1.0 / 41.0) -> None:
         player_det = self._select_detection(detections, ["agent"], self.player)
         opponent_det = self._select_detection(detections, ["op", "op1", "op2"], self.opponent)
         weapon_candidates = [d for d in detections if d.get("class_name") == "weapons"]
@@ -232,7 +232,8 @@ class Memory:
             self.weapon.exists = False
             self.weapon.missing_frames = self.physics.max_weapon_missing_frames + 1
 
-    def update_on_ground(self) -> None:
+    def update_on_ground(self, vy_threshold: float | None = None) -> None:
+        _ = vy_threshold
         player_foot_y = self.player.y + (self.player.height / 2.0)
         opponent_foot_y = self.opponent.y + (self.opponent.height / 2.0)
 
@@ -333,6 +334,33 @@ class Memory:
             self.player_dodge_cooldown_max = current_player_max
             self.player_dodge_cooldown_remaining = 0.0
 
+    def update_dodge_cooldowns(self, dt: float, action_dodge: bool, opponent_dodge_detected: bool = False) -> None:
+        dt = max(1e-6, float(dt))
+        self.update_dodge_cooldown(dt=dt, action_dodge=action_dodge)
+
+        if opponent_dodge_detected and self.opponent.dodge_available:
+            self.opponent.dodge_available = False
+            self.opponent_dodge_cooldown_remaining = self.physics.dodge_air_cooldown
+
+        if not self.opponent.dodge_available:
+            self.opponent_dodge_cooldown_remaining = max(0.0, self.opponent_dodge_cooldown_remaining - dt)
+            if self.opponent_dodge_cooldown_remaining <= 0.0:
+                self.opponent_dodge_cooldown_remaining = 0.0
+                self.opponent.dodge_available = True
+
+    def update_action(self, action: np.ndarray | list[int] | tuple[int, ...]) -> None:
+        action_arr = np.asarray(action, dtype=np.int64).reshape(-1)
+        if action_arr.size == 0:
+            return
+
+        movement = int(action_arr[0])
+        jump = int(action_arr[1]) if action_arr.size > 1 else 0
+        dodge = int(action_arr[2]) if action_arr.size > 2 else 0
+        attack = int(action_arr[3]) if action_arr.size > 3 else 0
+
+        packed_action_id = movement + (4 * jump) + (8 * dodge) + (16 * attack)
+        self.player.last_action_id = float(packed_action_id)
+
     def update_jumps(self, action_jump: bool) -> None:
         if action_jump and not (self.player.grounded or self.player.on_edge):
             self.player.jumps_left = max(0, int(self.player.jumps_left - 1))
@@ -374,13 +402,13 @@ class Memory:
             self.last_knockback_dy = clamp(self.player.vy, -1.0, 1.0)
             self.player.got_hit = True
         else:
-            self.player_time_since_hit = min(2.0, self.player_time_since_hit + 1.0 / 27.0)
+            self.player_time_since_hit = min(2.0, self.player_time_since_hit + 1.0 / 41.0)
 
         if self.just_hit_opponent > 0.0:
             self.opponent_time_since_hit = 0.0
             self.opponent.got_hit = True
         else:
-            self.opponent_time_since_hit = min(2.0, self.opponent_time_since_hit + 1.0 / 27.0)
+            self.opponent_time_since_hit = min(2.0, self.opponent_time_since_hit + 1.0 / 41.0)
 
         if self.self_stocks_left < self.prev_self_stocks_left:
             self.self_total_damage_taken_before_stock_loss = 0.0

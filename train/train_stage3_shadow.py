@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """Stage 3 LLC training: Shadow (Relational Positioning).
 
-Goal: maintain a controlled distance to opponent (rel_distance -> 0.2).
-Masking: rel_dx, rel_dy, rel_distance.
+Goal: maintain a controlled spacing to opponent.
+Goal dim: 7 (unified); active feature: rel_distance (idx 5).
+  rel_distance = rel_distance_world / 2.0, normalized [0,1]. Target ~0.35.
 Constraint: attack buttons disabled.
 """
 
@@ -19,10 +20,10 @@ from train.llc_stage_common import StageGoalEnv, StageSpec, make_base_env, parse
 
 
 def _target_sampler(obs: np.ndarray) -> np.ndarray:
-    # [rel_dx, rel_dy, rel_distance]
-    # keep ~0.2 spacing, neutral vertical alignment
-    side = 1.0 if np.random.rand() < 0.5 else -1.0
-    return np.array([0.2 * side, 0.0, 0.2], dtype=np.float32)
+    # 7-dim: target rel_distance only (index 5).
+    # Jitter around 0.35 (world dist ~0.70) for variety.
+    rel_dist_target = float(np.clip(np.random.uniform(0.28, 0.42), 0.20, 0.50))
+    return np.array([0.0, 0.0, 0.0, 0.0, 0.0, rel_dist_target, 0.0], dtype=np.float32)
 
 
 def make_env(max_episode_steps: int):
@@ -30,8 +31,7 @@ def make_env(max_episode_steps: int):
     spec = StageSpec(
         stage_id=3,
         name="stage3_shadow",
-        feature_names=["rel_dx", "rel_dy", "rel_distance"],
-        mask=np.array([1.0, 1.0, 1.0], dtype=np.float32),
+        mask=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32),
         target_sampler=_target_sampler,
         min_goal_duration=24,
         max_goal_duration=40,

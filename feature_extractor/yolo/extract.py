@@ -7,7 +7,7 @@ from pathlib import Path
 class Extract:
     def __init__(
         self,
-        yolo_model: str = "feature_extractor/yolo/yolo26s_fp16.engine",
+        yolo_model: str = "feature_extractor/yolo/yolo26s_fp16   s    q e e edeeee.engine",
         config=None,
         max_det: int = 5,
         verbose: bool = False,

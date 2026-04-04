@@ -22,6 +22,19 @@ GOAL_FEATURE_NAMES = [
     "frame_advantage",
 ]
 
+# Mapping from short goal names to StateSpec field names (used by FiLM extractor).
+GOAL_TO_STATE_SPEC = {
+    "dist_center": "dist_to_stage_center",
+    "dist_ledge": "dist_to_nearest_ledge",
+    "in_strike_range": "in_strike_range",
+    "grounded": "player_grounded",
+    "offstage": "player_is_offstage",
+    "rel_distance": "rel_distance",
+    "frame_advantage": "frame_advantage_estimate",
+}
+
+GOAL_STATE_SPEC_NAMES = [GOAL_TO_STATE_SPEC[n] for n in GOAL_FEATURE_NAMES]
+
 GOAL_TARGET_DIM = len(GOAL_FEATURE_NAMES)
 GOAL_DIM = GOAL_TARGET_DIM * 2
 

@@ -16,7 +16,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from hierarchical.goals import GOAL_FEATURE_NAMES
 from train.llc_stage_common import StageGoalEnv, StageSpec, make_base_env, parse_train_args, train_stage_model
+from wrappers.goal_env_wrapper import FlattenMultiDiscreteWrapper, StageGoalDictEnv
 
 
 _curriculum_step: int = 0  # shared counter incremented by StageGoalEnv or manually
@@ -46,10 +48,20 @@ def _has_cli_flag(flag: str) -> bool:
     return False
 
 
-def make_env(max_episode_steps: int):
+def make_env(max_episode_steps: int, algo: str = "ppo"):
     base = make_base_env(max_episode_steps=max_episode_steps, terminate_on_stock_out=False)
     spec = _make_spec()
-    return StageGoalEnv(base, spec)
+    env = StageGoalEnv(base, spec)
+    if algo == "sac":
+        env = FlattenMultiDiscreteWrapper(env)
+        env = StageGoalDictEnv(
+            env,
+            proximity_scale=spec.proximity_scale,
+            success_threshold=spec.success_threshold,
+            success_bonus=spec.success_bonus,
+            mask=spec.mask,
+        )
+    return env
 
 
 def _make_spec() -> StageSpec:
@@ -60,33 +72,40 @@ def _make_spec() -> StageSpec:
         target_sampler=_target_sampler,
         min_goal_duration=16,
         max_goal_duration=28,
-        progress_scale=4.5,
+        progress_scale=2.0,
         progress_clip_min=-0.05,
         progress_clip_max=0.40,
         success_threshold=0.07,
         success_bonus=0.30,
+        proximity_scale=0.5,
         reward_clip=1.0,
         disable_attack=True,
         reset_perturb_steps=6,
+        feature_names=list(GOAL_FEATURE_NAMES),
     )
 
 
 def main() -> None:
     args = parse_train_args(default_name="llc_stage1_homing_missile", default_steps=500_000)
+    algo = getattr(args, "algo", "ppo")
 
     if not _has_cli_flag("--learning-rate"):
         args.learning_rate = 2e-4
-    if not _has_cli_flag("--n-steps"):
-        args.n_steps = 512       # was 1024; faster update cycle for locomotion task
-    if not _has_cli_flag("--clip-range"):
-        args.clip_range = 0.15   # was 0.20; prevents divergence (error trend was +)
-    if not _has_cli_flag("--ent-coef"):
-        args.ent_coef = 0.05     # was 0.01; escape local optimum
+
+    if algo == "ppo":
+        if not _has_cli_flag("--n-steps"):
+            args.n_steps = 512
+        if not _has_cli_flag("--clip-range"):
+            args.clip_range = 0.15
+        if not _has_cli_flag("--ent-coef"):
+            args.ent_coef = 0.02
+
+    spec = _make_spec()
 
     train_stage_model(
         args=args,
-        make_env=lambda: make_env(args.max_episode_steps),
-        stage_spec=None,  # FiLM off for CPU LLC; HER still active via StageDashboardCallback
+        make_env=lambda: make_env(args.max_episode_steps, algo=algo),
+        stage_spec=spec,
     )
 
 

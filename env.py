@@ -166,10 +166,20 @@ class DxcamFrameProvider:
             raise RuntimeError("dxcam is required for DxcamFrameProvider") from exc
 
         self._camera = dxcam.create(output_idx=output_idx, output_color="BGR")
+        # Prefer non-blocking capture mode when available: it returns the latest
+        # frame immediately (possibly duplicate) instead of waiting for a fresh one.
+        # This is critical for RL control loops where policy steps can be faster
+        # than the capture thread.
         if region is None:
-            self._camera.start(target_fps=target_fps)
+            try:
+                self._camera.start(target_fps=target_fps, video_mode=True)
+            except TypeError:
+                self._camera.start(target_fps=target_fps)
         else:
-            self._camera.start(region=region, target_fps=target_fps)
+            try:
+                self._camera.start(region=region, target_fps=target_fps, video_mode=True)
+            except TypeError:
+                self._camera.start(region=region, target_fps=target_fps)
         self._last_good_frame = None
 
     def get_frame(self):
@@ -208,9 +218,10 @@ class PyDirectInputController:
     def set_pressed(self, keys: KeySet) -> None:
         target = set(keys)
 
-        # Release every holdable key NOT in target — unconditionally every call
+        # Release holdable keys only when they are currently pressed.
+        # Avoiding redundant keyUp() calls significantly reduces input overhead.
         for key in self._HOLDABLE_KEYS:
-            if key not in target:
+            if key not in target and key in self._pressed:
                 self._pydirectinput.keyUp(key)
                 self._pressed.discard(key)
 
@@ -366,7 +377,7 @@ class EnvConfig:
     tracker_smooth_alpha: float = 0.6
     temporal_stack_size: int = 1  # 1 = single frame (LSTM handles time)
     temporal_offsets: tuple[int, ...] = (0,)  # only t-0; LSTM does the rest
-    profile_step_timing: bool = True
+    profile_step_timing: bool = False
     profile_window_size: int = 120
     emit_detailed_info: bool = False
     action_repeat_steps: int = 1
@@ -449,6 +460,17 @@ class BrawlDeepEnv(gym.Env):
         self._history_len = max(self._temporal_offsets) + 1
         self._state_history: deque[np.ndarray] = deque(maxlen=self._history_len)
         self._reward_sig_cache: dict[str, list[str]] = {}
+
+        # Fine-grained step profiler (enabled when profile_step_timing=True).
+        self._perf_inner_frames = 0
+        self._perf_frame_grab_sum = 0.0
+        self._perf_apply_action_sum = 0.0
+        self._perf_detect_sum = 0.0
+        self._perf_memory_sum = 0.0
+        self._perf_logic_sum = 0.0
+        self._perf_reward_sum = 0.0
+        self._perf_inner_total_sum = 0.0
+        self._perf_inner_report_every = 500
 
         # Obs dim from StateSpec (single source of truth)
         base_dim = StateSpec.dim()
@@ -696,7 +718,11 @@ class BrawlDeepEnv(gym.Env):
         self._last_frame = self.frame_provider.get_frame()
         detections = self._get_detections(self._last_frame, force_infer=True)
 
-        self.memory.update_from_detections(detections, dt=1.0 / 41.0)
+        # Use real elapsed dt; fall back to ~47hz estimate for the very first frame.
+        now = time.perf_counter()
+        reset_dt = max(1e-6, now - self._last_step_time) if self._last_step_time > 0 else 1.0 / 47.0
+        self.memory.update_from_detections(detections, dt=reset_dt)
+        self._last_step_time = now
         self.reward_provider.update_memory(self._last_frame, self.memory)
 
         obs = self._get_obs()
@@ -722,7 +748,11 @@ class BrawlDeepEnv(gym.Env):
         for _ in range(repeat_steps):
             self._step_count += 1
 
+            inner_t0 = time.perf_counter()
+
+            t0 = time.perf_counter()
             self._last_frame = self.frame_provider.get_frame()
+            frame_grab_dt = time.perf_counter() - t0
             if self._last_frame is None:
                 self.input_controller.set_pressed(set())
                 obs = self._last_obs if self._last_obs is not None else self._get_obs()
@@ -751,21 +781,31 @@ class BrawlDeepEnv(gym.Env):
                 self.input_controller.set_pressed(set())
                 self._movement_hold_count = 0
 
+            t0 = time.perf_counter()
             self._apply_action(effective_action)
-            detections = self._get_detections(self._last_frame)
+            apply_action_dt = time.perf_counter() - t0
 
+            t0 = time.perf_counter()
+            detections = self._get_detections(self._last_frame)
+            detect_dt = time.perf_counter() - t0
+
+            t0 = time.perf_counter()
             step_now = time.perf_counter()
             dt_for_dets = max(1e-6, step_now - self._last_step_time)
             self.memory.update_from_detections(detections, dt=dt_for_dets)
             dist_to_weapon = self._distance_player_to_weapon()
             self.memory.update_player_weapon_from_action(action_pick_throw=action_pick_throw, dist_to_weapon=dist_to_weapon)
             self.memory.update_action(effective_action)
+            memory_dt = time.perf_counter() - t0
 
+            t0 = time.perf_counter()
             self._update_game_logic(detections, action_jump=action_jump, action_dodge=action_dodge)
 
             if not self.memory.player.exists or self.memory.player_respawn_timer > 0.0:
                 self.input_controller.set_pressed(set())
+            logic_dt = time.perf_counter() - t0
 
+            t0 = time.perf_counter()
             self.reward_provider.update_memory(self._last_frame, self.memory)
 
             reward_breakdown = self._call_reward_method("get_reward_breakdown", detections)
@@ -775,6 +815,37 @@ class BrawlDeepEnv(gym.Env):
                 reward_raw = self._call_reward_method("get_reward", detections)
                 frame_reward = float(reward_raw) if reward_raw is not None else 0.0
                 reward_breakdown = {"total_reward": frame_reward}
+            reward_dt = time.perf_counter() - t0
+
+            if self.config.profile_step_timing:
+                inner_total_dt = time.perf_counter() - inner_t0
+                self._perf_inner_frames += 1
+                self._perf_frame_grab_sum += frame_grab_dt
+                self._perf_apply_action_sum += apply_action_dt
+                self._perf_detect_sum += detect_dt
+                self._perf_memory_sum += memory_dt
+                self._perf_logic_sum += logic_dt
+                self._perf_reward_sum += reward_dt
+                self._perf_inner_total_sum += inner_total_dt
+
+                if self._perf_inner_frames % self._perf_inner_report_every == 0:
+                    denom = float(self._perf_inner_frames)
+                    avg_total = self._perf_inner_total_sum / denom
+                    avg_frame = self._perf_frame_grab_sum / denom
+                    avg_apply = self._perf_apply_action_sum / denom
+                    avg_detect = self._perf_detect_sum / denom
+                    avg_memory = self._perf_memory_sum / denom
+                    avg_logic = self._perf_logic_sum / denom
+                    avg_reward = self._perf_reward_sum / denom
+                    avg_other = max(0.0, avg_total - (avg_frame + avg_apply + avg_detect + avg_memory + avg_logic + avg_reward))
+                    print(
+                        f"[BrawlDeepEnv] avg inner frame over {self._perf_inner_frames}: "
+                        f"total={avg_total * 1000:.2f}ms ({1.0 / max(1e-9, avg_total):.2f} hz), "
+                        f"frame={avg_frame * 1000:.2f}ms, apply={avg_apply * 1000:.2f}ms, "
+                        f"detect={avg_detect * 1000:.2f}ms, memory={avg_memory * 1000:.2f}ms, "
+                        f"logic={avg_logic * 1000:.2f}ms, reward={avg_reward * 1000:.2f}ms, "
+                        f"other={avg_other * 1000:.2f}ms"
+                    )
 
             reward += frame_reward
             if isinstance(reward_breakdown, dict):

@@ -10,12 +10,13 @@ from typing import Callable, Optional, Sequence
 import gymnasium as gym
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
 
 from env import BrawlDeepEnv, EnvConfig
 from feature_extractor.memory.state_spec import StateSpec
-from hierarchical.goals import GOAL_FEATURE_NAMES, GOAL_TARGET_DIM, extract_goal_features
+from hierarchical.goals import GOAL_FEATURE_NAMES, GOAL_STATE_SPEC_NAMES, GOAL_TARGET_DIM, extract_goal_features
+from wrappers.goal_env_wrapper import decode_action
 
 
 ActionAdapter = Callable[[np.ndarray], np.ndarray]
@@ -61,6 +62,7 @@ class StageSpec:
     progress_clip_max: float = 0.3
     success_threshold: float = 0.12
     success_bonus: float = 0.25
+    proximity_scale: float = 0.0  # penalty for current error: -proximity_scale * error
     reward_clip: float = 1.0
     disable_attack: bool = False
     reset_perturb_steps: int = 0
@@ -164,7 +166,6 @@ class StageGoalEnv(gym.Wrapper):
 
         obs, _, terminated, truncated, info = self.env.step(action_arr)
         obs = np.asarray(obs, dtype=np.float32)
-
         goal_new_sampled = False
         if self._goal_steps_left <= 0:
             self._sample_goal(obs)
@@ -178,6 +179,10 @@ class StageGoalEnv(gym.Wrapper):
         progress = 0.0 if self._prev_error is None else (self._prev_error - curr_error)
         reward = self.stage_spec.progress_scale * progress
         reward = float(np.clip(reward, self.stage_spec.progress_clip_min, self.stage_spec.progress_clip_max))
+
+        # Proximity penalty: consistent "closer is better" signal even without progress.
+        if self.stage_spec.proximity_scale > 0.0:
+            reward -= self.stage_spec.proximity_scale * curr_error
 
         success = bool(curr_error < self.stage_spec.success_threshold)
         if success:
@@ -198,7 +203,8 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_new_sampled"] = goal_new_sampled
         info["raw_goal_feats"] = curr_feats  # already computed above — no second call
 
-        return self._augment(obs), reward, terminated, truncated, info
+        aug_obs = self._augment(obs)
+        return aug_obs, reward, terminated, truncated, info
 
 
 class StageDashboardCallback(BaseCallback):
@@ -264,6 +270,8 @@ class StageDashboardCallback(BaseCallback):
         self._episode_writer: Optional[csv.DictWriter] = None
         self._step_fh = None
         self._episode_fh = None
+
+
 
     def _on_training_start(self) -> None:
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -626,29 +634,121 @@ class StageDashboardCallback(BaseCallback):
             self._episode_fh.close()
 
 
+class DiagnosticCallback(BaseCallback):
+    """Lightweight diagnostic callback that prints key signals every N steps.
+
+    Logs: raw obs sample, VecNormalize running mean/var, reward stats,
+    action distribution, and goal-error statistics.  Useful to verify
+    the training loop is sane before long runs.
+    """
+
+    def __init__(self, report_every: int = 500, verbose: int = 0, flat_actions: bool = False):
+        super().__init__(verbose)
+        self._report_every = max(1, report_every)
+        self._flat_actions = flat_actions  # SAC uses Discrete(64); decode for stats
+        self._rewards: list[float] = []
+        self._errors: list[float] = []
+        self._actions: list[np.ndarray] = []
+        self._successes: list[float] = []
+
+    def _on_step(self) -> bool:
+        infos = self.locals.get("infos", [])
+        rewards = self.locals.get("rewards", [])
+        actions = self.locals.get("actions")
+
+        for i, info in enumerate(infos):
+            self._rewards.append(float(rewards[i]) if i < len(rewards) else 0.0)
+            self._errors.append(float(info.get("goal_error", 0.0)))
+            self._successes.append(float(info.get("goal_success", 0.0)))
+            if actions is not None and i < len(actions):
+                act = np.asarray(actions[i])
+                if self._flat_actions and act.ndim == 0:
+                    act = decode_action(int(act))
+                self._actions.append(act)
+
+        if self.num_timesteps % self._report_every == 0 and len(self._rewards) > 0:
+            r = np.asarray(self._rewards[-self._report_every:], dtype=np.float32)
+            e = np.asarray(self._errors[-self._report_every:], dtype=np.float32)
+            s = np.asarray(self._successes[-self._report_every:], dtype=np.float32)
+
+            # Action distribution (movement axis = index 0)
+            act_str = ""
+            if len(self._actions) >= self._report_every:
+                recent_acts = np.stack(self._actions[-self._report_every:])
+                move_counts = np.bincount(recent_acts[:, 0].astype(int), minlength=4)
+                move_pct = 100.0 * move_counts / max(1, move_counts.sum())
+                act_str = (
+                    f"move=[L:{move_pct[0]:.0f}% R:{move_pct[1]:.0f}% "
+                    f"D:{move_pct[2]:.0f}% idle:{move_pct[3]:.0f}%]"
+                )
+
+            # VecNormalize stats
+            norm_str = ""
+            try:
+                vecn = self.model.get_vec_normalize_env()
+                if vecn is not None and hasattr(vecn, "obs_rms"):
+                    rms = vecn.obs_rms
+                    if isinstance(rms, dict):
+                        rms = next(iter(rms.values()), None)
+                    if rms is not None:
+                        mean = rms.mean
+                        var = rms.var
+                        norm_str = (
+                            f"VecNorm mean[0:3]={mean[:3].round(3)} "
+                            f"var[0:3]={var[:3].round(3)}"
+                        )
+            except Exception:
+                pass
+
+            print(
+                f"[Diag @{self.num_timesteps}] "
+                f"reward: {r.mean():.4f}±{r.std():.4f} "
+                f"[{r.min():.3f}, {r.max():.3f}] | "
+                f"error: {e.mean():.4f}±{e.std():.4f} | "
+                f"success: {s.mean():.3f} | "
+                f"{act_str} | {norm_str}"
+            )
+
+            # Sample one raw obs from the current step
+            new_obs = self.locals.get("new_obs")
+            if new_obs is not None and len(new_obs) > 0:
+                obs0 = new_obs[0]
+                if isinstance(obs0, dict):
+                    o = obs0["observation"]
+                    print(
+                        f"  obs[0:6]={o[:6].round(3)} "
+                        f"desired_goal={obs0['desired_goal'].round(3)} "
+                        f"achieved_goal={obs0['achieved_goal'].round(3)}"
+                    )
+                else:
+                    print(
+                        f"  raw_obs[0:6]={obs0[:6].round(3)} "
+                        f"goal_target={obs0[51:58].round(3)} "
+                        f"mask={obs0[58:65].round(3)}"
+                    )
+
+        return True
+
+
 def default_env_config(max_episode_steps: int, terminate_on_stock_out: bool = False) -> EnvConfig:
     return EnvConfig(
         terminate_on_stock_out=terminate_on_stock_out,
         max_episode_steps=max_episode_steps,
         yolo_infer_every_n_steps=3,
         action_repeat_steps=4,
-        action_repeat_min_steps=4,
-        action_repeat_max_steps=6,
+        action_repeat_min_steps=3,
+        action_repeat_max_steps=5,
         tap_latch_steps=1,
     )
 
 
 def parse_train_args(default_name: str, default_steps: int) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=f"Train {default_name}")
+    p.add_argument("--algo", type=str, default="sac", choices=["ppo", "sac"])
     p.add_argument("--timesteps", type=int, default=default_steps)
     p.add_argument("--learning-rate", type=float, default=3e-4)
-    p.add_argument("--n-steps", type=int, default=2048)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--gamma", type=float, default=0.99)
-    p.add_argument("--gae-lambda", type=float, default=0.95)
-    p.add_argument("--clip-range", type=float, default=0.15)
-    p.add_argument("--ent-coef", type=float, default=0.01)
-    p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--max-episode-steps", type=int, default=1200)
     p.add_argument("--save-dir", type=str, default="train/models")
@@ -659,6 +759,20 @@ def parse_train_args(default_name: str, default_steps: int) -> argparse.Namespac
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--device", type=str, default="cpu")
+    # PPO-specific
+    p.add_argument("--n-steps", type=int, default=2048)
+    p.add_argument("--gae-lambda", type=float, default=0.95)
+    p.add_argument("--clip-range", type=float, default=0.15)
+    p.add_argument("--ent-coef", type=float, default=0.01)
+    p.add_argument("--vf-coef", type=float, default=0.5)
+    # SAC-specific
+    p.add_argument("--buffer-size", type=int, default=100_000)
+    p.add_argument("--learning-starts", type=int, default=1_000)
+    p.add_argument("--tau", type=float, default=0.005)
+    p.add_argument("--train-freq", type=int, default=1)
+    p.add_argument("--gradient-steps", type=int, default=2)
+    p.add_argument("--sac-ent-coef", type=str, default="auto")
+    p.add_argument("--her-n-goals", type=int, default=4)
     return p.parse_args()
 
 
@@ -667,19 +781,17 @@ def train_stage_model(
     make_env: Callable[[], gym.Env],
     stage_spec: Optional[StageSpec] = None,
 ) -> None:
-    """Train a stage LLC policy.
+    """Train a stage LLC policy (PPO or SAC-Discrete).
 
     Parameters
     ----------
     stage_spec:
-        When provided, the policy uses StageGoalFiLMExtractor keyed on
-        stage_spec.feature_names instead of a vanilla MLP.  Has no effect
-        when resuming (architecture is fixed by the saved model).
+        When provided with PPO, uses StageGoalFiLMExtractor.  When provided
+        with SAC, additionally enables HerReplayBuffer.
     """
-    # Lazy import to avoid circular dependency (stage_film_extractor imports
-    # FEATURE_SCALE from this module).
-    from train.stage_film_extractor import StageGoalFiLMExtractor
+    from feature_extractor.film_extractor import StageGoalFiLMExtractor
 
+    algo = getattr(args, "algo", "ppo")
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -689,74 +801,32 @@ def train_stage_model(
     if args.resume and vecnorm_path.exists():
         vec_env = VecNormalize.load(str(vecnorm_path), base_vec)
     else:
-        vec_env = VecNormalize(base_vec, norm_obs=True, norm_reward=False, clip_obs=10.0)
+        vec_env = VecNormalize(base_vec, norm_obs=False, norm_reward=False, clip_obs=10.0)
 
-    if args.resume:
-        print(f"[{args.model_name}] Resuming from {args.resume}")
-        model = PPO.load(
-            args.resume,
-            env=vec_env,
-            learning_rate=args.learning_rate,
-            clip_range=args.clip_range,
-            n_steps=args.n_steps,
-            batch_size=args.batch_size,
-            gamma=args.gamma,
-            gae_lambda=args.gae_lambda,
-            ent_coef=args.ent_coef,
-            vf_coef=args.vf_coef,
-            max_grad_norm=args.max_grad_norm,
-            seed=args.seed,
-            device=args.device,
-        )
+    if algo == "sac":
+        model = _build_sac(args, vec_env, stage_spec, StageGoalFiLMExtractor)
     else:
-        if stage_spec is not None:
-            # FiLM-modulated goal-conditioned extractor: multiplicatively gates
-            # state features by the goal, enabling goal-directed attention.
-            policy_kwargs = dict(
-                features_extractor_class=StageGoalFiLMExtractor,
-                features_extractor_kwargs=dict(
-                    goal_feature_names=stage_spec.feature_names,
-                    features_dim=256,
-                ),
-                # Single linear head after FiLM output (extractor already has depth).
-                net_arch=dict(pi=[128], vf=[128]),
-            )
-        else:
-            policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
+        model = _build_ppo(args, vec_env, stage_spec, StageGoalFiLMExtractor)
 
-        model = PPO(
-            "MlpPolicy",
-            vec_env,
-            learning_rate=args.learning_rate,
-            n_steps=args.n_steps,
-            batch_size=args.batch_size,
-            gamma=args.gamma,
-            gae_lambda=args.gae_lambda,
-            clip_range=args.clip_range,
-            ent_coef=args.ent_coef,
-            vf_coef=args.vf_coef,
-            max_grad_norm=args.max_grad_norm,
-            seed=args.seed,
-            policy_kwargs=policy_kwargs,
-            verbose=1,
-            device=args.device,
-        )
-
-    print(f"[{args.model_name}] Training for {args.timesteps:,} timesteps")
+    print(f"[{args.model_name}] Training {algo.upper()} for {args.timesteps:,} timesteps")
     print(f"[{args.model_name}] Starting in {args.delay:.0f}s - switch to Brawlhalla")
     time.sleep(args.delay)
 
+    # For SAC, disable on-policy HER in callback (HerReplayBuffer handles it).
+    her_spec = stage_spec if algo == "ppo" else None
     dashboard_cb = StageDashboardCallback(
         save_dir=save_dir,
         model_name=args.model_name,
-        stage_spec=stage_spec,
+        stage_spec=her_spec,
         plot_every_episodes=args.plot_every,
         moving_avg_window=args.moving_avg,
     )
+    diag_cb = DiagnosticCallback(report_every=500, flat_actions=(algo == "sac"))
+    callbacks = CallbackList([dashboard_cb, diag_cb])
 
     interrupted = False
     try:
-        model.learn(total_timesteps=args.timesteps, progress_bar=True, callback=dashboard_cb)
+        model.learn(total_timesteps=args.timesteps, progress_bar=True, callback=callbacks)
     except KeyboardInterrupt:
         interrupted = True
         interrupted_model = save_dir / f"{args.model_name}_interrupted.zip"
@@ -780,6 +850,122 @@ def train_stage_model(
     print(f"[{args.model_name}] Saved model to {final_model}")
     if interrupted:
         print(f"[{args.model_name}] Final model also saved after interruption.")
+
+
+def _build_ppo(args, vec_env, stage_spec, FiLMClass):
+    """Build or resume a PPO model."""
+    if args.resume:
+        print(f"[{args.model_name}] Resuming PPO from {args.resume}")
+        return PPO.load(
+            args.resume,
+            env=vec_env,
+            learning_rate=args.learning_rate,
+            clip_range=args.clip_range,
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            gamma=args.gamma,
+            gae_lambda=args.gae_lambda,
+            ent_coef=args.ent_coef,
+            vf_coef=args.vf_coef,
+            max_grad_norm=args.max_grad_norm,
+            seed=args.seed,
+            device=args.device,
+        )
+
+    if stage_spec is not None:
+        policy_kwargs = dict(
+            features_extractor_class=FiLMClass,
+            features_extractor_kwargs=dict(
+                goal_feature_names=GOAL_STATE_SPEC_NAMES,
+                features_dim=256,
+            ),
+            net_arch=dict(pi=[128], vf=[128]),
+        )
+    else:
+        policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
+
+    return PPO(
+        "MlpPolicy",
+        vec_env,
+        learning_rate=args.learning_rate,
+        n_steps=args.n_steps,
+        batch_size=args.batch_size,
+        gamma=args.gamma,
+        gae_lambda=args.gae_lambda,
+        clip_range=args.clip_range,
+        ent_coef=args.ent_coef,
+        vf_coef=args.vf_coef,
+        max_grad_norm=args.max_grad_norm,
+        seed=args.seed,
+        policy_kwargs=policy_kwargs,
+        verbose=1,
+        device=args.device,
+    )
+
+
+def _build_sac(args, vec_env, stage_spec, FiLMClass):
+    """Build a DiscreteSAC model with optional HerReplayBuffer."""
+    from stable_baselines3 import HerReplayBuffer
+    from algo.discrete_sac import DiscreteSAC
+    from algo.discrete_sac_policy import DictToFlatExtractor, DiscreteSACPolicy
+
+    replay_buffer_class = None
+    replay_buffer_kwargs = {}
+
+    if stage_spec is not None:
+        replay_buffer_class = HerReplayBuffer
+        replay_buffer_kwargs = dict(
+            n_sampled_goal=getattr(args, "her_n_goals", 4),
+            goal_selection_strategy="future",
+        )
+
+    # Build policy kwargs with Dict-aware FiLM extractor.
+    if stage_spec is not None:
+        policy_kwargs = dict(
+            features_extractor_class=DictToFlatExtractor,
+            features_extractor_kwargs=dict(
+                inner_extractor_class=FiLMClass,
+                inner_extractor_kwargs=dict(
+                    goal_feature_names=GOAL_STATE_SPEC_NAMES,
+                    features_dim=256,
+                ),
+                mask=np.asarray(stage_spec.mask, dtype=np.float32),
+            ),
+            net_arch=[256, 256],
+        )
+    else:
+        policy_kwargs = dict(net_arch=[256, 256])
+
+    if args.resume:
+        print(f"[{args.model_name}] Resuming SAC from {args.resume}")
+        return DiscreteSAC.load(
+            args.resume,
+            env=vec_env,
+            learning_rate=args.learning_rate,
+            seed=args.seed,
+            device=args.device,
+        )
+
+    return DiscreteSAC(
+        DiscreteSACPolicy,
+        vec_env,
+        learning_rate=args.learning_rate,
+        buffer_size=getattr(args, "buffer_size", 100_000),
+        learning_starts=getattr(args, "learning_starts", 1_000),
+        batch_size=args.batch_size,
+        tau=getattr(args, "tau", 0.005),
+        gamma=args.gamma,
+        train_freq=getattr(args, "train_freq", 1),
+        gradient_steps=getattr(args, "gradient_steps", 1),
+        ent_coef=getattr(args, "sac_ent_coef", "auto"),
+        max_grad_norm=args.max_grad_norm,
+        replay_buffer_class=replay_buffer_class,
+        replay_buffer_kwargs=replay_buffer_kwargs,
+        policy_kwargs=policy_kwargs,
+        seed=args.seed,
+        verbose=1,
+        device=args.device,
+    )
 
 
 def make_base_env(max_episode_steps: int, terminate_on_stock_out: bool = False) -> BrawlDeepEnv:

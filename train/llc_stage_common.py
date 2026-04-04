@@ -711,16 +711,18 @@ class DiagnosticCallback(BaseCallback):
 
             # Sample one raw obs from the current step
             new_obs = self.locals.get("new_obs")
-            if new_obs is not None and len(new_obs) > 0:
-                obs0 = new_obs[0]
-                if isinstance(obs0, dict):
+            if new_obs is not None:
+                if isinstance(new_obs, dict):
+                    # Dict obs from VecEnv: each value has shape (n_envs, ...)
+                    obs0 = {k: v[0] for k, v in new_obs.items()}
                     o = obs0["observation"]
                     print(
                         f"  obs[0:6]={o[:6].round(3)} "
                         f"desired_goal={obs0['desired_goal'].round(3)} "
                         f"achieved_goal={obs0['achieved_goal'].round(3)}"
                     )
-                else:
+                elif len(new_obs) > 0:
+                    obs0 = new_obs[0]
                     print(
                         f"  raw_obs[0:6]={obs0[:6].round(3)} "
                         f"goal_target={obs0[51:58].round(3)} "

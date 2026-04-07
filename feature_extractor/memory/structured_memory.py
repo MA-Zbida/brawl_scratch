@@ -64,6 +64,10 @@ class Physics:
     ground_y_tolerance: float = 0.028
     max_weapon_missing_frames: float = 4
     max_dist_threshold: float = 0.1
+    # Movement physics (normalised-coordinate space)
+    gravity: float = 3.0             # norm_coords/s²  (positive = downward in screen coords)
+    ground_friction: float = 8.0     # 1/s  velocity damping on ground
+    air_friction: float = 0.5        # 1/s  velocity damping in air
 
 
 class Memory:
@@ -80,6 +84,8 @@ class Memory:
         self.physics = Physics()
 
         self._obs_buffer = np.zeros((StateSpec.dim(),), dtype=np.float32)
+
+        self._alpha_blend: float = 0.7   # YOLO weight in observation blend
 
         self._edge_x_radius = 0.04
         self._edge_y_tolerance = 0.03
@@ -122,6 +128,8 @@ class Memory:
         self.player_respawn_timer: float = 0.0
         self.opponent_respawn_timer: float = 0.0
 
+        self._prev_action = np.zeros(4, dtype=np.float32)
+
     def _clamp_position(self, x: float, y: float) -> Tuple[float, float]:
         return (
             clamp(x, self.min_xy, self.max_xy),
@@ -154,26 +162,43 @@ class Memory:
     ) -> None:
         dt = max(1e-6, float(dt))
 
+        # ── physics prediction from previous state ──────────────
+        x_phys = state.x + state.vx * dt
+
+        if state.grounded:
+            y_phys = state.y
+            vx_phys = state.vx * max(0.0, 1.0 - self.physics.ground_friction * dt)
+            vy_phys = 0.0
+        else:
+            vy_phys = state.vy + self.physics.gravity * dt
+            y_phys = state.y + state.vy * dt + 0.5 * self.physics.gravity * dt * dt
+            vx_phys = state.vx * max(0.0, 1.0 - self.physics.air_friction * dt)
+
         if detection is not None:
-            x, y = bbox_center(detection)
-            y += float(y_offset)
-            x, y = self._clamp_position(x, y)
+            x_yolo, y_yolo = bbox_center(detection)
+            y_yolo += float(y_offset)
+            x_yolo, y_yolo = self._clamp_position(x_yolo, y_yolo)
+
+            # Blend: pos = alpha * YOLO + (1 - alpha) * physics
+            alpha = self._alpha_blend
+            x_new = alpha * x_yolo + (1.0 - alpha) * x_phys
+            y_new = alpha * y_yolo + (1.0 - alpha) * y_phys
+            x_new, y_new = self._clamp_position(x_new, y_new)
 
             state.last_x, state.last_y = state.x, state.y
-            state.vx = clamp((x - state.x) / dt, -max_vel, max_vel)
-            state.vy = clamp((y - state.y) / dt, -max_vel, max_vel)
-            state.x, state.y = x, y
+            state.vx = clamp((x_new - state.x) / dt, -max_vel, max_vel)
+            state.vy = clamp((y_new - state.y) / dt, -max_vel, max_vel)
+            state.x, state.y = x_new, y_new
             state.exists = True
             state.missing_frames = 0
             state.confidence = min(1.0, state.confidence + 0.15)
             return
 
+        # ── no detection: pure physics fallback ─────────────────
         state.last_x, state.last_y = state.x, state.y
-        state.x += state.vx * dt
-        state.y += state.vy * dt
-        state.x, state.y = self._clamp_position(state.x, state.y)
-        state.vx *= 0.995
-        state.vy *= 0.995
+        state.x, state.y = self._clamp_position(x_phys, y_phys)
+        state.vx = clamp(vx_phys, -max_vel, max_vel)
+        state.vy = clamp(vy_phys, -max_vel, max_vel)
 
         state.missing_frames += 1
         state.confidence *= 0.95
@@ -357,6 +382,12 @@ class Memory:
         jump = int(action_arr[1]) if action_arr.size > 1 else 0
         dodge = int(action_arr[2]) if action_arr.size > 2 else 0
         attack = int(action_arr[3]) if action_arr.size > 3 else 0
+
+        # save current action as prev before overwrite
+        self._prev_action[0] = float(movement)
+        self._prev_action[1] = float(jump)
+        self._prev_action[2] = float(dodge)
+        self._prev_action[3] = float(attack)
 
         packed_action_id = movement + (4 * jump) + (8 * dodge) + (16 * attack)
         self.player.last_action_id = float(packed_action_id)
@@ -604,5 +635,11 @@ class Memory:
         buf[48] = env[24]
         buf[49] = env[25]
         buf[50] = env[26]
+
+        # previous action (normalised)
+        buf[51] = self._prev_action[0] / 3.0   # movement ∈ {0,1,2,3}
+        buf[52] = self._prev_action[1]          # jump     ∈ {0,1}
+        buf[53] = self._prev_action[2]          # dodge    ∈ {0,1}
+        buf[54] = self._prev_action[3] / 3.0   # attack   ∈ {0,1,2,3}
 
         return buf

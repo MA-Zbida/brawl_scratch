@@ -153,8 +153,10 @@ class DiscreteSAC(OffPolicyAlgorithm):
 
         # --- Target entropy ---
         if self.target_entropy == "auto":
-            # 98% of maximum entropy for uniform Categorical(n_actions)
-            self.target_entropy = float(-np.log(1.0 / n_actions) * 0.98)
+            # ~40% of maximum entropy for Categorical(n_actions).
+            # 98% keeps the policy near-uniform for large |A| (64 actions);
+            # 0.40 lets the actor specialise while retaining exploration.
+            self.target_entropy = float(-np.log(1.0 / n_actions) * 0.40)
         else:
             self.target_entropy = float(self.target_entropy)
 

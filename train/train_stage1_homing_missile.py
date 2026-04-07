@@ -25,20 +25,11 @@ _curriculum_step: int = 0  # shared counter incremented by StageGoalEnv or manua
 
 
 def _target_sampler(obs: np.ndarray) -> np.ndarray:
-    # 7-dim unified goal; only dist_center (index 0) is active (mask=[1,0,...,0]).
-    # dist_center = dist_to_stage_center / 2.0, normalized [0, 1].
-    #
-    # Curriculum: start with a generous target radius shrinking from 0.15 → 0.07
-    # over 200K steps, ensuring early success signals.
+    # Sample a random x position on the platform [0.34, 0.66].
     global _curriculum_step
-    ramp = min(1.0, _curriculum_step / 200_000)
-    # 0.15 → 0.07 (world dist 0.30 → 0.14 from stage center)
-    dist_center_target = 0.15 - ramp * (0.15 - 0.07)
-    # add small jitter so agent doesn't overfit to a single target value
-    dist_center_target += np.random.uniform(-0.02, 0.02)
-    dist_center_target = float(np.clip(dist_center_target, 0.04, 0.18))
+    target_x = np.random.uniform(0.34, 0.66)
     _curriculum_step += 1
-    return np.array([dist_center_target, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+    return np.array([target_x, 0, 0, 0, 0, 0, 0], dtype=np.float32)
 
 
 def _has_cli_flag(flag: str) -> bool:
@@ -72,13 +63,16 @@ def _make_spec() -> StageSpec:
         target_sampler=_target_sampler,
         min_goal_duration=16,
         max_goal_duration=28,
-        progress_scale=2.0,
-        progress_clip_min=-0.05,
-        progress_clip_max=0.40,
-        success_threshold=0.07,
-        success_bonus=0.30,
-        proximity_scale=0.5,
-        reward_clip=1.0,
+        progress_scale=4.0,
+        progress_clip_min=-0.10,
+        progress_clip_max=0.80,
+        success_threshold=0.03,
+        success_bonus=2.0,
+        proximity_scale=8.0,
+        death_penalty=2.0,
+        velocity_penalty_scale=0.0,
+        stay_bonus=0.0,
+        reward_clip=3.0,
         disable_attack=True,
         reset_perturb_steps=6,
         feature_names=list(GOAL_FEATURE_NAMES),

@@ -13,7 +13,7 @@ import numpy as np
 from feature_extractor.memory.state_spec import StateSpec
 
 GOAL_FEATURE_NAMES = [
-    "dist_center",
+    "player_x",
     "dist_ledge",
     "in_strike_range",
     "grounded",
@@ -24,7 +24,7 @@ GOAL_FEATURE_NAMES = [
 
 # Mapping from short goal names to StateSpec field names (used by FiLM extractor).
 GOAL_TO_STATE_SPEC = {
-    "dist_center": "dist_to_stage_center",
+    "player_x": "player_x",
     "dist_ledge": "dist_to_nearest_ledge",
     "in_strike_range": "in_strike_range",
     "grounded": "player_grounded",
@@ -79,7 +79,7 @@ def extract_goal_features(obs: np.ndarray) -> np.ndarray:
     obs = np.asarray(obs, dtype=np.float32)
     return np.array(
         [
-            _norm01(StateSpec.get(obs, "dist_to_stage_center"), 0.0, 2.0),
+            float(np.clip(StateSpec.get(obs, "player_x"), 0.0, 1.0)),
             _norm01(StateSpec.get(obs, "dist_to_nearest_ledge"), 0.0, 2.0),
             float(np.clip(StateSpec.get(obs, "in_strike_range"), 0.0, 1.0)),
             float(np.clip(StateSpec.get(obs, "player_grounded"), 0.0, 1.0)),

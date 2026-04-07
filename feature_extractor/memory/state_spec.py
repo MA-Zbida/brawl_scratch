@@ -69,6 +69,12 @@ class StateSpec:
         "rel_vx",                         # 48  opponent_vx - player_vx
         "rel_vy",                         # 49  opponent_vy - player_vy
         "frame_advantage_estimate",       # 50  opponent_hitstun - player_hitstun
+
+        # ── previous action (4) ─────────────────────────────────────
+        "prev_movement",                  # 51  a_{t-1}[0] / 3
+        "prev_jump",                      # 52  a_{t-1}[1] / 1
+        "prev_dodge",                     # 53  a_{t-1}[2] / 1
+        "prev_attack",                    # 54  a_{t-1}[3] / 3
     ]
 
     _INDEX: dict[str, int] = {name: i for i, name in enumerate(FEATURES)}

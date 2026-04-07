@@ -24,9 +24,8 @@ TargetSampler = Callable[[np.ndarray], np.ndarray]
 
 
 FEATURE_SCALE: dict[str, float] = {
-    "dist_to_stage_center": 2.0,
-    "dist_to_nearest_ledge": 2.0,
     "player_x": 1.0,
+    "dist_to_nearest_ledge": 2.0,
     "player_y": 1.0,
     "player_is_offstage": 1.0,
     "player_jumps_norm": 1.0,
@@ -63,8 +62,15 @@ class StageSpec:
     success_threshold: float = 0.12
     success_bonus: float = 0.25
     proximity_scale: float = 0.0  # penalty for current error: -proximity_scale * error
+    death_penalty: float = 0.0    # penalty applied when agent loses a stock
+    velocity_penalty_scale: float = 0.0   # penalise speed when near goal
+    velocity_penalty_radius: float = 2.0  # error threshold to start damping
+    stay_bonus: float = 0.0               # bonus each step the agent stays inside success radius with low vel
+    velocity_threshold: float = 0.15      # speed considered "stopped"
     reward_clip: float = 1.0
     disable_attack: bool = False
+    disable_dodge: bool = False
+    disable_jump: bool = False
     reset_perturb_steps: int = 0
 
 
@@ -161,6 +167,10 @@ class StageGoalEnv(gym.Wrapper):
         action_arr = np.asarray(action, dtype=np.int64).copy()
         if self.stage_spec.disable_attack:
             action_arr[3] = 0
+        if self.stage_spec.disable_dodge:
+            action_arr[2] = 0
+        if self.stage_spec.disable_jump:
+            action_arr[1] = 0
         if self.action_adapter is not None:
             action_arr = self.action_adapter(action_arr)
 
@@ -187,6 +197,23 @@ class StageGoalEnv(gym.Wrapper):
         success = bool(curr_error < self.stage_spec.success_threshold)
         if success:
             reward += self.stage_spec.success_bonus
+
+        # Velocity damping: penalise speed when close to target
+        if self.stage_spec.velocity_penalty_scale > 0.0 and curr_error < self.stage_spec.velocity_penalty_radius * self.stage_spec.success_threshold:
+            speed = np.sqrt(obs[2] ** 2 + obs[3]** 2)  # player_vx, player_vy
+            reward -= self.stage_spec.velocity_penalty_scale * speed
+
+        # Stay bonus: reward holding position with low velocity
+        if self.stage_spec.stay_bonus > 0.0 and success:
+            speed = np.sqrt(obs[2] ** 2 + obs[3] ** 2)
+            if speed < self.stage_spec.velocity_threshold:
+                reward += self.stage_spec.stay_bonus
+
+        # Death penalty: punish losing a stock
+        if self.stage_spec.death_penalty > 0.0:
+            self_stock_lost = info.get("self_stock_lost_step", 0.0)
+            if self_stock_lost > 0.0:
+                reward -= self.stage_spec.death_penalty
 
         reward = float(np.clip(reward, -self.stage_spec.reward_clip, self.stage_spec.reward_clip))
         self._prev_error = curr_error
@@ -723,10 +750,12 @@ class DiagnosticCallback(BaseCallback):
                     )
                 elif len(new_obs) > 0:
                     obs0 = new_obs[0]
+                    base = StateSpec.dim()
+                    g = GOAL_TARGET_DIM
                     print(
                         f"  raw_obs[0:6]={obs0[:6].round(3)} "
-                        f"goal_target={obs0[51:58].round(3)} "
-                        f"mask={obs0[58:65].round(3)}"
+                        f"goal_target={obs0[base:base+g].round(3)} "
+                        f"mask={obs0[base+g:base+2*g].round(3)}"
                     )
 
         return True
@@ -737,9 +766,9 @@ def default_env_config(max_episode_steps: int, terminate_on_stock_out: bool = Fa
         terminate_on_stock_out=terminate_on_stock_out,
         max_episode_steps=max_episode_steps,
         yolo_infer_every_n_steps=3,
-        action_repeat_steps=4,
-        action_repeat_min_steps=3,
-        action_repeat_max_steps=5,
+        action_repeat_steps=2,
+        action_repeat_min_steps=2,
+        action_repeat_max_steps=2,
         tap_latch_steps=1,
     )
 
@@ -768,13 +797,13 @@ def parse_train_args(default_name: str, default_steps: int) -> argparse.Namespac
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--vf-coef", type=float, default=0.5)
     # SAC-specific
-    p.add_argument("--buffer-size", type=int, default=100_000)
-    p.add_argument("--learning-starts", type=int, default=1_000)
+    p.add_argument("--buffer-size", type=int, default=300_000)
+    p.add_argument("--learning-starts", type=int, default=5_000)
     p.add_argument("--tau", type=float, default=0.005)
-    p.add_argument("--train-freq", type=int, default=1)
-    p.add_argument("--gradient-steps", type=int, default=2)
+    p.add_argument("--train-freq", type=int, default=4)
+    p.add_argument("--gradient-steps", type=int, default=4)
     p.add_argument("--sac-ent-coef", type=str, default="auto")
-    p.add_argument("--her-n-goals", type=int, default=4)
+    p.add_argument("--her-n-goals", type=int, default=8)
     return p.parse_args()
 
 
@@ -957,8 +986,8 @@ def _build_sac(args, vec_env, stage_spec, FiLMClass):
         batch_size=args.batch_size,
         tau=getattr(args, "tau", 0.005),
         gamma=args.gamma,
-        train_freq=getattr(args, "train_freq", 1),
-        gradient_steps=getattr(args, "gradient_steps", 1),
+        train_freq=getattr(args, "train_freq", 4),
+        gradient_steps=getattr(args, "gradient_steps", 4),
         ent_coef=getattr(args, "sac_ent_coef", "auto"),
         max_grad_norm=args.max_grad_norm,
         replay_buffer_class=replay_buffer_class,

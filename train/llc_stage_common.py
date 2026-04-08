@@ -21,19 +21,24 @@ from wrappers.goal_env_wrapper import decode_action
 
 ActionAdapter = Callable[[np.ndarray], np.ndarray]
 TargetSampler = Callable[[np.ndarray], np.ndarray]
+GoalExtractor = Callable[[np.ndarray], np.ndarray]
 
 
 FEATURE_SCALE: dict[str, float] = {
     "player_x": 1.0,
-    "dist_to_nearest_ledge": 2.0,
     "player_y": 1.0,
+    "dist_to_nearest_ledge": 2.0,
     "player_is_offstage": 1.0,
+    "player_has_weapon": 1.0,
     "player_jumps_norm": 1.0,
     "dy_to_ledge": 1.0,
     "rel_dx": 2.0,
     "rel_dy": 2.0,
+    "weapon_dx": 2.0,
+    "weapon_dy": 2.0,
     "rel_distance": 2.0,
     "in_strike_range": 1.0,
+    "opponent_damage_pct": 1.0,
     "opponent_hitstun": 1.0,
     "frame_advantage_estimate": 2.0,
 }
@@ -43,22 +48,23 @@ FEATURE_SCALE: dict[str, float] = {
 class StageSpec:
     """Parametrises one LLC training stage.
 
-    All stages share the unified 7-dim goal space from hierarchical/goals.py.
-    ``mask`` (7D) selects which goal dimensions are active for this stage.
-    ``feature_names`` is retained for logging/documentation only; goal
-    extraction is always performed via ``extract_goal_features()``.
+    Legacy stages use the unified 7-dim goal space from hierarchical/goals.py.
+    New curriculum stages may provide a custom goal extractor and feature list.
+    ``mask`` selects which goal dimensions are active for this stage.
     """
 
     stage_id: int
     name: str
     mask: np.ndarray          # 7-dim, values in [0, 1]
-    target_sampler: TargetSampler  # must return a 7-dim array in [0, 1]
-    feature_names: Optional[list[str]] = None  # documentation only
-    min_goal_duration: int = 16
-    max_goal_duration: int = 32
+    target_sampler: TargetSampler  # must return a goal_dim array in [0, 1]
+    feature_names: Optional[list[str]] = None  # logging + goal feature order
+    goal_extractor: Optional[GoalExtractor] = None
+    min_goal_duration: int = 100
+    max_goal_duration: int = 120
     progress_scale: float = 1.0
     progress_clip_min: float = -0.1
     progress_clip_max: float = 0.3
+    clip_progress_reward: bool = True
     success_threshold: float = 0.12
     success_bonus: float = 0.25
     proximity_scale: float = 0.0  # penalty for current error: -proximity_scale * error
@@ -72,6 +78,11 @@ class StageSpec:
     disable_dodge: bool = False
     disable_jump: bool = False
     reset_perturb_steps: int = 0
+    idle_movement_penalty: float = 0.0
+    idle_action_index: int = 3
+    terminate_on_death: bool = False
+    terminate_on_goal_success: bool = False
+    resample_goal_on_timer: bool = True
 
 
 class StageGoalEnv(gym.Wrapper):
@@ -86,12 +97,15 @@ class StageGoalEnv(gym.Wrapper):
         super().__init__(env)
         self.stage_spec = spec
         self.action_adapter = action_adapter
+        self.goal_extractor = spec.goal_extractor
 
-        # Unified 7-dim goal space shared across all stages and the HSP.
-        # extract_goal_features() normalises all features to [0, 1], so we
-        # never need per-feature scales for the goal error calculation.
-        self.goal_dim = GOAL_TARGET_DIM          # always 7
-        self.feature_names = list(GOAL_FEATURE_NAMES)  # for logging only
+        if spec.feature_names is not None:
+            self.goal_dim = int(len(spec.feature_names))
+            self.feature_names = list(spec.feature_names)
+        else:
+            # Default behavior for legacy stages.
+            self.goal_dim = GOAL_TARGET_DIM
+            self.feature_names = list(GOAL_FEATURE_NAMES)
 
         self.mask = np.asarray(spec.mask, dtype=np.float32).reshape(self.goal_dim)
         self.mask = np.clip(self.mask, 0.0, 1.0)
@@ -113,21 +127,35 @@ class StageGoalEnv(gym.Wrapper):
         self._prev_error: float | None = None
 
     def _extract(self, obs: np.ndarray) -> np.ndarray:
-        """Return the 7 unified goal features, each normalised to [0, 1]."""
-        return extract_goal_features(obs)
+        if self.goal_extractor is not None:
+            feats = np.asarray(self.goal_extractor(obs), dtype=np.float32).reshape(-1)
+        else:
+            feats = np.asarray(extract_goal_features(obs), dtype=np.float32).reshape(-1)
+        if feats.shape[0] != self.goal_dim:
+            raise ValueError(
+                f"Goal extractor returned dim={feats.shape[0]}, expected {self.goal_dim}"
+            )
+        return feats
 
     def _error(self, obs: np.ndarray, target: np.ndarray) -> float:
         feats = self._extract(obs)  # already in [0, 1]; no scaling needed
         return float(np.sum(self.mask * np.abs(feats - target)))
 
     def _sample_goal(self, obs: np.ndarray) -> None:
-        self._goal_target = self.stage_spec.target_sampler(obs).astype(np.float32)
-        self._goal_steps_left = int(
-            np.random.randint(self.stage_spec.min_goal_duration, self.stage_spec.max_goal_duration + 1)
-        )
+        self._goal_target = np.asarray(self.stage_spec.target_sampler(obs), dtype=np.float32).reshape(-1)
+        if self._goal_target.shape[0] != self.goal_dim:
+            raise ValueError(
+                f"Target sampler returned dim={self._goal_target.shape[0]}, expected {self.goal_dim}"
+            )
+        if self.stage_spec.resample_goal_on_timer:
+            self._goal_steps_left = int(
+                np.random.randint(self.stage_spec.min_goal_duration, self.stage_spec.max_goal_duration + 1)
+            )
+        else:
+            self._goal_steps_left = -1
 
     def _augment(self, obs: np.ndarray) -> np.ndarray:
-        # Emit [base_obs(51) | goal_target(7) | mask(7)] = 65 dims.
+        # Emit [base_obs | goal_target(goal_dim) | mask(goal_dim)].
         # goal_target is already in [0, 1] (extract_goal_features space).
         np.copyto(self._obs_buf[: self._base_dim], obs)
         np.copyto(self._obs_buf[self._base_dim : self._base_dim + self.goal_dim], self._goal_target)
@@ -177,18 +205,17 @@ class StageGoalEnv(gym.Wrapper):
         obs, _, terminated, truncated, info = self.env.step(action_arr)
         obs = np.asarray(obs, dtype=np.float32)
         goal_new_sampled = False
-        if self._goal_steps_left <= 0:
-            self._sample_goal(obs)
-            self._prev_error = None
-            goal_new_sampled = True
-        else:
-            self._goal_steps_left -= 1
+        if self.stage_spec.resample_goal_on_timer:
+            if self._goal_steps_left <= 0:
+                self._sample_goal(obs)
+                self._prev_error = None
+                goal_new_sampled = True
+            else:
+                self._goal_steps_left -= 1
 
         curr_feats = self._extract(obs)  # compute once; reused for error and HER buffer
         curr_error = float(np.sum(self.mask * np.abs(curr_feats - self._goal_target)))
-        progress = 0.0 if self._prev_error is None else (self._prev_error - curr_error)
-        reward = self.stage_spec.progress_scale * progress
-        reward = float(np.clip(reward, self.stage_spec.progress_clip_min, self.stage_spec.progress_clip_max))
+        reward = - curr_error
 
         # Proximity penalty: consistent "closer is better" signal even without progress.
         if self.stage_spec.proximity_scale > 0.0:
@@ -197,6 +224,18 @@ class StageGoalEnv(gym.Wrapper):
         success = bool(curr_error < self.stage_spec.success_threshold)
         if success:
             reward += self.stage_spec.success_bonus
+
+        if (
+            self.stage_spec.idle_movement_penalty > 0.0
+            and action_arr.size > 0
+            and int(action_arr[0]) == int(self.stage_spec.idle_action_index)
+        ):
+            reward -= self.stage_spec.idle_movement_penalty
+
+        terminated_by_goal = False
+        if self.stage_spec.terminate_on_goal_success and success:
+            terminated = True
+            terminated_by_goal = True
 
         # Velocity damping: penalise speed when close to target
         if self.stage_spec.velocity_penalty_scale > 0.0 and curr_error < self.stage_spec.velocity_penalty_radius * self.stage_spec.success_threshold:
@@ -210,10 +249,14 @@ class StageGoalEnv(gym.Wrapper):
                 reward += self.stage_spec.stay_bonus
 
         # Death penalty: punish losing a stock
+        self_stock_lost = 0.0
         if self.stage_spec.death_penalty > 0.0:
-            self_stock_lost = info.get("self_stock_lost_step", 0.0)
+            self_stock_lost = float(info.get("self_stock_lost_step", 0.0))
             if self_stock_lost > 0.0:
                 reward -= self.stage_spec.death_penalty
+
+        if self.stage_spec.terminate_on_death and float(info.get("self_stock_lost_step", 0.0)) > 0.0:
+            terminated = True
 
         reward = float(np.clip(reward, -self.stage_spec.reward_clip, self.stage_spec.reward_clip))
         self._prev_error = curr_error
@@ -222,13 +265,14 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_target"] = self._goal_target.copy()
         info["goal_mask"] = self.mask.copy()
         info["goal_error"] = float(curr_error)
-        info["goal_progress"] = float(progress)
         info["goal_success"] = float(1.0 if success else 0.0)
         info["goal_steps_left"] = int(self._goal_steps_left)
         info["llc_reward"] = float(reward)
         info["stage_feature_names"] = list(self.feature_names)
         info["goal_new_sampled"] = goal_new_sampled
         info["raw_goal_feats"] = curr_feats  # already computed above — no second call
+        info["death_event"] = float(1.0 if float(info.get("self_stock_lost_step", 0.0)) > 0.0 else 0.0)
+        info["terminal_success"] = float(1.0 if terminated_by_goal else 0.0)
 
         aug_obs = self._augment(obs)
         return aug_obs, reward, terminated, truncated, info
@@ -283,6 +327,7 @@ class StageDashboardCallback(BaseCallback):
         self.ep_length: list[int] = []
         self.ep_goal_error_mean: list[float] = []
         self.ep_success_ratio: list[float] = []
+        self.ep_success: list[float] = []
         self.ep_op_delta_sum: list[float] = []
         self.ep_self_delta_sum: list[float] = []
 
@@ -290,6 +335,7 @@ class StageDashboardCallback(BaseCallback):
         self._cur_ep_len = 0
         self._cur_ep_goal_error_sum = 0.0
         self._cur_ep_success_sum = 0.0
+        self._cur_ep_had_success = False
         self._cur_ep_op_delta_sum = 0.0
         self._cur_ep_self_delta_sum = 0.0
 
@@ -329,6 +375,7 @@ class StageDashboardCallback(BaseCallback):
                 "length",
                 "mean_goal_error",
                 "success_ratio",
+                "episode_success",
                 "op_delta_damage_sum",
                 "self_delta_damage_sum",
             ],
@@ -517,6 +564,8 @@ class StageDashboardCallback(BaseCallback):
             self._cur_ep_len += 1
             self._cur_ep_goal_error_sum += goal_error
             self._cur_ep_success_sum += goal_success
+            if goal_success > 0.5 or float(info.get("terminal_success", 0.0)) > 0.5:
+                self._cur_ep_had_success = True
             self._cur_ep_op_delta_sum += op_delta
             self._cur_ep_self_delta_sum += self_delta
 
@@ -527,7 +576,7 @@ class StageDashboardCallback(BaseCallback):
             self._her_raw_feats.append(
                 np.asarray(_raw_feats, dtype=np.float32).copy()
                 if _raw_feats is not None
-                else np.zeros(GOAL_TARGET_DIM, dtype=np.float32)
+                else np.zeros(int(len(self.stage_spec.mask)) if self.stage_spec is not None else GOAL_TARGET_DIM, dtype=np.float32)
             )
             self._her_new_goal.append(bool(info.get("goal_new_sampled", False)))
             self._her_done.append(done)
@@ -537,12 +586,16 @@ class StageDashboardCallback(BaseCallback):
                 ep_idx = len(self.ep_return) + 1
                 ep_len = max(1, self._cur_ep_len)
                 mean_err = self._cur_ep_goal_error_sum / float(ep_len)
-                success_ratio = self._cur_ep_success_sum / float(ep_len)
+                episode_success = 1.0 if self._cur_ep_had_success else 0.0
+                # Keep the historical step-wise metric but ensure terminal success
+                # is counted as full success at episode level.
+                success_ratio = max(self._cur_ep_success_sum / float(ep_len), episode_success)
 
                 self.ep_return.append(float(self._cur_ep_reward))
                 self.ep_length.append(int(self._cur_ep_len))
                 self.ep_goal_error_mean.append(float(mean_err))
                 self.ep_success_ratio.append(float(success_ratio))
+                self.ep_success.append(float(episode_success))
                 self.ep_op_delta_sum.append(float(self._cur_ep_op_delta_sum))
                 self.ep_self_delta_sum.append(float(self._cur_ep_self_delta_sum))
 
@@ -554,6 +607,7 @@ class StageDashboardCallback(BaseCallback):
                             "length": self._cur_ep_len,
                             "mean_goal_error": mean_err,
                             "success_ratio": success_ratio,
+                            "episode_success": episode_success,
                             "op_delta_damage_sum": self._cur_ep_op_delta_sum,
                             "self_delta_damage_sum": self._cur_ep_self_delta_sum,
                         }
@@ -563,6 +617,7 @@ class StageDashboardCallback(BaseCallback):
                 self._cur_ep_len = 0
                 self._cur_ep_goal_error_sum = 0.0
                 self._cur_ep_success_sum = 0.0
+                self._cur_ep_had_success = False
                 self._cur_ep_op_delta_sum = 0.0
                 self._cur_ep_self_delta_sum = 0.0
 
@@ -752,6 +807,8 @@ class DiagnosticCallback(BaseCallback):
                     obs0 = new_obs[0]
                     base = StateSpec.dim()
                     g = GOAL_TARGET_DIM
+                    if len(infos) > 0 and isinstance(infos[0].get("goal_target"), np.ndarray):
+                        g = int(np.asarray(infos[0].get("goal_target"), dtype=np.float32).shape[0])
                     print(
                         f"  raw_obs[0:6]={obs0[:6].round(3)} "
                         f"goal_target={obs0[base:base+g].round(3)} "
@@ -904,10 +961,13 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
         )
 
     if stage_spec is not None:
+        goal_feature_names = GOAL_STATE_SPEC_NAMES
+        if stage_spec.feature_names is not None:
+            goal_feature_names = list(stage_spec.feature_names)
         policy_kwargs = dict(
             features_extractor_class=FiLMClass,
             features_extractor_kwargs=dict(
-                goal_feature_names=GOAL_STATE_SPEC_NAMES,
+                goal_feature_names=goal_feature_names,
                 features_dim=256,
             ),
             net_arch=dict(pi=[128], vf=[128]),
@@ -952,12 +1012,15 @@ def _build_sac(args, vec_env, stage_spec, FiLMClass):
 
     # Build policy kwargs with Dict-aware FiLM extractor.
     if stage_spec is not None:
+        goal_feature_names = GOAL_STATE_SPEC_NAMES
+        if stage_spec.feature_names is not None:
+            goal_feature_names = list(stage_spec.feature_names)
         policy_kwargs = dict(
             features_extractor_class=DictToFlatExtractor,
             features_extractor_kwargs=dict(
                 inner_extractor_class=FiLMClass,
                 inner_extractor_kwargs=dict(
-                    goal_feature_names=GOAL_STATE_SPEC_NAMES,
+                    goal_feature_names=goal_feature_names,
                     features_dim=256,
                 ),
                 mask=np.asarray(stage_spec.mask, dtype=np.float32),

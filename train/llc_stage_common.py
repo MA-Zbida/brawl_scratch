@@ -68,9 +68,12 @@ class StageSpec:
     success_threshold: float = 0.12
     success_bonus: float = 0.25
     proximity_scale: float = 0.0  # penalty for current error: -proximity_scale * error
+    use_l2_error: bool = False
     death_penalty: float = 0.0    # penalty applied when agent loses a stock
     velocity_penalty_scale: float = 0.0   # penalise speed when near goal
     velocity_penalty_radius: float = 2.0  # error threshold to start damping
+    vertical_velocity_penalty_scale: float = 0.0  # penalise |player_vy|
+    jump_usage_penalty_scale: float = 0.0  # penalise jumps_used = (1 - player_jumps_norm)
     stay_bonus: float = 0.0               # bonus each step the agent stays inside success radius with low vel
     velocity_threshold: float = 0.15      # speed considered "stopped"
     reward_clip: float = 1.0
@@ -83,6 +86,7 @@ class StageSpec:
     terminate_on_death: bool = False
     terminate_on_goal_success: bool = False
     resample_goal_on_timer: bool = True
+    sample_goal_only_when_player_exists: bool = True
 
 
 class StageGoalEnv(gym.Wrapper):
@@ -124,6 +128,7 @@ class StageGoalEnv(gym.Wrapper):
         self._obs_buf = np.zeros((self._aug_dim,), dtype=np.float32)
         self._goal_target = np.zeros((self.goal_dim,), dtype=np.float32)
         self._goal_steps_left = 0
+        self._goal_active = False
         self._prev_error: float | None = None
 
     def _extract(self, obs: np.ndarray) -> np.ndarray:
@@ -139,7 +144,13 @@ class StageGoalEnv(gym.Wrapper):
 
     def _error(self, obs: np.ndarray, target: np.ndarray) -> float:
         feats = self._extract(obs)  # already in [0, 1]; no scaling needed
-        return float(np.sum(self.mask * np.abs(feats - target)))
+        return self._goal_error_from_feats(feats, target)
+
+    def _goal_error_from_feats(self, feats: np.ndarray, target: np.ndarray) -> float:
+        delta = np.asarray(feats, dtype=np.float32) - np.asarray(target, dtype=np.float32)
+        if self.stage_spec.use_l2_error:
+            return float(np.sqrt(np.sum(self.mask * (delta ** 2))))
+        return float(np.sum(self.mask * np.abs(delta)))
 
     def _sample_goal(self, obs: np.ndarray) -> None:
         self._goal_target = np.asarray(self.stage_spec.target_sampler(obs), dtype=np.float32).reshape(-1)
@@ -147,12 +158,51 @@ class StageGoalEnv(gym.Wrapper):
             raise ValueError(
                 f"Target sampler returned dim={self._goal_target.shape[0]}, expected {self.goal_dim}"
             )
+        self._goal_active = True
         if self.stage_spec.resample_goal_on_timer:
             self._goal_steps_left = int(
                 np.random.randint(self.stage_spec.min_goal_duration, self.stage_spec.max_goal_duration + 1)
             )
         else:
             self._goal_steps_left = -1
+
+    def _player_is_controllable(self, info: Optional[dict] = None) -> bool:
+        """Returns whether the player can currently execute actions."""
+        info = info or {}
+
+        timer = info.get("player_respawn_timer")
+        if timer is not None:
+            try:
+                if float(timer) > 1e-6:
+                    return False
+            except Exception:
+                pass
+
+        marker = info.get("player_exists")
+        if marker is not None:
+            try:
+                return float(marker) > 0.5
+            except Exception:
+                pass
+
+        mem = getattr(self.env, "memory", None)
+        if mem is not None:
+            mem_timer = getattr(mem, "player_respawn_timer", None)
+            if mem_timer is not None:
+                try:
+                    if float(mem_timer) > 1e-6:
+                        return False
+                except Exception:
+                    pass
+
+            player = getattr(mem, "player", None)
+            if player is not None and hasattr(player, "exists"):
+                try:
+                    return bool(player.exists)
+                except Exception:
+                    pass
+
+        return True
 
     def _augment(self, obs: np.ndarray) -> np.ndarray:
         # Emit [base_obs | goal_target(goal_dim) | mask(goal_dim)].
@@ -183,12 +233,18 @@ class StageGoalEnv(gym.Wrapper):
         else:
             obs, info = self._perturb_reset()
         obs = np.asarray(obs, dtype=np.float32)
-        self._sample_goal(obs)
+        if self.stage_spec.sample_goal_only_when_player_exists and not self._player_is_controllable(info):
+            self._goal_target.fill(0.0)
+            self._goal_steps_left = -1
+            self._goal_active = False
+        else:
+            self._sample_goal(obs)
         self._prev_error = None
 
         info["stage_name"] = self.stage_spec.name
         info["goal_target"] = self._goal_target.copy()
         info["goal_mask"] = self.mask.copy()
+        info["goal_active"] = float(1.0 if self._goal_active else 0.0)
         return self._augment(obs), info
 
     def step(self, action: Sequence[int]):
@@ -204,46 +260,69 @@ class StageGoalEnv(gym.Wrapper):
 
         obs, _, terminated, truncated, info = self.env.step(action_arr)
         obs = np.asarray(obs, dtype=np.float32)
+        player_controllable = self._player_is_controllable(info)
         goal_new_sampled = False
-        if self.stage_spec.resample_goal_on_timer:
-            if self._goal_steps_left <= 0:
+        if player_controllable:
+            if not self._goal_active:
                 self._sample_goal(obs)
                 self._prev_error = None
                 goal_new_sampled = True
-            else:
-                self._goal_steps_left -= 1
+            elif self.stage_spec.resample_goal_on_timer:
+                if self._goal_steps_left <= 0:
+                    self._sample_goal(obs)
+                    self._prev_error = None
+                    goal_new_sampled = True
+                else:
+                    self._goal_steps_left -= 1
+        elif self.stage_spec.sample_goal_only_when_player_exists:
+            self._goal_active = False
+            self._goal_steps_left = -1
 
         curr_feats = self._extract(obs)  # compute once; reused for error and HER buffer
-        curr_error = float(np.sum(self.mask * np.abs(curr_feats - self._goal_target)))
-        reward = - curr_error
+        if self._goal_active:
+            curr_error = self._goal_error_from_feats(curr_feats, self._goal_target)
+            reward = - curr_error
 
-        # Proximity penalty: consistent "closer is better" signal even without progress.
-        if self.stage_spec.proximity_scale > 0.0:
-            reward -= self.stage_spec.proximity_scale * curr_error
+            # Proximity penalty: consistent "closer is better" signal even without progress.
+            if self.stage_spec.proximity_scale > 0.0:
+                reward -= self.stage_spec.proximity_scale * curr_error
 
-        success = bool(curr_error < self.stage_spec.success_threshold)
-        if success:
-            reward += self.stage_spec.success_bonus
+            success = bool(curr_error < self.stage_spec.success_threshold)
+            if success:
+                reward += self.stage_spec.success_bonus
+        else:
+            curr_error = 0.0
+            reward = 0.0
+            success = False
 
         if (
-            self.stage_spec.idle_movement_penalty > 0.0
+            self._goal_active
+            and self.stage_spec.idle_movement_penalty > 0.0
             and action_arr.size > 0
             and int(action_arr[0]) == int(self.stage_spec.idle_action_index)
         ):
             reward -= self.stage_spec.idle_movement_penalty
 
+        if self._goal_active and self.stage_spec.vertical_velocity_penalty_scale > 0.0 and obs.shape[0] > 3:
+            reward -= self.stage_spec.vertical_velocity_penalty_scale * abs(float(obs[3]))
+
+        if self._goal_active and self.stage_spec.jump_usage_penalty_scale > 0.0 and obs.shape[0] > 7:
+            jumps_norm = float(np.clip(obs[7], 0.0, 1.0))
+            jumps_used = 1.0 - jumps_norm
+            reward -= self.stage_spec.jump_usage_penalty_scale * jumps_used
+
         terminated_by_goal = False
-        if self.stage_spec.terminate_on_goal_success and success:
+        if self._goal_active and self.stage_spec.terminate_on_goal_success and success:
             terminated = True
             terminated_by_goal = True
 
         # Velocity damping: penalise speed when close to target
-        if self.stage_spec.velocity_penalty_scale > 0.0 and curr_error < self.stage_spec.velocity_penalty_radius * self.stage_spec.success_threshold:
+        if self._goal_active and self.stage_spec.velocity_penalty_scale > 0.0 and curr_error < self.stage_spec.velocity_penalty_radius * self.stage_spec.success_threshold:
             speed = np.sqrt(obs[2] ** 2 + obs[3]** 2)  # player_vx, player_vy
             reward -= self.stage_spec.velocity_penalty_scale * speed
 
         # Stay bonus: reward holding position with low velocity
-        if self.stage_spec.stay_bonus > 0.0 and success:
+        if self._goal_active and self.stage_spec.stay_bonus > 0.0 and success:
             speed = np.sqrt(obs[2] ** 2 + obs[3] ** 2)
             if speed < self.stage_spec.velocity_threshold:
                 reward += self.stage_spec.stay_bonus
@@ -270,6 +349,7 @@ class StageGoalEnv(gym.Wrapper):
         info["llc_reward"] = float(reward)
         info["stage_feature_names"] = list(self.feature_names)
         info["goal_new_sampled"] = goal_new_sampled
+        info["goal_active"] = float(1.0 if self._goal_active else 0.0)
         info["raw_goal_feats"] = curr_feats  # already computed above — no second call
         info["death_event"] = float(1.0 if float(info.get("self_stock_lost_step", 0.0)) > 0.0 else 0.0)
         info["terminal_success"] = float(1.0 if terminated_by_goal else 0.0)
@@ -294,6 +374,8 @@ class StageDashboardCallback(BaseCallback):
         stage_spec: Optional[StageSpec] = None,
         plot_every_episodes: int = 5,
         moving_avg_window: int = 300,
+        enable_csv: bool = True,
+        enable_plot: bool = True,
         verbose: int = 0,
     ):
         super().__init__(verbose)
@@ -302,6 +384,8 @@ class StageDashboardCallback(BaseCallback):
         self.stage_spec = stage_spec  # used by on-policy HER; None disables HER
         self.plot_every_episodes = max(1, int(plot_every_episodes))
         self.moving_avg_window = max(10, int(moving_avg_window))
+        self.enable_csv = bool(enable_csv)
+        self.enable_plot = bool(enable_plot)
 
         self.step_csv = self.save_dir / f"{self.model_name}_steps.csv"
         self.episode_csv = self.save_dir / f"{self.model_name}_episodes.csv"
@@ -320,6 +404,7 @@ class StageDashboardCallback(BaseCallback):
         self.step_op_delta: list[float] = []
         self.step_self_delta: list[float] = []
         self.step_time_index: list[int] = []
+        self._step_count = 0
         self.stage_name: str = "unknown"
         self.stage_features: list[str] = []
 
@@ -348,6 +433,9 @@ class StageDashboardCallback(BaseCallback):
 
     def _on_training_start(self) -> None:
         self.save_dir.mkdir(parents=True, exist_ok=True)
+
+        if not self.enable_csv:
+            return
 
         self._step_fh = open(self.step_csv, "w", newline="", encoding="utf-8")
         self._episode_fh = open(self.episode_csv, "w", newline="", encoding="utf-8")
@@ -404,6 +492,8 @@ class StageDashboardCallback(BaseCallback):
         return float(np.dot(x, y) / denom)
 
     def _plot_dashboard(self) -> None:
+        if not self.enable_plot:
+            return
         try:
             import matplotlib.pyplot as plt
         except Exception:
@@ -486,7 +576,7 @@ class StageDashboardCallback(BaseCallback):
 
         diagnostics: list[str] = []
         diagnostics.append(f"Stage: {self.stage_name}")
-        diagnostics.append(f"Features: {', '.join(self.stage_features) if self.stage_features else 'n/a'}")
+        # diagnostics.append(f"Features: {', '.join(self.stage_features) if self.stage_features else 'n/a'}")
         diagnostics.append(f"Recent success rate: {success_recent:.3f}")
         diagnostics.append(f"Reward trend (recent): {reward_trend:+.5f}")
         diagnostics.append(f"Error trend (recent): {error_trend:+.5f}")
@@ -537,14 +627,16 @@ class StageDashboardCallback(BaseCallback):
             if isinstance(stage_features, list):
                 self.stage_features = [str(v) for v in stage_features]
 
-            step_number = len(self.step_reward) + 1
-            self.step_time_index.append(step_number)
-            self.step_reward.append(reward)
-            self.step_goal_error.append(goal_error)
-            self.step_goal_progress.append(goal_progress)
-            self.step_goal_success.append(goal_success)
-            self.step_op_delta.append(op_delta)
-            self.step_self_delta.append(self_delta)
+            step_number = self._step_count + 1
+            self._step_count = step_number
+            if self.enable_plot:
+                self.step_time_index.append(step_number)
+                self.step_reward.append(reward)
+                self.step_goal_error.append(goal_error)
+                self.step_goal_progress.append(goal_progress)
+                self.step_goal_success.append(goal_success)
+                self.step_op_delta.append(op_delta)
+                self.step_self_delta.append(self_delta)
 
             if self._step_writer is not None:
                 self._step_writer.writerow(
@@ -621,7 +713,7 @@ class StageDashboardCallback(BaseCallback):
                 self._cur_ep_op_delta_sum = 0.0
                 self._cur_ep_self_delta_sum = 0.0
 
-                if ep_idx % self.plot_every_episodes == 0:
+                if self.enable_plot and ep_idx % self.plot_every_episodes == 0:
                     self._plot_dashboard()
 
         return True
@@ -709,7 +801,8 @@ class StageDashboardCallback(BaseCallback):
             prev_her_error = curr_her_error
 
     def _on_training_end(self) -> None:
-        self._plot_dashboard()
+        if self.enable_plot:
+            self._plot_dashboard()
         if self._step_fh is not None:
             self._step_fh.close()
         if self._episode_fh is not None:
@@ -842,7 +935,9 @@ def parse_train_args(default_name: str, default_steps: int) -> argparse.Namespac
     p.add_argument("--save-dir", type=str, default="train/models")
     p.add_argument("--model-name", type=str, default=default_name)
     p.add_argument("--resume", type=str, default=None)
-    p.add_argument("--plot-every", type=int, default=5)
+    p.add_argument("--plot-every", type=int, default=0)
+    p.add_argument("--log-csv", action="store_true", help="Write step/episode CSV logs")
+    p.add_argument("--diag-report-every", type=int, default=0, help="Diagnostic print period in steps (0 disables)")
     p.add_argument("--moving-avg", type=int, default=300)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--delay", type=float, default=3.0)
@@ -906,11 +1001,16 @@ def train_stage_model(
         save_dir=save_dir,
         model_name=args.model_name,
         stage_spec=her_spec,
-        plot_every_episodes=args.plot_every,
+        plot_every_episodes=max(1, int(args.plot_every)),
         moving_avg_window=args.moving_avg,
+        enable_csv=bool(getattr(args, "log_csv", False)),
+        enable_plot=int(getattr(args, "plot_every", 0)) > 0,
     )
-    diag_cb = DiagnosticCallback(report_every=500, flat_actions=(algo == "sac"))
-    callbacks = CallbackList([dashboard_cb, diag_cb])
+    callbacks_list: list[BaseCallback] = [dashboard_cb]
+    diag_every = int(getattr(args, "diag_report_every", 0))
+    if diag_every > 0:
+        callbacks_list.append(DiagnosticCallback(report_every=diag_every, flat_actions=(algo == "sac")))
+    callbacks = CallbackList(callbacks_list)
 
     interrupted = False
     try:

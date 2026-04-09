@@ -98,7 +98,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--vf-coef", type=float, default=0.5)
 
-    p.add_argument("--plot-every", type=int, default=5)
+    p.add_argument("--plot-every", type=int, default=0)
+    p.add_argument("--log-csv", action="store_true", help="Write step/episode CSV logs")
+    p.add_argument("--diag-report-every", type=int, default=0, help="Diagnostic print period in steps (0 disables)")
     p.add_argument("--moving-avg", type=int, default=300)
 
     p.add_argument("--death-penalty", type=float, default=1.0)
@@ -111,7 +113,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def make_env(max_episode_steps: int, spec, move_mouse_to_goal: bool = False) -> StageGoalEnv:
+def make_env(max_episode_steps: int, spec, move_mouse_to_goal: bool = False) -> gym.Env:
     config = EnvConfig(
         terminate_on_stock_out=False,
         max_episode_steps=max_episode_steps,
@@ -140,7 +142,7 @@ def main() -> None:
         terminate_on_death=not args.no_terminate_on_death,
     )
 
-    if args.phase == "locomotion":
+    if args.phase.startswith("locomotion"):
         if not _has_cli_flag("--learning-rate"):
             args.learning_rate = 3e-4
         if not _has_cli_flag("--n-steps"):

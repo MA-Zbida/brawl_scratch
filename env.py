@@ -727,7 +727,13 @@ class BrawlDeepEnv(gym.Env):
 
         obs = self._get_obs()
         self._last_obs = obs.copy()
-        info = {"detections": detections}
+        info = {
+            "detections": detections,
+            "player_exists": float(1.0 if self.memory.player.exists else 0.0),
+            "player_respawn_timer": float(self.memory.player_respawn_timer),
+            "self_stock_lost_step": 0.0,
+            "op_stock_lost_step": 0.0,
+        }
         return obs, info
 
     def step(self, action: Sequence[int]):

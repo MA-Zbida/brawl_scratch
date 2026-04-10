@@ -203,6 +203,15 @@ class PyDirectInputController:
         except Exception as exc:
             raise RuntimeError("pydirectinput is required for PyDirectInputController") from exc
         self._pydirectinput = pydirectinput
+        # Add explicit numpad aliases so actions can target numpad-only keys.
+        mapping = getattr(self._pydirectinput, "KEYBOARD_MAPPING", None)
+        if isinstance(mapping, dict):
+            mapping.setdefault("num4", 0x4B)
+            mapping.setdefault("num5", 0x4C)
+            mapping.setdefault("num6", 0x4D)
+            mapping.setdefault("num_4", mapping["num4"])
+            mapping.setdefault("num_5", mapping["num5"])
+            mapping.setdefault("num_6", mapping["num6"])
         if hasattr(self._pydirectinput, "PAUSE"):
             self._pydirectinput.PAUSE = 0
         if hasattr(self._pydirectinput, "FAILSAFE"):
@@ -260,6 +269,7 @@ class PixelStocksHealthProvider:
         op_stocks: float = 3.0,
         stock_confirm_frames: int = 2,
         stock_event_cooldown_sec: float = 0.8,
+        stock_event_lock_sec: float = 4.7,
     ):
         self.ui_regions = ui_regions
         self.max_health = max_health
@@ -272,19 +282,25 @@ class PixelStocksHealthProvider:
         self._stable_stock_frames = 0
         self._stock_confirm_frames = stock_confirm_frames
         self._stock_event_cooldown_sec = stock_event_cooldown_sec
+        self._stock_event_lock_sec = float(max(0.0, stock_event_lock_sec))
         self._last_stock_event_time = 0.0
         self._neutral_frames = 0
         self._armed_for_event = True
+        self._self_event_lock_until = 0.0
+        self._op_event_lock_until = 0.0
 
-    def reset(self) -> None:
-        self.self_stocks_left = float(self._initial_self_stocks)
-        self.op_stocks_left = float(self._initial_op_stocks)
+    def reset(self, preserve_match_state: bool = True) -> None:
+        if not bool(preserve_match_state):
+            self.self_stocks_left = float(self._initial_self_stocks)
+            self.op_stocks_left = float(self._initial_op_stocks)
         self._last_stock_signal = 0
         self._stable_stock_signal = 0
         self._stable_stock_frames = 0
         self._last_stock_event_time = 0.0
         self._neutral_frames = 0
         self._armed_for_event = True
+        # Keep per-side stock event locks across env resets to avoid
+        # re-counting the same red/cyan flash when episodes restart quickly.
 
     def _read_pixel(self, frame, coord: Tuple[int, int]) -> Optional[np.ndarray]:
         if frame is None:
@@ -323,11 +339,19 @@ class PixelStocksHealthProvider:
                 cooldown_ready = (now - self._last_stock_event_time) >= float(self._stock_event_cooldown_sec)
 
                 if stable_confirmed and stock_signal != 0 and stock_signal != self._last_stock_signal and cooldown_ready and self._armed_for_event:
+                    accepted = False
                     if stock_signal < 0:
-                        self.self_stocks_left = max(0.0, self.self_stocks_left - 1.0)
+                        if now >= self._self_event_lock_until:
+                            self.self_stocks_left = max(0.0, self.self_stocks_left - 1.0)
+                            self._self_event_lock_until = now + self._stock_event_lock_sec
+                            accepted = True
                     else:
-                        self.op_stocks_left = max(0.0, self.op_stocks_left - 1.0)
-                    self._last_stock_event_time = now
+                        if now >= self._op_event_lock_until:
+                            self.op_stocks_left = max(0.0, self.op_stocks_left - 1.0)
+                            self._op_event_lock_until = now + self._stock_event_lock_sec
+                            accepted = True
+                    if accepted:
+                        self._last_stock_event_time = now
                     self._last_stock_signal = stock_signal
                     self._armed_for_event = False
                 if stock_signal == 0:
@@ -371,10 +395,11 @@ class EnvConfig:
     yolo_verbose: bool = False
     yolo_infer_width: int = 640
     yolo_infer_height: int = 360
+    yolo_obs_blend_alpha: float = 0.85
     use_tracker_layer: bool = True
-    tracker_max_missing: int = 8
+    tracker_max_missing: int = 5
     tracker_iou_threshold: float = 0.1
-    tracker_smooth_alpha: float = 0.6
+    tracker_smooth_alpha: float = 0.75
     temporal_stack_size: int = 1  # 1 = single frame (LSTM handles time)
     temporal_offsets: tuple[int, ...] = (0,)  # only t-0; LSTM does the rest
     profile_step_timing: bool = False
@@ -433,7 +458,7 @@ class BrawlDeepEnv(gym.Env):
                 smooth_alpha=self.config.tracker_smooth_alpha,
             )
 
-        self.memory = Memory()
+        self.memory = Memory(yolo_blend_alpha=self.config.yolo_obs_blend_alpha)
         self._last_step_time = time.perf_counter()
         self._step_count = 0
         self._last_raw_detections: list = []
@@ -442,7 +467,7 @@ class BrawlDeepEnv(gym.Env):
         self._step_time_count = 0
         self._action_repeat_remaining = 0
         self._repeated_action = (0, 0, 0, 0)
-        self._tap_latch_remaining = {"space": 0, "e": 0, "h": 0, "k": 0, "j": 0}
+        self._tap_latch_remaining = {"space": 0, "e": 0, "num4": 0, "num6": 0, "num5": 0}
         self._last_obs: Optional[np.ndarray] = None  # cached for None-frame fallback
         self._last_movement: int = 3     # last movement index (3 = idle)
         self._movement_hold_count: int = 0  # consecutive steps with same movement
@@ -528,11 +553,11 @@ class BrawlDeepEnv(gym.Env):
             tap_keys.add("e")
 
         if attack == 1:
-            tap_keys.add("h")
+            tap_keys.add("num4")
         elif attack == 2:
-            tap_keys.add("k")
+            tap_keys.add("num6")
         elif attack == 3:
-            tap_keys.add("j")
+            tap_keys.add("num5")
 
         latch_steps = max(1, int(self.config.tap_latch_steps))
         for key in tap_keys:
@@ -691,13 +716,54 @@ class BrawlDeepEnv(gym.Env):
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
         self.input_controller.reset()
-        # Preserve weapon state across resets (training mode: game doesn't restart)
-        prev_weapon_state = getattr(self, "memory", None) and self.memory.player.weapon_state or 0.0
-        self.memory = Memory()
+        # Preserve match-state continuity across episode resets (training mode: game doesn't restart).
+        prev_mem = getattr(self, "memory", None)
+        prev_weapon_state = prev_mem.player.weapon_state if prev_mem is not None else 0.0
+        prev_self_stocks = prev_mem.self_stocks_left if prev_mem is not None else 3.0
+        prev_op_stocks = prev_mem.op_stocks_left if prev_mem is not None else 3.0
+        prev_self_health = prev_mem.self_health if prev_mem is not None else 351.0
+        prev_op_health = prev_mem.op_health if prev_mem is not None else 351.0
+        prev_player_respawn_timer = prev_mem.player_respawn_timer if prev_mem is not None else 0.0
+        prev_opponent_respawn_timer = prev_mem.opponent_respawn_timer if prev_mem is not None else 0.0
+        prev_self_stock_lost = (
+            max(0.0, float(prev_mem.prev_self_stocks_left - prev_mem.self_stocks_left))
+            if prev_mem is not None
+            else 0.0
+        )
+
+        # If previous episode ended around a death/respawn transition, the agent must respawn unarmed.
+        if prev_player_respawn_timer > 1e-6 or prev_self_stock_lost > 0.0:
+            prev_weapon_state = 0.0
+
+        self.memory = Memory(yolo_blend_alpha=self.config.yolo_obs_blend_alpha)
         self.memory.player.weapon_state = prev_weapon_state
+        self.memory.self_stocks_left = float(prev_self_stocks)
+        self.memory.prev_self_stocks_left = float(prev_self_stocks)
+        self.memory.op_stocks_left = float(prev_op_stocks)
+        self.memory.prev_op_stocks_left = float(prev_op_stocks)
+        self.memory.self_health = float(prev_self_health)
+        self.memory.prev_self_health = float(prev_self_health)
+        self.memory.op_health = float(prev_op_health)
+        self.memory.prev_op_health = float(prev_op_health)
+        self.memory.player.damage_percent = max(0.0, min(1.0, (self.memory.max_health - self.memory.self_health) / self.memory.max_health))
+        self.memory.opponent.damage_percent = max(0.0, min(1.0, (self.memory.max_health - self.memory.op_health) / self.memory.max_health))
+        self.memory.player.health = self.memory.self_health
+        self.memory.opponent.health = self.memory.op_health
+        self.memory.player.stocks = self.memory.self_stocks_left
+        self.memory.opponent.stocks = self.memory.op_stocks_left
+        self.memory.player_respawn_timer = float(prev_player_respawn_timer)
+        self.memory.opponent_respawn_timer = float(prev_opponent_respawn_timer)
+        self.memory.self_delta_damage = 0.0
+        self.memory.op_delta_damage = 0.0
+        self.memory.just_hit_opponent = 0.0
+        self.memory.just_got_hit = 0.0
+
         reset_provider_fn = getattr(self.stocks_health_provider, "reset", None)
         if callable(reset_provider_fn):
-            reset_provider_fn()
+            try:
+                reset_provider_fn(preserve_match_state=True)
+            except TypeError:
+                reset_provider_fn()
         reset_reward_fn = getattr(self.reward_provider, "reset", None)
         if callable(reset_reward_fn):
             reset_reward_fn()
@@ -709,7 +775,7 @@ class BrawlDeepEnv(gym.Env):
         self._step_time_count = 0
         self._action_repeat_remaining = 0
         self._repeated_action = (0, 0, 0, 0)
-        self._tap_latch_remaining = {"space": 0, "e": 0, "h": 0, "k": 0, "j": 0}
+        self._tap_latch_remaining = {"space": 0, "e": 0, "num4": 0, "num6": 0, "num5": 0}
         self._last_movement = 3
         self._movement_hold_count = 0
         self._state_history.clear()
@@ -723,6 +789,42 @@ class BrawlDeepEnv(gym.Env):
         reset_dt = max(1e-6, now - self._last_step_time) if self._last_step_time > 0 else 1.0 / 47.0
         self.memory.update_from_detections(detections, dt=reset_dt)
         self._last_step_time = now
+
+        # Re-sync health/stocks from UI on reset without introducing artificial stock-loss events.
+        if self.stocks_health_provider is not None:
+            self_stocks_left, op_stocks_left, self_health, op_health = self.stocks_health_provider(self._last_frame, detections)
+            if self_stocks_left is not None:
+                v = max(0.0, min(float(self_stocks_left), self.memory.max_stocks))
+                self.memory.self_stocks_left = v
+                self.memory.prev_self_stocks_left = v
+                self.memory.player.stocks = v
+                if v + 1e-6 < float(prev_self_stocks):
+                    self.memory.player.weapon_state = 0.0
+            if op_stocks_left is not None:
+                v = max(0.0, min(float(op_stocks_left), self.memory.max_stocks))
+                self.memory.op_stocks_left = v
+                self.memory.prev_op_stocks_left = v
+                self.memory.opponent.stocks = v
+            if self_health is not None:
+                h = max(0.0, min(float(self_health), self.memory.max_health))
+                self.memory.self_health = h
+                self.memory.prev_self_health = h
+                self.memory.player.health = h
+                self.memory.player.damage_percent = max(0.0, min(1.0, (self.memory.max_health - h) / self.memory.max_health))
+            if op_health is not None:
+                h = max(0.0, min(float(op_health), self.memory.max_health))
+                self.memory.op_health = h
+                self.memory.prev_op_health = h
+                self.memory.opponent.health = h
+                self.memory.opponent.damage_percent = max(0.0, min(1.0, (self.memory.max_health - h) / self.memory.max_health))
+            self.memory.self_delta_damage = 0.0
+            self.memory.op_delta_damage = 0.0
+            self.memory.just_hit_opponent = 0.0
+            self.memory.just_got_hit = 0.0
+
+        if self.memory.player_respawn_timer > 1e-6:
+            self.memory.player.weapon_state = 0.0
+
         self.reward_provider.update_memory(self._last_frame, self.memory)
 
         obs = self._get_obs()

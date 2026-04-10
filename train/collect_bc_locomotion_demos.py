@@ -13,16 +13,16 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from env import BrawlDeepEnv, EnvConfig, NullInputController
+from env import BrawlDeepEnv, EnvConfig, NullInputController, PyDirectInputController
 from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Collect expert demos for BC (all curriculum phases)")
-    p.add_argument("--phase", type=str, default="locomotion", choices=list(PHASES))
+    p.add_argument("--phase", type=str, default="weapon_control", choices=list(PHASES))
     p.add_argument("--episodes", type=int, default=30)
-    p.add_argument("--max-episode-steps", type=int, default=1200)
+    p.add_argument("--max-episode-steps", type=int, default=100)
     p.add_argument("--min-goal-duration", type=int, default=120)
     p.add_argument("--max-goal-duration", type=int, default=220)
     p.add_argument("--delay", type=float, default=3.0)
@@ -30,10 +30,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--move-mouse-to-goal", action="store_true", default=True)
     p.add_argument("--no-move-mouse-to-goal", dest="move_mouse_to_goal", action="store_false")
     p.add_argument("--death-penalty", type=float, default=0.0)
+    p.add_argument("--force-drop-on-episode-end", action="store_true", default=True)
+    p.add_argument("--no-force-drop-on-episode-end", dest="force_drop_on_episode_end", action="store_false")
     return p.parse_args()
 
 
-def read_action_from_keyboard(allow_attack: bool) -> np.ndarray:
+def read_action_from_keyboard(allowed_attack_values: set[int]) -> np.ndarray:
     movement = 3
     if keyboard.is_pressed("a"):
         movement = 0
@@ -46,13 +48,13 @@ def read_action_from_keyboard(allow_attack: bool) -> np.ndarray:
     dodge = 1 if keyboard.is_pressed("e") else 0
 
     attack = 0
-    if allow_attack:
-        if keyboard.is_pressed("h"):
-            attack = 1
-        elif keyboard.is_pressed("k"):
-            attack = 2
-        elif keyboard.is_pressed("j"):
-            attack = 3
+    # keyboard uses scan codes: 75/76/77 correspond to numpad 4/5/6.
+    if 1 in allowed_attack_values and keyboard.is_pressed(75):
+        attack = 1
+    elif 2 in allowed_attack_values and keyboard.is_pressed(77):
+        attack = 2
+    elif 3 in allowed_attack_values and keyboard.is_pressed(76):
+        attack = 3
 
     # Match env sanitize behavior: no simultaneous dodge+attack.
     if dodge == 1 and attack != 0:
@@ -79,7 +81,7 @@ def _build_env(args: argparse.Namespace) -> StageGoalEnv:
     config = EnvConfig(
         terminate_on_stock_out=False,
         max_episode_steps=int(args.max_episode_steps),
-        yolo_infer_every_n_steps=3,
+        yolo_infer_every_n_steps=1,
         action_repeat_steps=1,
         action_repeat_min_steps=1,
         action_repeat_max_steps=1,
@@ -119,6 +121,55 @@ def _set_mouse_to_goal(env: StageGoalEnv, goal_target: np.ndarray) -> None:
     user32.SetCursorPos(x, y)
 
 
+def _force_drop_weapon_num5_key(drop_controller: PyDirectInputController | None = None) -> bool:
+    """Press numpad 5 once to force drop between episodes.
+
+    Prefer DirectInput (same path used by env attacks), then keyboard fallback.
+    """
+    if drop_controller is not None:
+        try:
+            # Retry a couple of times to survive occasional missed synthetic inputs.
+            for _ in range(3):
+                drop_controller.tap({"num5"})
+                time.sleep(0.02)
+            return True
+        except Exception:
+            pass
+
+    # keyboard scan code fallback for numpad 5.
+    try:
+        keyboard.press(76)
+        time.sleep(0.03)
+        keyboard.release(76)
+        return True
+    except Exception:
+        pass
+
+    for key_name in ("num_5", "num 5", "num5"):
+        try:
+            keyboard.press_and_release(key_name)
+            return True
+        except Exception:
+            continue
+
+    return False
+
+
+def _phase_uses_player_xy_goal(spec) -> bool:
+    feature_names = list(spec.feature_names or [])
+    if not feature_names:
+        return False
+
+    idx = {name: i for i, name in enumerate(feature_names)}
+    x_idx = idx.get("player_x")
+    y_idx = idx.get("player_y")
+    if x_idx is None or y_idx is None:
+        return False
+
+    mask = np.asarray(spec.mask, dtype=np.float32).reshape(-1)
+    return bool(mask[x_idx] > 0.0 or mask[y_idx] > 0.0)
+
+
 def _resolve_output_path(args: argparse.Namespace) -> Path:
     if args.output.strip():
         out = Path(args.output)
@@ -133,18 +184,46 @@ def main() -> None:
     out_path = _resolve_output_path(args)
 
     env = _build_env(args)
-    allow_attack = args.phase in {"damage_static", "damage_dynamic"}
+    drop_controller: PyDirectInputController | None = None
+    drop_warning_printed = False
+    if args.force_drop_on_episode_end:
+        try:
+            drop_controller = PyDirectInputController()
+        except Exception as exc:
+            print(f"Force-drop warning: PyDirectInput unavailable ({exc}); using keyboard fallback.")
+
+    spec = env.stage_spec
+    if spec.disable_attack:
+        allowed_attack_values = {0}
+    elif spec.allowed_attack_actions is None:
+        allowed_attack_values = {0, 1, 2, 3}
+    else:
+        allowed_attack_values = {int(v) for v in spec.allowed_attack_actions if 0 <= int(v) <= 3}
+        if not allowed_attack_values:
+            allowed_attack_values = {0}
+        allowed_attack_values.add(0)
+
+    mouse_guidance_enabled = bool(args.move_mouse_to_goal)
+    if mouse_guidance_enabled and not _phase_uses_player_xy_goal(spec):
+        mouse_guidance_enabled = False
+
+    attack_keys_map = {1: "NUM4", 2: "NUM6", 3: "NUM5"}
+    active_attack_keys = [attack_keys_map[v] for v in sorted(allowed_attack_values) if v in attack_keys_map]
 
     print("=" * 68)
     print(f"BC DEMO COLLECTION — {args.phase.upper()}")
     print("Input mode: manual only (env key injection disabled)")
-    if allow_attack:
-        print("Controls: A/D/S, Space, E, H/K/J")
+    if active_attack_keys:
+        print(f"Controls: A/D/S, Space, E, {'/'.join(active_attack_keys)}")
     else:
         print("Controls: A/D/S, Space, E (attacks disabled by phase)")
     print(f"Episodes: {args.episodes} | Output: {out_path}")
-    if args.move_mouse_to_goal:
+    if mouse_guidance_enabled:
         print("Mouse guidance: enabled (cursor moves to target_x,target_y)")
+    elif args.move_mouse_to_goal:
+        print("Mouse guidance: disabled (phase goals are relational/non-XY)")
+    if args.force_drop_on_episode_end:
+        print("Episode end action: force drop weapon via NUM_5")
     print("Press Ctrl+C to stop and save partial data.")
     print("=" * 68)
     print(f"Starting in {args.delay:.1f}s...")
@@ -154,6 +233,8 @@ def main() -> None:
     act_buf: list[np.ndarray] = []
     done_buf: list[bool] = []
     goal_xy_buf: list[np.ndarray] = []
+    goal_target_buf: list[np.ndarray] = []
+    goal_mask_buf: list[np.ndarray] = []
 
     step_total = 0
 
@@ -164,23 +245,28 @@ def main() -> None:
             ep_steps = 0
 
             goal_target = np.asarray(info.get("goal_target", np.zeros(2, dtype=np.float32)), dtype=np.float32)
-            if args.move_mouse_to_goal:
+            goal_mask = np.asarray(info.get("goal_mask", np.zeros_like(goal_target)), dtype=np.float32)
+            if mouse_guidance_enabled:
                 _set_mouse_to_goal(env, goal_target)
 
             while not done:
-                action = read_action_from_keyboard(allow_attack=allow_attack)
+                action = read_action_from_keyboard(allowed_attack_values=allowed_attack_values)
+                action_seq = tuple(int(v) for v in action.tolist())
 
                 obs_buf.append(np.asarray(obs, dtype=np.float32).copy())
-                act_buf.append(np.asarray(action, dtype=np.int64).copy())
+                act_buf.append(np.asarray(action_seq, dtype=np.int64).copy())
                 goal_xy_buf.append(np.asarray(goal_target[:2], dtype=np.float32).copy())
+                goal_target_buf.append(np.asarray(goal_target, dtype=np.float32).copy())
+                goal_mask_buf.append(np.asarray(goal_mask, dtype=np.float32).copy())
 
-                next_obs, _reward, terminated, truncated, info = env.step(action)
+                next_obs, _reward, terminated, truncated, info = env.step(action_seq)
                 done = bool(terminated or truncated)
                 done_buf.append(done)
 
                 if bool(info.get("goal_new_sampled", False)):
                     goal_target = np.asarray(info.get("goal_target", goal_target), dtype=np.float32)
-                    if args.move_mouse_to_goal:
+                    goal_mask = np.asarray(info.get("goal_mask", goal_mask), dtype=np.float32)
+                    if mouse_guidance_enabled:
                         _set_mouse_to_goal(env, goal_target)
 
                 obs = next_obs
@@ -197,20 +283,55 @@ def main() -> None:
                     break
 
             print(f"Episode {ep}/{args.episodes} collected steps={ep_steps}")
+            if args.force_drop_on_episode_end:
+                dropped = _force_drop_weapon_num5_key(drop_controller=drop_controller)
+                if not dropped and not drop_warning_printed:
+                    print("Force-drop warning: could not send NUM_5 synthetic key press.")
+                    drop_warning_printed = True
 
     except KeyboardInterrupt:
         print("\nInterrupted by user. Saving partial dataset...")
     finally:
+        if drop_controller is not None:
+            try:
+                drop_controller.reset()
+            except Exception:
+                pass
         env.close()
 
     if len(obs_buf) == 0:
         print("No samples collected; nothing to save.")
         return
 
+    lengths = {
+        "obs": len(obs_buf),
+        "actions": len(act_buf),
+        "dones": len(done_buf),
+        "goal_xy": len(goal_xy_buf),
+        "goal_target": len(goal_target_buf),
+        "goal_mask": len(goal_mask_buf),
+    }
+    aligned_n = min(lengths.values())
+    if aligned_n <= 0:
+        print("No aligned samples to save after buffer consistency check.")
+        return
+    if any(v != aligned_n for v in lengths.values()):
+        print(f"Buffer mismatch detected ({lengths}); trimming all arrays to {aligned_n} samples.")
+        obs_buf = obs_buf[:aligned_n]
+        act_buf = act_buf[:aligned_n]
+        done_buf = done_buf[:aligned_n]
+        goal_xy_buf = goal_xy_buf[:aligned_n]
+        goal_target_buf = goal_target_buf[:aligned_n]
+        goal_mask_buf = goal_mask_buf[:aligned_n]
+        if len(done_buf) > 0:
+            done_buf[-1] = True
+
     obs_arr = np.stack(obs_buf).astype(np.float32)
     act_arr = np.stack(act_buf).astype(np.int64)
     done_arr = np.asarray(done_buf, dtype=bool)
     goal_xy_arr = np.stack(goal_xy_buf).astype(np.float32)
+    goal_target_arr = np.stack(goal_target_buf).astype(np.float32)
+    goal_mask_arr = np.stack(goal_mask_buf).astype(np.float32)
 
     np.savez_compressed(
         str(out_path),
@@ -218,6 +339,8 @@ def main() -> None:
         actions=act_arr,
         dones=done_arr,
         goal_xy=goal_xy_arr,
+        goal_target=goal_target_arr,
+        goal_mask=goal_mask_arr,
         phase=np.asarray([args.phase]),
     )
 

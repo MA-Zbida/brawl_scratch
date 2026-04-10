@@ -15,6 +15,7 @@ CURRICULUM_GOAL_FEATURES: list[str] = [
     "weapon_dy",
     "in_strike_range",
     "rel_distance",
+    "facing_opponent",
     "frame_advantage_estimate",
     "opponent_damage_pct",
     "player_is_offstage",
@@ -42,6 +43,7 @@ def extract_curriculum_goal_features(obs: np.ndarray) -> np.ndarray:
             _norm01(StateSpec.get(obs, "weapon_dy"), -1.0, 1.0),
             float(np.clip(StateSpec.get(obs, "in_strike_range"), 0.0, 1.0)),
             _norm01(StateSpec.get(obs, "rel_distance"), 0.0, 2.0),
+            _norm01(StateSpec.get(obs, "facing_opponent"), -1.0, 1.0),
             _norm01(StateSpec.get(obs, "frame_advantage_estimate"), -1.0, 1.0),
             float(np.clip(StateSpec.get(obs, "opponent_damage_pct"), 0.0, 1.0)),
             float(np.clip(StateSpec.get(obs, "player_is_offstage"), 0.0, 1.0)),
@@ -54,6 +56,7 @@ def default_goal_target() -> np.ndarray:
     target = np.zeros((GOAL_DIM,), dtype=np.float32)
     target[GOAL_INDEX["weapon_dx"]] = 0.5
     target[GOAL_INDEX["weapon_dy"]] = 0.5
+    target[GOAL_INDEX["facing_opponent"]] = 0.5
     target[GOAL_INDEX["frame_advantage_estimate"]] = 0.5
     return target
 

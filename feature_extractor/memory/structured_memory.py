@@ -71,7 +71,7 @@ class Physics:
 
 
 class Memory:
-    def __init__(self):
+    def __init__(self, yolo_blend_alpha: float = 0.85):
         self.max_health = 351.0
         self.max_stocks = 3.0
         self.min_xy = 0.0
@@ -85,7 +85,7 @@ class Memory:
 
         self._obs_buffer = np.zeros((StateSpec.dim(),), dtype=np.float32)
 
-        self._alpha_blend: float = 0.7   # YOLO weight in observation blend
+        self._alpha_blend: float = float(np.clip(yolo_blend_alpha, 0.0, 1.0))
 
         self._edge_x_radius = 0.04
         self._edge_y_tolerance = 0.03
@@ -129,6 +129,10 @@ class Memory:
         self.opponent_respawn_timer: float = 0.0
 
         self._prev_action = np.zeros(4, dtype=np.float32)
+
+    def set_yolo_blend_alpha(self, alpha: float) -> None:
+        """Set fusion weight for YOLO position vs physics fallback."""
+        self._alpha_blend = float(np.clip(alpha, 0.0, 1.0))
 
     def _clamp_position(self, x: float, y: float) -> Tuple[float, float]:
         return (

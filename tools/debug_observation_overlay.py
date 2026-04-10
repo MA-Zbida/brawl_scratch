@@ -38,7 +38,8 @@ from feature_extractor.memory.state_spec import StateSpec
 MOVEMENT_KEYS = {"a": 0, "d": 1, "s": 2}
 JUMP_KEY = "space"
 DODGE_KEY = "e"
-ATTACK_KEYS = {"h": 1, "k": 2, "j": 3}
+# keyboard scan codes for numpad 4/5/6.
+ATTACK_KEYS = {75: 1, 77: 2, 76: 3}
 
 
 def parse_args() -> argparse.Namespace:

@@ -98,7 +98,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--vf-coef", type=float, default=0.5)
 
-    p.add_argument("--plot-every", type=int, default=0)
+    p.add_argument("--plot-every", type=int, default=2500)
     p.add_argument("--log-csv", action="store_true", help="Write step/episode CSV logs")
     p.add_argument("--diag-report-every", type=int, default=0, help="Diagnostic print period in steps (0 disables)")
     p.add_argument("--moving-avg", type=int, default=300)
@@ -106,6 +106,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--death-penalty", type=float, default=1.0)
     p.add_argument("--no-terminate-on-death", action="store_true")
     p.add_argument("--move-mouse-to-goal", action="store_true", default=False)
+    p.add_argument("--yolo-every", type=int, default=2, help="Run YOLO every N env steps (1 = max YOLO authority)")
+    p.add_argument("--yolo-blend-alpha", type=float, default=0.90, help="YOLO fusion weight in memory update [0,1]")
+    p.add_argument("--tracker-max-missing", type=int, default=2, help="Tracker persistence in missed frames")
+    p.add_argument("--tracker-smooth-alpha", type=float, default=0.85, help="Tracker smoothing alpha [0,1], higher = closer to YOLO")
 
     # Keep compatibility with train_stage_model interface.
     p.add_argument("--algo", type=str, default="ppo", choices=["ppo"])
@@ -113,11 +117,22 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def make_env(max_episode_steps: int, spec, move_mouse_to_goal: bool = False) -> gym.Env:
+def make_env(
+    max_episode_steps: int,
+    spec,
+    move_mouse_to_goal: bool = False,
+    yolo_every: int = 2,
+    yolo_blend_alpha: float = 0.90,
+    tracker_max_missing: int = 4,
+    tracker_smooth_alpha: float = 0.75,
+) -> gym.Env:
     config = EnvConfig(
         terminate_on_stock_out=False,
         max_episode_steps=max_episode_steps,
-        yolo_infer_every_n_steps=3,
+        yolo_infer_every_n_steps=max(1, int(yolo_every)),
+        yolo_obs_blend_alpha=float(np.clip(yolo_blend_alpha, 0.0, 1.0)),
+        tracker_max_missing=max(1, int(tracker_max_missing)),
+        tracker_smooth_alpha=float(np.clip(tracker_smooth_alpha, 0.0, 1.0)),
         action_repeat_steps=1,
         action_repeat_min_steps=1,
         action_repeat_max_steps=1,
@@ -157,7 +172,15 @@ def main() -> None:
 
     train_stage_model(
         args=args,
-        make_env=lambda: make_env(args.max_episode_steps, spec, move_mouse_to_goal=args.move_mouse_to_goal),
+        make_env=lambda: make_env(
+            args.max_episode_steps,
+            spec,
+            move_mouse_to_goal=args.move_mouse_to_goal,
+            yolo_every=args.yolo_every,
+            yolo_blend_alpha=args.yolo_blend_alpha,
+            tracker_max_missing=args.tracker_max_missing,
+            tracker_smooth_alpha=args.tracker_smooth_alpha,
+        ),
         stage_spec=spec,
     )
 

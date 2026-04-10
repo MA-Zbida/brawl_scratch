@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env import BrawlDeepEnv, EnvConfig
 from feature_extractor.film_extractor import StageGoalFiLMExtractor
+from feature_extractor.memory.state_spec import StateSpec
 from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv
 from hierarchical.goals import extract_goal_features
@@ -22,8 +23,10 @@ from hierarchical.goals import extract_goal_features
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Behavioral cloning pretraining for curriculum PPO (all phases)")
-    p.add_argument("--phase", type=str, default="locomotion", choices=list(PHASES))
+    p.add_argument("--phase", type=str, default="locomotion", choices=[*list(PHASES), "auto"])
     p.add_argument("--demos", type=str, default="")
+    p.add_argument("--resume", type=str, default="",
+                   help="Optional PPO .zip checkpoint to initialize BC pretraining from")
     p.add_argument("--epochs", type=int, default=15)
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--learning-rate", type=float, default=2e-4)
@@ -48,42 +51,111 @@ def _build_env(max_episode_steps: int, phase: str) -> StageGoalEnv:
     config = EnvConfig(
         terminate_on_stock_out=False,
         max_episode_steps=max_episode_steps,
-        yolo_infer_every_n_steps=3,
+        yolo_infer_every_n_steps=1,
         action_repeat_steps=1,
         action_repeat_min_steps=1,
         action_repeat_max_steps=1,
-        tap_latch_steps=1,
+        tap_latch_steps=1
     )
     base = BrawlDeepEnv(config=config)
     return StageGoalEnv(base, spec)
 
 
-def _resolve_paths(args: argparse.Namespace) -> tuple[str, str, str]:
+def _resolve_paths(args: argparse.Namespace) -> tuple[str, str]:
     demos = args.demos.strip() if args.demos else ""
     output = args.output.strip() if args.output else ""
-    vecn = args.vecnorm_output.strip() if args.vecnorm_output else ""
+    phase_for_default_paths = str(args.phase).strip().lower()
+    if phase_for_default_paths == "auto":
+        phase_for_default_paths = "locomotion"
 
     if not demos:
-        demos = f"train/models/{args.phase}_demos.npz"
+        demos = f"train/models/{phase_for_default_paths}_demos.npz"
     if not output:
-        output = f"train/models/llc_{args.phase}_bc_init.zip"
-    if not vecn:
-        vecn = f"train/models/llc_{args.phase}_bc_init.vecnormalize.pkl"
-    return demos, output, vecn
+        output = f"train/models/llc_{phase_for_default_paths}_bc_init.zip"
+    return demos, output
 
 
-def _load_dataset(path: str, expected_phase: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _phases_are_equivalent(phase_a: str, phase_b: str) -> bool:
+    if str(phase_a) == str(phase_b):
+        return True
+    try:
+        spec_a = build_phase_spec(str(phase_a), death_penalty=1.0, terminate_on_death=True)
+        spec_b = build_phase_spec(str(phase_b), death_penalty=1.0, terminate_on_death=True)
+        return str(spec_a.name) == str(spec_b.name)
+    except Exception:
+        return False
+
+
+def _align_demo_lengths(
+    obs: np.ndarray,
+    actions: np.ndarray,
+    dones: np.ndarray,
+    *,
+    path: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n_obs = int(obs.shape[0])
+    n_actions = int(actions.shape[0])
+    n_dones = int(dones.shape[0])
+
+    if n_obs == n_actions == n_dones:
+        return obs, actions, dones
+
+    # Keep obs/actions aligned first.
+    n_pair = min(n_obs, n_actions)
+    if n_pair <= 0:
+        raise ValueError(f"Demo file has no usable samples after alignment: {path}")
+    obs = obs[:n_pair]
+    actions = actions[:n_pair]
+
+    # Legacy/partial collections can miss the last done flag by 1.
+    if n_dones < n_pair:
+        pad = n_pair - n_dones
+        if pad <= 8:
+            dones = np.concatenate([dones, np.zeros((pad,), dtype=bool)], axis=0)
+            dones[-1] = True
+            print(
+                f"[BC pretrain] WARNING: repaired dones length in {path}: "
+                f"obs={n_obs}, actions={n_actions}, dones={n_dones} -> padded {pad} and set final done=True"
+            )
+        else:
+            obs = obs[:n_dones]
+            actions = actions[:n_dones]
+            print(
+                f"[BC pretrain] WARNING: large length mismatch in {path}: "
+                f"obs={n_obs}, actions={n_actions}, dones={n_dones} -> truncated obs/actions to dones length"
+            )
+    elif n_dones > n_pair:
+        dones = dones[:n_pair]
+        print(
+            f"[BC pretrain] WARNING: trimmed extra dones in {path}: "
+            f"obs={n_obs}, actions={n_actions}, dones={n_dones}"
+        )
+
+    if dones.size > 0 and not bool(dones[-1]):
+        dones = dones.copy()
+        dones[-1] = True
+
+    if not (obs.shape[0] == actions.shape[0] == dones.shape[0]):
+        raise ValueError(
+            f"Could not align demo lengths in {path}: obs={obs.shape[0]} actions={actions.shape[0]} dones={dones.shape[0]}"
+        )
+
+    return obs, actions, dones
+
+
+def _load_dataset(path: str, expected_phase: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
     data = np.load(path)
     if "obs" not in data or "actions" not in data or "dones" not in data:
         raise ValueError("Demo file must contain 'obs', 'actions', and 'dones' arrays")
 
+    file_phase = ""
     if "phase" in data:
         phase_arr = np.asarray(data["phase"]).reshape(-1)
         if phase_arr.size > 0:
-            phase_value = str(phase_arr[0])
-            if phase_value != expected_phase:
+            file_phase = str(phase_arr[0]).strip()
+            if str(expected_phase).strip().lower() != "auto" and not _phases_are_equivalent(file_phase, expected_phase):
                 raise ValueError(
-                    f"Demo phase mismatch: file phase='{phase_value}', requested phase='{expected_phase}'"
+                    f"Demo phase mismatch: file phase='{file_phase}', requested phase='{expected_phase}'"
                 )
 
     obs = np.asarray(data["obs"], dtype=np.float32)
@@ -95,9 +167,16 @@ def _load_dataset(path: str, expected_phase: str) -> tuple[np.ndarray, np.ndarra
         raise ValueError(f"Expected actions shape (N,4), got {actions.shape}")
     if dones.ndim != 1:
         raise ValueError(f"Expected dones shape (N,), got {dones.shape}")
-    if not (obs.shape[0] == actions.shape[0] == dones.shape[0]):
-        raise ValueError("obs/actions/dones length mismatch")
-    return obs, actions, dones
+
+    obs, actions, dones = _align_demo_lengths(obs, actions, dones, path=path)
+
+    expected = str(expected_phase).strip().lower()
+    if expected == "auto":
+        resolved_phase = file_phase if file_phase else "locomotion"
+    else:
+        resolved_phase = str(expected_phase)
+
+    return obs, actions, dones, resolved_phase
 
 
 def _parse_horizons(raw: str) -> list[int]:
@@ -210,15 +289,30 @@ def _build_goal_relabel_dataset(
 
 def main() -> None:
     args = parse_args()
-    demos_path, output_path, vecn_path = _resolve_paths(args)
+    demos_path, output_path = _resolve_paths(args)
+    if args.vecnorm_output:
+        print("[BC pretrain] vecnorm-output is ignored (no .pkl files are saved).")
 
-    obs_np, act_np, dones_np = _load_dataset(demos_path, expected_phase=args.phase)
+    obs_np, act_np, dones_np, resolved_phase = _load_dataset(demos_path, expected_phase=args.phase)
+    if str(args.phase).strip().lower() == "auto":
+        print(f"[BC pretrain] Auto phase detected from dataset: {resolved_phase}")
+        if not args.output.strip():
+            output_path = f"train/models/llc_{resolved_phase}_bc_init.zip"
+
     n_samples_raw = int(obs_np.shape[0])
 
     if n_samples_raw < 1000:
         print(f"WARNING: only {n_samples_raw} raw samples. BC may underfit.")
 
-    spec = build_phase_spec(args.phase, death_penalty=1.0, terminate_on_death=True)
+    spec = build_phase_spec(resolved_phase, death_penalty=1.0, terminate_on_death=True)
+    goal_dim = int(len(spec.feature_names)) if spec.feature_names is not None else int(np.asarray(spec.mask, dtype=np.float32).shape[0])
+    expected_obs_dim = int(StateSpec.dim() + (2 * goal_dim))
+    if int(obs_np.shape[1]) != expected_obs_dim:
+        raise ValueError(
+            f"Demo observation dim mismatch for phase='{resolved_phase}': file dim={obs_np.shape[1]}, "
+            f"expected dim={expected_obs_dim}. Recollect demos with current curriculum goals or use a matching checkpoint/schema."
+        )
+
     if args.goal_relabel:
         horizons = _parse_horizons(args.relabel_horizons)
         obs_np, act_np, episode_count, relabeled_count = _build_goal_relabel_dataset(
@@ -233,7 +327,7 @@ def main() -> None:
         print("=" * 68)
         print("GOAL RELABELING ENABLED")
         print(
-            f"phase={args.phase} episodes={episode_count} raw={n_samples_raw} "
+            f"phase={resolved_phase} episodes={episode_count} raw={n_samples_raw} "
             f"relabeled={relabeled_count} final={obs_np.shape[0]} "
             f"x{(obs_np.shape[0] / max(1, n_samples_raw)):.2f}"
         )
@@ -242,12 +336,12 @@ def main() -> None:
     else:
         print("=" * 68)
         print("GOAL RELABELING DISABLED")
-        print(f"phase={args.phase} samples={n_samples_raw}")
+        print(f"phase={resolved_phase} samples={n_samples_raw}")
         print("=" * 68)
 
     n_samples = int(obs_np.shape[0])
 
-    vec_base = VecMonitor(DummyVecEnv([lambda: _build_env(args.max_episode_steps, args.phase)]))
+    vec_base = VecMonitor(DummyVecEnv([lambda: _build_env(args.max_episode_steps, resolved_phase)]))
     vec_env = VecNormalize(vec_base, norm_obs=False, norm_reward=False, clip_obs=10.0)
 
     policy_kwargs = dict(
@@ -259,30 +353,55 @@ def main() -> None:
         net_arch=dict(pi=[128], vf=[128]),
     )
 
-    model = PPO(
-        "MlpPolicy",
-        vec_env,
-        learning_rate=float(args.learning_rate),
-        n_steps=2048,
-        batch_size=256,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.15,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        max_grad_norm=float(args.max_grad_norm),
-        seed=42,
-        policy_kwargs=policy_kwargs,
-        verbose=0,
-        device=args.device,
-    )
+    resume_path = str(args.resume).strip()
+    if resume_path:
+        print(f"[BC pretrain] Resuming policy from {resume_path}")
+        try:
+            model = PPO.load(
+                resume_path,
+                env=vec_env,
+                learning_rate=float(args.learning_rate),
+                n_steps=2048,
+                batch_size=256,
+                gamma=0.99,
+                gae_lambda=0.95,
+                clip_range=0.15,
+                ent_coef=0.01,
+                vf_coef=0.5,
+                max_grad_norm=float(args.max_grad_norm),
+                seed=42,
+                device=args.device,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not load resume checkpoint for BC pretrain. "
+                "Use a compatible PPO .zip (same action/observation schema) or run without --resume."
+            ) from exc
+    else:
+        model = PPO(
+            "MlpPolicy",
+            vec_env,
+            learning_rate=float(args.learning_rate),
+            n_steps=2048,
+            batch_size=256,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.15,
+            ent_coef=0.01,
+            vf_coef=0.5,
+            max_grad_norm=float(args.max_grad_norm),
+            seed=42,
+            policy_kwargs=policy_kwargs,
+            verbose=0,
+            device=args.device,
+        )
 
     device = model.policy.device
     obs_all = th.as_tensor(obs_np, dtype=th.float32, device=device)
     act_all = th.as_tensor(act_np, dtype=th.long, device=device)
 
     print("=" * 68)
-    print(f"BC PRETRAIN — {args.phase.upper()} PPO")
+    print(f"BC PRETRAIN — {resolved_phase.upper()} PPO")
     print(f"samples={n_samples} epochs={args.epochs} batch={args.batch_size}")
     print("=" * 68)
 
@@ -302,8 +421,12 @@ def main() -> None:
             dist = model.policy.get_distribution(obs_b)
             log_prob = dist.log_prob(act_b)
             entropy = dist.entropy()
+            if entropy is None:
+                entropy_mean = th.zeros((), dtype=log_prob.dtype, device=log_prob.device)
+            else:
+                entropy_mean = entropy.mean()
 
-            loss = -log_prob.mean() - float(args.entropy_coef) * entropy.mean()
+            loss = -log_prob.mean() - float(args.entropy_coef) * entropy_mean
 
             model.policy.optimizer.zero_grad()
             loss.backward()
@@ -311,7 +434,7 @@ def main() -> None:
             model.policy.optimizer.step()
 
             losses.append(float(loss.detach().cpu().item()))
-            entropies.append(float(entropy.mean().detach().cpu().item()))
+            entropies.append(float(entropy_mean.detach().cpu().item()))
 
         with th.no_grad():
             pred = model.policy._predict(obs_all, deterministic=True)
@@ -328,17 +451,10 @@ def main() -> None:
     out_model.parent.mkdir(parents=True, exist_ok=True)
     model.save(str(out_model))
 
-    vecn = model.get_vec_normalize_env()
-    if vecn is not None:
-        out_vec = Path(vecn_path)
-        out_vec.parent.mkdir(parents=True, exist_ok=True)
-        vecn.save(str(out_vec))
-
     print("Saved BC-initialized PPO checkpoint")
     print(f"  model: {out_model}")
-    print(f"  vecn : {vecn_path}")
     print("Fine-tune with:")
-    print(f"  python -m train.train_curriculum --phase {args.phase} --resume {out_model}")
+    print(f"  python -m train.train_curriculum --phase {resolved_phase} --resume {out_model}")
 
 
 if __name__ == "__main__":

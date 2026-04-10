@@ -4,7 +4,7 @@ Observation layout expected:
     [state(base_dim) | goal_target_norm(G) | mask(G)]
 
 where G = len(feature_names), goal_target_norm = target / feature_scale,
-and base_dim = StateSpec.dim() = 51.
+and base_dim = StateSpec.dim().
 
 The extractor:
   1. Extracts the G goal features from the raw state and normalises them.
@@ -50,6 +50,7 @@ _FEAT_BOUNDS: dict[str, tuple[float, float]] = {
     "weapon_dx": (-1.0, 1.0),
     "weapon_dy": (-1.0, 1.0),
     "rel_distance": (0.0, 2.0),
+    "facing_opponent": (-1.0, 1.0),
     "in_strike_range": (0.0, 1.0),
     "opponent_damage_pct": (0.0, 1.0),
     "opponent_hitstun": (0.0, 1.0),

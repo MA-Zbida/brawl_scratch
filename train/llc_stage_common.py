@@ -37,6 +37,7 @@ FEATURE_SCALE: dict[str, float] = {
     "weapon_dx": 2.0,
     "weapon_dy": 2.0,
     "rel_distance": 2.0,
+    "facing_opponent": 1.0,
     "in_strike_range": 1.0,
     "opponent_damage_pct": 1.0,
     "opponent_hitstun": 1.0,
@@ -55,7 +56,7 @@ class StageSpec:
 
     stage_id: int
     name: str
-    mask: np.ndarray          # 7-dim, values in [0, 1]
+    mask: np.ndarray          # goal_dim, values in [0, 1]
     target_sampler: TargetSampler  # must return a goal_dim array in [0, 1]
     feature_names: Optional[list[str]] = None  # logging + goal feature order
     goal_extractor: Optional[GoalExtractor] = None
@@ -68,6 +69,13 @@ class StageSpec:
     success_threshold: float = 0.12
     success_bonus: float = 0.25
     proximity_scale: float = 0.0  # penalty for current error: -proximity_scale * error
+    chase_rel_distance_scale: float = 0.0
+    in_strike_range_bonus: float = 0.0
+    facing_opponent_bonus: float = 0.0
+    hit_event_bonus: float = 0.0
+    damage_dealt_scale: float = 0.0
+    self_damage_penalty_scale: float = 0.0
+    offstage_penalty_scale: float = 0.0
     use_l2_error: bool = False
     death_penalty: float = 0.0    # penalty applied when agent loses a stock
     velocity_penalty_scale: float = 0.0   # penalise speed when near goal
@@ -78,11 +86,25 @@ class StageSpec:
     velocity_threshold: float = 0.15      # speed considered "stopped"
     reward_clip: float = 1.0
     disable_attack: bool = False
+    allowed_attack_actions: Optional[tuple[int, ...]] = None  # attack channel values allowed (0=none,1=num4,2=num6,3=num5)
     disable_dodge: bool = False
     disable_jump: bool = False
     reset_perturb_steps: int = 0
+    step_penalty: float = 0.0  # constant per-step penalty to discourage time wastage
     idle_movement_penalty: float = 0.0
     idle_action_index: int = 3
+    reward_from_goal_progress: bool = False
+    player_has_weapon_bonus: float = 0.0
+    conditional_weapon_guidance_when_unarmed: bool = False
+    unarmed_weapon_dx_weight: float = 0.0
+    unarmed_weapon_dy_weight: float = 0.0
+    player_xy_to_weapon_goal_when_unarmed: bool = False
+    anchor_player_xy_goal_when_armed: bool = False
+    player_xy_to_opponent_goal: bool = False
+    anchor_player_xy_goal_when_in_strike_range: bool = False
+    agent_weapon_drop_penalty: float = 0.0
+    force_drop_weapon_on_timeout: bool = False
+    drop_weapon_key: str = "num5"
     terminate_on_death: bool = False
     terminate_on_goal_success: bool = False
     resample_goal_on_timer: bool = True
@@ -113,6 +135,8 @@ class StageGoalEnv(gym.Wrapper):
 
         self.mask = np.asarray(spec.mask, dtype=np.float32).reshape(self.goal_dim)
         self.mask = np.clip(self.mask, 0.0, 1.0)
+        self._active_mask = self.mask.copy()
+        self._feature_index = {name: idx for idx, name in enumerate(self.feature_names)}
 
         base_dim = int(env.observation_space.shape[0])
         self._base_dim = base_dim
@@ -129,7 +153,16 @@ class StageGoalEnv(gym.Wrapper):
         self._goal_target = np.zeros((self.goal_dim,), dtype=np.float32)
         self._goal_steps_left = 0
         self._goal_active = False
+        self._awaiting_respawn_after_death = False
         self._prev_error: float | None = None
+        self._prev_has_weapon: Optional[bool] = None
+        self._allowed_attack_actions: Optional[set[int]] = None
+        if spec.allowed_attack_actions is not None:
+            allowed = {int(v) for v in spec.allowed_attack_actions}
+            allowed = {v for v in allowed if 0 <= v <= 3}
+            if not allowed:
+                allowed = {0}
+            self._allowed_attack_actions = allowed
 
     def _extract(self, obs: np.ndarray) -> np.ndarray:
         if self.goal_extractor is not None:
@@ -146,11 +179,118 @@ class StageGoalEnv(gym.Wrapper):
         feats = self._extract(obs)  # already in [0, 1]; no scaling needed
         return self._goal_error_from_feats(feats, target)
 
-    def _goal_error_from_feats(self, feats: np.ndarray, target: np.ndarray) -> float:
+    def _goal_error_from_feats(self, feats: np.ndarray, target: np.ndarray, mask: Optional[np.ndarray] = None) -> float:
+        use_mask = self.mask if mask is None else np.asarray(mask, dtype=np.float32).reshape(self.goal_dim)
         delta = np.asarray(feats, dtype=np.float32) - np.asarray(target, dtype=np.float32)
         if self.stage_spec.use_l2_error:
-            return float(np.sqrt(np.sum(self.mask * (delta ** 2))))
-        return float(np.sum(self.mask * np.abs(delta)))
+            return float(np.sqrt(np.sum(use_mask * (delta ** 2))))
+        return float(np.sum(use_mask * np.abs(delta)))
+
+    def _feature_value(self, feats: np.ndarray, name: str, default: float = 0.0) -> float:
+        idx = self._feature_index.get(name)
+        if idx is None:
+            return float(default)
+        return float(feats[idx])
+
+    def _effective_mask_for_step(self, feats: np.ndarray) -> np.ndarray:
+        mask = self.mask.copy()
+        if not self.stage_spec.conditional_weapon_guidance_when_unarmed:
+            return mask
+
+        has_weapon = self._feature_value(feats, "player_has_weapon", 0.0) > 0.5
+        dx_idx = self._feature_index.get("weapon_dx")
+        dy_idx = self._feature_index.get("weapon_dy")
+
+        if dx_idx is None and dy_idx is None:
+            return mask
+
+        if has_weapon:
+            if dx_idx is not None:
+                mask[dx_idx] = 0.0
+            if dy_idx is not None:
+                mask[dy_idx] = 0.0
+            return mask
+
+        if dx_idx is not None:
+            mask[dx_idx] = float(np.clip(self.stage_spec.unarmed_weapon_dx_weight, 0.0, 1.0))
+        if dy_idx is not None:
+            mask[dy_idx] = float(np.clip(self.stage_spec.unarmed_weapon_dy_weight, 0.0, 1.0))
+        return mask
+
+    def _maybe_update_player_xy_goal(self, obs: np.ndarray) -> None:
+        x_idx = self._feature_index.get("player_x")
+        y_idx = self._feature_index.get("player_y")
+        if x_idx is None or y_idx is None:
+            return
+
+        o = np.asarray(obs, dtype=np.float32)
+        try:
+            player_x = float(np.clip(StateSpec.get(o, "player_x"), 0.0, 1.0))
+            player_y = float(np.clip(StateSpec.get(o, "player_y"), 0.0, 1.0))
+        except Exception:
+            return
+
+        # Weapon-control locomotion retargeting: move toward weapon while unarmed.
+        if self.stage_spec.player_xy_to_weapon_goal_when_unarmed:
+            try:
+                has_weapon = float(np.clip(StateSpec.get(o, "player_has_weapon"), 0.0, 1.0)) > 0.5
+                if has_weapon:
+                    if self.stage_spec.anchor_player_xy_goal_when_armed:
+                        self._goal_target[x_idx] = player_x
+                        self._goal_target[y_idx] = player_y
+                else:
+                    weapon_dx = float(StateSpec.get(o, "weapon_dx"))
+                    weapon_dy = float(StateSpec.get(o, "weapon_dy"))
+                    self._goal_target[x_idx] = float(np.clip(player_x + weapon_dx, 0.0, 1.0))
+                    self._goal_target[y_idx] = float(np.clip(player_y + weapon_dy, 0.0, 1.0))
+                    # Keep weapon reacquire as top priority while unarmed.
+                    return
+            except Exception:
+                pass
+
+        # Damage-control locomotion retargeting: move toward opponent position.
+        if self.stage_spec.player_xy_to_opponent_goal:
+            try:
+                in_range = float(np.clip(StateSpec.get(o, "in_strike_range"), 0.0, 1.0)) > 0.5
+                if in_range and self.stage_spec.anchor_player_xy_goal_when_in_strike_range:
+                    self._goal_target[x_idx] = player_x
+                    self._goal_target[y_idx] = player_y
+                else:
+                    rel_dx = float(StateSpec.get(o, "rel_dx"))
+                    rel_dy = float(StateSpec.get(o, "rel_dy"))
+                    self._goal_target[x_idx] = float(np.clip(player_x + rel_dx, 0.0, 1.0))
+                    self._goal_target[y_idx] = float(np.clip(player_y + rel_dy, 0.0, 1.0))
+            except Exception:
+                pass
+
+    def _force_drop_weapon_if_needed(self, feats: np.ndarray, truncated: bool) -> float:
+        if not truncated or not self.stage_spec.force_drop_weapon_on_timeout:
+            return 0.0
+        has_weapon = self._feature_value(feats, "player_has_weapon", 0.0) > 0.5
+        if not has_weapon:
+            return 0.0
+
+        key = str(self.stage_spec.drop_weapon_key or "num5").strip().lower() or "num5"
+        try:
+            controller = getattr(self.unwrapped, "input_controller", None)
+            if controller is not None and hasattr(controller, "tap"):
+                controller.tap({key})
+                return 1.0
+        except Exception:
+            return 0.0
+        return 0.0
+
+    @staticmethod
+    def _attack_action_value_for_key(key: str) -> int:
+        key_to_action = {
+            "num4": 1,
+            "num_4": 1,
+            "num6": 2,
+            "num_6": 2,
+            "num5": 3,
+            "num_5": 3,
+        }
+        return int(key_to_action.get(str(key or "").strip().lower(), 0))
 
     def _sample_goal(self, obs: np.ndarray) -> None:
         self._goal_target = np.asarray(self.stage_spec.target_sampler(obs), dtype=np.float32).reshape(-1)
@@ -209,7 +349,7 @@ class StageGoalEnv(gym.Wrapper):
         # goal_target is already in [0, 1] (extract_goal_features space).
         np.copyto(self._obs_buf[: self._base_dim], obs)
         np.copyto(self._obs_buf[self._base_dim : self._base_dim + self.goal_dim], self._goal_target)
-        np.copyto(self._obs_buf[self._base_dim + self.goal_dim :], self.mask)
+        np.copyto(self._obs_buf[self._base_dim + self.goal_dim :], self._active_mask)
         return self._obs_buf
 
     def _perturb_reset(self) -> tuple[np.ndarray, dict]:
@@ -233,17 +373,22 @@ class StageGoalEnv(gym.Wrapper):
         else:
             obs, info = self._perturb_reset()
         obs = np.asarray(obs, dtype=np.float32)
+        init_feats = self._extract(obs)
         if self.stage_spec.sample_goal_only_when_player_exists and not self._player_is_controllable(info):
             self._goal_target.fill(0.0)
             self._goal_steps_left = -1
             self._goal_active = False
+            self._active_mask = self.mask.copy()
         else:
             self._sample_goal(obs)
+            self._maybe_update_player_xy_goal(obs)
+            self._active_mask = self._effective_mask_for_step(init_feats)
+        self._prev_has_weapon = self._feature_value(init_feats, "player_has_weapon", 0.0) > 0.5
         self._prev_error = None
 
         info["stage_name"] = self.stage_spec.name
         info["goal_target"] = self._goal_target.copy()
-        info["goal_mask"] = self.mask.copy()
+        info["goal_mask"] = self._active_mask.copy()
         info["goal_active"] = float(1.0 if self._goal_active else 0.0)
         return self._augment(obs), info
 
@@ -251,6 +396,9 @@ class StageGoalEnv(gym.Wrapper):
         action_arr = np.asarray(action, dtype=np.int64).copy()
         if self.stage_spec.disable_attack:
             action_arr[3] = 0
+        elif self._allowed_attack_actions is not None and int(action_arr[3]) not in self._allowed_attack_actions:
+            action_arr[3] = 0
+        attack_input = int(action_arr[3]) if action_arr.shape[0] > 3 else 0
         if self.stage_spec.disable_dodge:
             action_arr[2] = 0
         if self.stage_spec.disable_jump:
@@ -261,6 +409,15 @@ class StageGoalEnv(gym.Wrapper):
         obs, _, terminated, truncated, info = self.env.step(action_arr)
         obs = np.asarray(obs, dtype=np.float32)
         player_controllable = self._player_is_controllable(info)
+        if player_controllable:
+            self._awaiting_respawn_after_death = False
+
+        raw_self_stock_lost = float(info.get("self_stock_lost_step", 0.0))
+        is_new_death_event = raw_self_stock_lost > 0.0 and not self._awaiting_respawn_after_death
+        if is_new_death_event:
+            self._awaiting_respawn_after_death = True
+        effective_self_stock_lost = raw_self_stock_lost if is_new_death_event else 0.0
+
         goal_new_sampled = False
         if player_controllable:
             if not self._goal_active:
@@ -279,29 +436,86 @@ class StageGoalEnv(gym.Wrapper):
             self._goal_steps_left = -1
 
         curr_feats = self._extract(obs)  # compute once; reused for error and HER buffer
+        curr_has_weapon = self._feature_value(curr_feats, "player_has_weapon", 0.0) > 0.5
+        op_delta_damage = float(max(0.0, info.get("op_delta_damage", 0.0)))
+        self_delta_damage = float(max(0.0, info.get("self_delta_damage", 0.0)))
+        chase_bonus = 0.0
+        strike_bonus = 0.0
+        facing_bonus = 0.0
+        hit_bonus = 0.0
+        damage_bonus = 0.0
+        self_damage_penalty = 0.0
+        offstage_penalty = 0.0
         if self._goal_active:
-            curr_error = self._goal_error_from_feats(curr_feats, self._goal_target)
-            reward = - curr_error
+            self._maybe_update_player_xy_goal(obs)
+            self._active_mask = self._effective_mask_for_step(curr_feats)
+            curr_error = self._goal_error_from_feats(curr_feats, self._goal_target, mask=self._active_mask)
+
+            goal_progress = 0.0
+            if self._prev_error is not None and not goal_new_sampled:
+                goal_progress = float(self._prev_error - curr_error)
+
+            if self.stage_spec.reward_from_goal_progress:
+                reward = float(self.stage_spec.progress_scale * goal_progress)
+                if self.stage_spec.clip_progress_reward:
+                    reward = float(np.clip(reward, self.stage_spec.progress_clip_min, self.stage_spec.progress_clip_max))
+            else:
+                reward = - curr_error
 
             # Proximity penalty: consistent "closer is better" signal even without progress.
             if self.stage_spec.proximity_scale > 0.0:
                 reward -= self.stage_spec.proximity_scale * curr_error
 
+            if self.stage_spec.player_has_weapon_bonus > 0.0 and self._feature_value(curr_feats, "player_has_weapon", 0.0) > 0.5:
+                reward += self.stage_spec.player_has_weapon_bonus
+
+            # Explicit combat shaping (phase-configurable): chase, orient, connect, and trade favorably.
+            rel_distance = float(np.clip(self._feature_value(curr_feats, "rel_distance", 1.0), 0.0, 1.0))
+            in_range = float(np.clip(self._feature_value(curr_feats, "in_strike_range", 0.0), 0.0, 1.0))
+            facing_norm = float(np.clip(self._feature_value(curr_feats, "facing_opponent", 0.5), 0.0, 1.0))
+            facing_score = max(0.0, (2.0 * facing_norm) - 1.0)
+            offstage = float(np.clip(self._feature_value(curr_feats, "player_is_offstage", 0.0), 0.0, 1.0))
+
+            if self.stage_spec.chase_rel_distance_scale > 0.0:
+                chase_bonus = float(self.stage_spec.chase_rel_distance_scale * (1.0 - rel_distance))
+                reward += chase_bonus
+
+            if self.stage_spec.in_strike_range_bonus > 0.0 and in_range > 0.5:
+                strike_bonus = float(self.stage_spec.in_strike_range_bonus)
+                reward += strike_bonus
+
+            if self.stage_spec.facing_opponent_bonus > 0.0:
+                facing_bonus = float(self.stage_spec.facing_opponent_bonus * facing_score)
+                reward += facing_bonus
+
+            if self.stage_spec.hit_event_bonus > 0.0 and op_delta_damage > 1e-6:
+                hit_bonus = float(self.stage_spec.hit_event_bonus)
+                reward += hit_bonus
+
+            if self.stage_spec.damage_dealt_scale > 0.0:
+                damage_bonus = float(self.stage_spec.damage_dealt_scale * op_delta_damage)
+                reward += damage_bonus
+
+            if self.stage_spec.self_damage_penalty_scale > 0.0:
+                self_damage_penalty = float(self.stage_spec.self_damage_penalty_scale * self_delta_damage)
+                reward -= self_damage_penalty
+
+            if self.stage_spec.offstage_penalty_scale > 0.0:
+                offstage_penalty = float(self.stage_spec.offstage_penalty_scale * offstage)
+                reward -= offstage_penalty
+
             success = bool(curr_error < self.stage_spec.success_threshold)
             if success:
                 reward += self.stage_spec.success_bonus
         else:
+            self._active_mask = self.mask.copy()
             curr_error = 0.0
+            goal_progress = 0.0
             reward = 0.0
             success = False
 
-        if (
-            self._goal_active
-            and self.stage_spec.idle_movement_penalty > 0.0
-            and action_arr.size > 0
-            and int(action_arr[0]) == int(self.stage_spec.idle_action_index)
-        ):
-            reward -= self.stage_spec.idle_movement_penalty
+        if self._goal_active and self.stage_spec.step_penalty > 0.0:
+            reward -= self.stage_spec.step_penalty
 
         if self._goal_active and self.stage_spec.vertical_velocity_penalty_scale > 0.0 and obs.shape[0] > 3:
             reward -= self.stage_spec.vertical_velocity_penalty_scale * abs(float(obs[3]))
@@ -330,20 +544,39 @@ class StageGoalEnv(gym.Wrapper):
         # Death penalty: punish losing a stock
         self_stock_lost = 0.0
         if self.stage_spec.death_penalty > 0.0:
-            self_stock_lost = float(info.get("self_stock_lost_step", 0.0))
+            self_stock_lost = effective_self_stock_lost
             if self_stock_lost > 0.0:
                 reward -= self.stage_spec.death_penalty
 
-        if self.stage_spec.terminate_on_death and float(info.get("self_stock_lost_step", 0.0)) > 0.0:
+        if self.stage_spec.terminate_on_death and effective_self_stock_lost > 0.0:
             terminated = True
+
+        forced_weapon_drop = float(self._force_drop_weapon_if_needed(curr_feats, truncated))
+        agent_weapon_drop_event = 0.0
+        agent_weapon_drop_penalty_applied = 0.0
+        if self.stage_spec.agent_weapon_drop_penalty > 0.0:
+            drop_attack_action = self._attack_action_value_for_key(self.stage_spec.drop_weapon_key)
+            dropped_now = bool(self._prev_has_weapon) and not curr_has_weapon
+            agent_drop_input = drop_attack_action > 0 and attack_input == drop_attack_action
+            if (
+                dropped_now
+                and agent_drop_input
+                and effective_self_stock_lost <= 0.0
+                and forced_weapon_drop <= 0.0
+            ):
+                reward -= float(self.stage_spec.agent_weapon_drop_penalty)
+                agent_weapon_drop_event = 1.0
+                agent_weapon_drop_penalty_applied = float(self.stage_spec.agent_weapon_drop_penalty)
 
         reward = float(np.clip(reward, -self.stage_spec.reward_clip, self.stage_spec.reward_clip))
         self._prev_error = curr_error
+        self._prev_has_weapon = curr_has_weapon
 
         info["stage_name"] = self.stage_spec.name
         info["goal_target"] = self._goal_target.copy()
-        info["goal_mask"] = self.mask.copy()
+        info["goal_mask"] = self._active_mask.copy()
         info["goal_error"] = float(curr_error)
+        info["goal_progress"] = float(goal_progress)
         info["goal_success"] = float(1.0 if success else 0.0)
         info["goal_steps_left"] = int(self._goal_steps_left)
         info["llc_reward"] = float(reward)
@@ -351,8 +584,21 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_new_sampled"] = goal_new_sampled
         info["goal_active"] = float(1.0 if self._goal_active else 0.0)
         info["raw_goal_feats"] = curr_feats  # already computed above — no second call
-        info["death_event"] = float(1.0 if float(info.get("self_stock_lost_step", 0.0)) > 0.0 else 0.0)
+        info["self_stock_lost_step_raw"] = raw_self_stock_lost
+        info["self_stock_lost_step_effective"] = effective_self_stock_lost
+        info["death_event"] = float(1.0 if effective_self_stock_lost > 0.0 else 0.0)
+        info["duplicate_death_suppressed"] = float(1.0 if raw_self_stock_lost > 0.0 and effective_self_stock_lost <= 0.0 else 0.0)
         info["terminal_success"] = float(1.0 if terminated_by_goal else 0.0)
+        info["forced_weapon_drop"] = forced_weapon_drop
+        info["agent_weapon_drop_event"] = agent_weapon_drop_event
+        info["agent_weapon_drop_penalty"] = agent_weapon_drop_penalty_applied
+        info["combat_bonus_chase"] = float(chase_bonus)
+        info["combat_bonus_strike_range"] = float(strike_bonus)
+        info["combat_bonus_facing"] = float(facing_bonus)
+        info["combat_bonus_hit_event"] = float(hit_bonus)
+        info["combat_bonus_damage_dealt"] = float(damage_bonus)
+        info["combat_penalty_self_damage"] = float(self_damage_penalty)
+        info["combat_penalty_offstage"] = float(offstage_penalty)
 
         aug_obs = self._augment(obs)
         return aug_obs, reward, terminated, truncated, info
@@ -392,7 +638,7 @@ class StageDashboardCallback(BaseCallback):
         self.plot_path = self.save_dir / f"{self.model_name}_dashboard.png"
 
         # On-policy HER buffers — accumulated each rollout, cleared in _on_rollout_end.
-        self._her_raw_feats: list[np.ndarray] = []  # achieved 7-dim goal feats per step
+        self._her_raw_feats: list[np.ndarray] = []  # achieved goal feats per step (stage goal_dim)
         self._her_new_goal: list[bool] = []          # True when goal was (re)sampled
         self._her_done: list[bool] = []              # True when episode ended at this step
         self._her_orig_rewards: list[float] = []     # original LLC reward for 50% blend
@@ -506,7 +752,6 @@ class StageDashboardCallback(BaseCallback):
         rewards = np.asarray(self.step_reward, dtype=np.float32)
         errors = np.asarray(self.step_goal_error, dtype=np.float32)
         progress = np.asarray(self.step_goal_progress, dtype=np.float32)
-        success = np.asarray(self.step_goal_success, dtype=np.float32)
         op_delta = np.asarray(self.step_op_delta, dtype=np.float32)
         self_delta = np.asarray(self.step_self_delta, dtype=np.float32)
 
@@ -543,14 +788,20 @@ class StageDashboardCallback(BaseCallback):
         axes[2].legend(loc="best")
         axes[2].grid(alpha=0.25)
 
-        x_ma, y_ma = self._moving_average(success, win)
-        if x_ma.size:
-            axes[3].plot(x_ma, y_ma, linewidth=2, color="tab:purple", label=f"success_rate MA({win})")
-        cumulative_success = np.cumsum(success) / np.maximum(1.0, np.arange(1, len(success) + 1, dtype=np.float32))
-        axes[3].plot(step_idx, cumulative_success, alpha=0.65, label="cumulative success rate")
+        ep_success = np.asarray(self.ep_success, dtype=np.float32)
+        if ep_success.size > 0:
+            epi_success_idx = np.arange(1, ep_success.size + 1)
+            ep_win = int(min(30, max(5, len(ep_success) // 6)))
+            ex, ey = self._moving_average(ep_success, ep_win)
+            if ex.size:
+                axes[3].plot(ex, ey, linewidth=2, color="tab:purple", label=f"episode_success MA({ep_win})")
+            cumulative_success = np.cumsum(ep_success) / np.maximum(1.0, np.arange(1, len(ep_success) + 1, dtype=np.float32))
+            axes[3].plot(epi_success_idx, cumulative_success, alpha=0.65, label="cumulative episode success")
+        else:
+            axes[3].text(0.5, 0.5, "Waiting for completed episodes", ha="center", va="center", transform=axes[3].transAxes)
         axes[3].set_ylim(-0.02, 1.02)
-        axes[3].set_title("Success Rate")
-        axes[3].set_xlabel("Step")
+        axes[3].set_title("Episode Success Rate")
+        axes[3].set_xlabel("Episode")
         axes[3].legend(loc="best")
         axes[3].grid(alpha=0.25)
 
@@ -570,14 +821,19 @@ class StageDashboardCallback(BaseCallback):
         reward_trend = self._trend(np.asarray(rewards[-win:], dtype=np.float32))
         error_trend = self._trend(np.asarray(errors[-win:], dtype=np.float32))
         progress_trend = self._trend(np.asarray(progress[-win:], dtype=np.float32))
-        success_recent = float(np.mean(success[-win:])) if len(success) >= win else float(np.mean(success))
+        ep_success = np.asarray(self.ep_success, dtype=np.float32)
+        if ep_success.size > 0:
+            ep_recent_win = int(min(30, max(5, len(ep_success) // 6)))
+            success_recent = float(np.mean(ep_success[-ep_recent_win:]))
+        else:
+            success_recent = 0.0
         op_recent = float(np.mean(op_delta[-win:])) if len(op_delta) >= win else float(np.mean(op_delta))
         self_recent = float(np.mean(self_delta[-win:])) if len(self_delta) >= win else float(np.mean(self_delta))
 
         diagnostics: list[str] = []
         diagnostics.append(f"Stage: {self.stage_name}")
         # diagnostics.append(f"Features: {', '.join(self.stage_features) if self.stage_features else 'n/a'}")
-        diagnostics.append(f"Recent success rate: {success_recent:.3f}")
+        diagnostics.append(f"Recent episode success rate: {success_recent:.3f}")
         diagnostics.append(f"Reward trend (recent): {reward_trend:+.5f}")
         diagnostics.append(f"Error trend (recent): {error_trend:+.5f}")
         diagnostics.append(f"Progress trend (recent): {progress_trend:+.5f}")
@@ -585,8 +841,8 @@ class StageDashboardCallback(BaseCallback):
 
         if reward_trend < 0 and error_trend > 0:
             diagnostics.append("Warning: reward declining while error rises (likely policy drift).")
-        if success_recent < 0.05:
-            diagnostics.append("Warning: low success rate (consider easier goals / larger success region).")
+        if len(self.ep_success) >= 20 and success_recent < 0.20:
+            diagnostics.append("Warning: low episode success rate (consider easier goals / larger success region).")
         if abs(progress_trend) < 1e-4:
             diagnostics.append("Warning: near-zero progress trend (possible local optimum or weak exploration).")
 
@@ -778,7 +1034,7 @@ class StageDashboardCallback(BaseCallback):
         if t_end <= t_start + 1:
             return
 
-        # Hindsight goal = the 7-dim state where the agent actually ended up.
+        # Hindsight goal = the stage-goal state where the agent actually ended up.
         achieved = self._her_raw_feats[t_end - 1]
 
         prev_her_error: Optional[float] = None
@@ -977,12 +1233,20 @@ def train_stage_model(
     algo = getattr(args, "algo", "ppo")
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    final_model = save_dir / f"{args.model_name}.zip"
 
     base_vec = VecMonitor(DummyVecEnv([make_env]))
     vecnorm_path = save_dir / f"{args.model_name}.vecnormalize.pkl"
 
     if args.resume and vecnorm_path.exists():
-        vec_env = VecNormalize.load(str(vecnorm_path), base_vec)
+        try:
+            vec_env = VecNormalize.load(str(vecnorm_path), base_vec)
+        except Exception as exc:
+            raise RuntimeError(
+                f"[{args.model_name}] Could not load VecNormalize stats from {vecnorm_path}. "
+                "This usually means observation dimensions changed (for example after goal schema updates). "
+                "Start a fresh run (no --resume) or use a matching checkpoint/stats pair."
+            ) from exc
     else:
         vec_env = VecNormalize(base_vec, norm_obs=False, norm_reward=False, clip_obs=10.0)
 
@@ -1017,24 +1281,15 @@ def train_stage_model(
         model.learn(total_timesteps=args.timesteps, progress_bar=True, callback=callbacks)
     except KeyboardInterrupt:
         interrupted = True
-        interrupted_model = save_dir / f"{args.model_name}_interrupted.zip"
-        interrupted_norm = save_dir / f"{args.model_name}_interrupted.vecnormalize.pkl"
-        model.save(str(interrupted_model))
-        vecn = model.get_vec_normalize_env()
-        if vecn is not None:
-            vecn.save(str(interrupted_norm))
-        print(f"[{args.model_name}] Interrupted checkpoint saved: {interrupted_model}")
+        model.save(str(final_model))
+        print(f"[{args.model_name}] Interrupted checkpoint saved: {final_model}")
     finally:
         try:
             dashboard_cb._on_training_end()
         except Exception:
             pass
 
-    final_model = save_dir / f"{args.model_name}.zip"
     model.save(str(final_model))
-    vecn = model.get_vec_normalize_env()
-    if vecn is not None:
-        vecn.save(str(vecnorm_path))
     print(f"[{args.model_name}] Saved model to {final_model}")
     if interrupted:
         print(f"[{args.model_name}] Final model also saved after interruption.")
@@ -1044,21 +1299,28 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     """Build or resume a PPO model."""
     if args.resume:
         print(f"[{args.model_name}] Resuming PPO from {args.resume}")
-        return PPO.load(
-            args.resume,
-            env=vec_env,
-            learning_rate=args.learning_rate,
-            clip_range=args.clip_range,
-            n_steps=args.n_steps,
-            batch_size=args.batch_size,
-            gamma=args.gamma,
-            gae_lambda=args.gae_lambda,
-            ent_coef=args.ent_coef,
-            vf_coef=args.vf_coef,
-            max_grad_norm=args.max_grad_norm,
-            seed=args.seed,
-            device=args.device,
-        )
+        try:
+            return PPO.load(
+                args.resume,
+                env=vec_env,
+                learning_rate=args.learning_rate,
+                clip_range=args.clip_range,
+                n_steps=args.n_steps,
+                batch_size=args.batch_size,
+                gamma=args.gamma,
+                gae_lambda=args.gae_lambda,
+                ent_coef=args.ent_coef,
+                vf_coef=args.vf_coef,
+                max_grad_norm=args.max_grad_norm,
+                seed=args.seed,
+                device=args.device,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"[{args.model_name}] Could not resume PPO checkpoint {args.resume}. "
+                "Checkpoint architecture likely differs from current stage goal schema/observation shape. "
+                "Use a compatible checkpoint or restart training without --resume."
+            ) from exc
 
     if stage_spec is not None:
         goal_feature_names = GOAL_STATE_SPEC_NAMES
@@ -1132,13 +1394,20 @@ def _build_sac(args, vec_env, stage_spec, FiLMClass):
 
     if args.resume:
         print(f"[{args.model_name}] Resuming SAC from {args.resume}")
-        return DiscreteSAC.load(
-            args.resume,
-            env=vec_env,
-            learning_rate=args.learning_rate,
-            seed=args.seed,
-            device=args.device,
-        )
+        try:
+            return DiscreteSAC.load(
+                args.resume,
+                env=vec_env,
+                learning_rate=args.learning_rate,
+                seed=args.seed,
+                device=args.device,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"[{args.model_name}] Could not resume SAC checkpoint {args.resume}. "
+                "Checkpoint architecture likely differs from current stage goal schema/observation shape. "
+                "Use a compatible checkpoint or restart training without --resume."
+            ) from exc
 
     return DiscreteSAC(
         DiscreteSACPolicy,

@@ -24,7 +24,7 @@ class StateSpec:
         "opponent_vy",          # 13
         "opponent_grounded",    # 14
         "opponent_damage_pct",  # 15
-        "opponent_exists",      # 16
+        "opponent_exists",      # 16de se d de d de 
         "opponent_jumps_norm",  # 17
         "opponent_on_edge",     # 18
         "opponent_is_offstage", # 19  bool → float

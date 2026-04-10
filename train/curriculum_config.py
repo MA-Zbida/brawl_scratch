@@ -184,9 +184,9 @@ def _sampler_damage_static_fist(_: np.ndarray) -> np.ndarray:
     _set_combat_relational_target(
         t,
         requires_weapon=False,
-        rel_distance_range=(0.08, 0.24),
-        opponent_damage_range=(0.35, 0.80),
-        frame_advantage_range=(0.55, 0.95),
+        rel_distance_range=(0.10, 0.30),
+        opponent_damage_range=(0.00, 0.35),
+        frame_advantage_range=(0.40, 0.90),
     )
     return clip_goal_target(t)
 
@@ -224,7 +224,7 @@ def _mask_for(*active: tuple[str, float]) -> np.ndarray:
 
 def build_phase_spec(
     phase: str,
-    death_penalty: float = 1,
+    death_penalty: float = 2.0,
     terminate_on_death: bool = True,
 ) -> StageSpec:
     phase = phase.strip().lower()
@@ -399,7 +399,7 @@ def build_phase_spec(
             unarmed_weapon_dy_weight=0.0,
             player_xy_to_weapon_goal_when_unarmed=False,
             anchor_player_xy_goal_when_armed=False,
-            agent_weapon_drop_penalty=1,
+            agent_weapon_drop_penalty=1 ,
             force_drop_weapon_on_timeout=True,
             drop_weapon_key="num5",
             terminate_on_death=bool(terminate_on_death),
@@ -415,7 +415,7 @@ def build_phase_spec(
                 ("player_has_weapon", 1.0),
                 ("in_strike_range", 1.0),
                 ("rel_distance", 1.0),
-                ("facing_opponent", 0.9),
+                ("facing_opponent", 1.0),
                 ("opponent_damage_pct", 1.0),
                 ("player_is_offstage", 0.8),
             ),
@@ -427,14 +427,14 @@ def build_phase_spec(
             progress_scale=2.0,
             progress_clip_min=-0.25,
             progress_clip_max=0.8,
-            success_threshold=0.06,
-            success_bonus=1.5,
+            success_threshold=0.10,
+            success_bonus=1.2,
             proximity_scale=0.35,
             chase_rel_distance_scale=0.30,
             in_strike_range_bonus=0.08,
-            facing_opponent_bonus=0.06,
-            hit_event_bonus=0.12,
-            damage_dealt_scale=2.2,
+            facing_opponent_bonus=0.1,
+            hit_event_bonus=3.0,
+            damage_dealt_scale=2.8,
             self_damage_penalty_scale=1.3,
             offstage_penalty_scale=0.12,
             death_penalty=float(death_penalty),
@@ -444,8 +444,11 @@ def build_phase_spec(
             disable_dodge=False,
             disable_jump=False,
             reset_perturb_steps=0,
+            step_penalty=0.01,
             terminate_on_death=bool(terminate_on_death),
-            terminate_on_goal_success=True,
+            terminate_on_goal_success=False,
+            terminate_on_hit_event=True,
+            hit_event_damage_threshold=1e-3,
             resample_goal_on_timer=False,
         )
 

@@ -32,6 +32,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--death-penalty", type=float, default=0.0)
     p.add_argument("--force-drop-on-episode-end", action="store_true", default=True)
     p.add_argument("--no-force-drop-on-episode-end", dest="force_drop_on_episode_end", action="store_false")
+    p.add_argument("--end-episode-on-first-hit", dest="end_episode_on_first_hit", action="store_true")
+    p.add_argument("--no-end-episode-on-first-hit", dest="end_episode_on_first_hit", action="store_false")
+    p.set_defaults(end_episode_on_first_hit=None)
+    p.add_argument("--hit-damage-threshold", type=float, default=1e-3)
     return p.parse_args()
 
 
@@ -182,6 +186,11 @@ def _resolve_output_path(args: argparse.Namespace) -> Path:
 def main() -> None:
     args = parse_args()
     out_path = _resolve_output_path(args)
+    hit_damage_threshold = float(max(0.0, args.hit_damage_threshold))
+    if args.end_episode_on_first_hit is None:
+        end_episode_on_first_hit = str(args.phase).strip().lower() == "damage_static_fist"
+    else:
+        end_episode_on_first_hit = bool(args.end_episode_on_first_hit)
 
     env = _build_env(args)
     drop_controller: PyDirectInputController | None = None
@@ -224,6 +233,8 @@ def main() -> None:
         print("Mouse guidance: disabled (phase goals are relational/non-XY)")
     if args.force_drop_on_episode_end:
         print("Episode end action: force drop weapon via NUM_5")
+    if end_episode_on_first_hit:
+        print(f"Episode end action: stop on first hit (op_delta_damage >= {hit_damage_threshold:.4f})")
     print("Press Ctrl+C to stop and save partial data.")
     print("=" * 68)
     print(f"Starting in {args.delay:.1f}s...")
@@ -237,12 +248,17 @@ def main() -> None:
     goal_mask_buf: list[np.ndarray] = []
 
     step_total = 0
+    episodes_collected = 0
+    episodes_with_hit = 0
+    episodes_ended_on_first_hit = 0
 
     try:
         for ep in range(1, int(args.episodes) + 1):
             obs, info = env.reset()
             done = False
             ep_steps = 0
+            ep_had_hit = False
+            end_reason = "unknown"
 
             goal_target = np.asarray(info.get("goal_target", np.zeros(2, dtype=np.float32)), dtype=np.float32)
             goal_mask = np.asarray(info.get("goal_mask", np.zeros_like(goal_target)), dtype=np.float32)
@@ -260,8 +276,21 @@ def main() -> None:
                 goal_mask_buf.append(np.asarray(goal_mask, dtype=np.float32).copy())
 
                 next_obs, _reward, terminated, truncated, info = env.step(action_seq)
-                done = bool(terminated or truncated)
+                op_delta_damage = float(max(0.0, info.get("op_delta_damage", 0.0)))
+                hit_event = op_delta_damage >= hit_damage_threshold
+                if hit_event:
+                    ep_had_hit = True
+
+                terminated_by_hit = bool(end_episode_on_first_hit and hit_event)
+                done = bool(terminated or truncated or terminated_by_hit)
                 done_buf.append(done)
+
+                if terminated_by_hit:
+                    end_reason = "first_hit"
+                elif terminated:
+                    end_reason = "env_terminated"
+                elif truncated:
+                    end_reason = "env_truncated"
 
                 if bool(info.get("goal_new_sampled", False)):
                     goal_target = np.asarray(info.get("goal_target", goal_target), dtype=np.float32)
@@ -280,9 +309,22 @@ def main() -> None:
                     )
 
                 if ep_steps >= int(args.max_episode_steps):
+                    if not done and len(done_buf) > 0:
+                        done = True
+                        done_buf[-1] = True
+                        end_reason = "collector_step_cap"
                     break
 
-            print(f"Episode {ep}/{args.episodes} collected steps={ep_steps}")
+            episodes_collected += 1
+            if ep_had_hit:
+                episodes_with_hit += 1
+            if end_reason == "first_hit":
+                episodes_ended_on_first_hit += 1
+
+            print(
+                f"Episode {ep}/{args.episodes} collected steps={ep_steps} "
+                f"reason={end_reason} had_hit={int(ep_had_hit)}"
+            )
             if args.force_drop_on_episode_end:
                 dropped = _force_drop_weapon_num5_key(drop_controller=drop_controller)
                 if not dropped and not drop_warning_printed:
@@ -298,6 +340,14 @@ def main() -> None:
             except Exception:
                 pass
         env.close()
+
+    if episodes_collected > 0 and end_episode_on_first_hit:
+        hit_ratio = float(episodes_with_hit) / float(max(1, episodes_collected))
+        first_hit_end_ratio = float(episodes_ended_on_first_hit) / float(max(1, episodes_collected))
+        print(
+            f"Hit summary: hit_episodes={episodes_with_hit}/{episodes_collected} ({hit_ratio:.2%}), "
+            f"ended_on_first_hit={episodes_ended_on_first_hit}/{episodes_collected} ({first_hit_end_ratio:.2%})"
+        )
 
     if len(obs_buf) == 0:
         print("No samples collected; nothing to save.")

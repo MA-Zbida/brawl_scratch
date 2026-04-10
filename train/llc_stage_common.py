@@ -107,6 +107,8 @@ class StageSpec:
     drop_weapon_key: str = "num5"
     terminate_on_death: bool = False
     terminate_on_goal_success: bool = False
+    terminate_on_hit_event: bool = False
+    hit_event_damage_threshold: float = 1e-6
     resample_goal_on_timer: bool = True
     sample_goal_only_when_player_exists: bool = True
 
@@ -530,6 +532,11 @@ class StageGoalEnv(gym.Wrapper):
             terminated = True
             terminated_by_goal = True
 
+        terminated_by_hit_event = False
+        if self.stage_spec.terminate_on_hit_event and op_delta_damage >= float(self.stage_spec.hit_event_damage_threshold):
+            terminated = True
+            terminated_by_hit_event = True
+
         # Velocity damping: penalise speed when close to target
         if self._goal_active and self.stage_spec.velocity_penalty_scale > 0.0 and curr_error < self.stage_spec.velocity_penalty_radius * self.stage_spec.success_threshold:
             speed = np.sqrt(obs[2] ** 2 + obs[3]** 2)  # player_vx, player_vy
@@ -589,6 +596,7 @@ class StageGoalEnv(gym.Wrapper):
         info["death_event"] = float(1.0 if effective_self_stock_lost > 0.0 else 0.0)
         info["duplicate_death_suppressed"] = float(1.0 if raw_self_stock_lost > 0.0 and effective_self_stock_lost <= 0.0 else 0.0)
         info["terminal_success"] = float(1.0 if terminated_by_goal else 0.0)
+        info["terminal_hit_event"] = float(1.0 if terminated_by_hit_event else 0.0)
         info["forced_weapon_drop"] = forced_weapon_drop
         info["agent_weapon_drop_event"] = agent_weapon_drop_event
         info["agent_weapon_drop_penalty"] = agent_weapon_drop_penalty_applied

@@ -143,7 +143,7 @@ def _align_demo_lengths(
     return obs, actions, dones
 
 
-def _load_dataset(path: str, expected_phase: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
+def _load_dataset(path: str, expected_phase: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
     data = np.load(path)
     if "obs" not in data or "actions" not in data or "dones" not in data:
         raise ValueError("Demo file must contain 'obs', 'actions', and 'dones' arrays")
@@ -168,7 +168,16 @@ def _load_dataset(path: str, expected_phase: str) -> tuple[np.ndarray, np.ndarra
     if dones.ndim != 1:
         raise ValueError(f"Expected dones shape (N,), got {dones.shape}")
 
+    # Load opponent KO events if present (backward-compat: default all-False).
+    if "op_ko_events" in data:
+        op_ko_events = np.asarray(data["op_ko_events"], dtype=bool)
+        if op_ko_events.shape[0] != obs.shape[0]:
+            op_ko_events = np.zeros(obs.shape[0], dtype=bool)
+    else:
+        op_ko_events = np.zeros(obs.shape[0], dtype=bool)
+
     obs, actions, dones = _align_demo_lengths(obs, actions, dones, path=path)
+    op_ko_events = op_ko_events[: obs.shape[0]]
 
     expected = str(expected_phase).strip().lower()
     if expected == "auto":
@@ -176,7 +185,7 @@ def _load_dataset(path: str, expected_phase: str) -> tuple[np.ndarray, np.ndarra
     else:
         resolved_phase = str(expected_phase)
 
-    return obs, actions, dones, resolved_phase
+    return obs, actions, dones, op_ko_events, resolved_phase
 
 
 def _parse_horizons(raw: str) -> list[int]:
@@ -226,6 +235,7 @@ def _build_goal_relabel_dataset(
     horizons: list[int],
     max_relabels_per_step: int,
     include_original_samples: bool,
+    op_ko_events: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int, int]:
     goal_dim = int(len(spec.feature_names)) if spec.feature_names is not None else int(spec.mask.shape[0])
     total_dim = int(obs.shape[1])
@@ -237,6 +247,16 @@ def _build_goal_relabel_dataset(
 
     mask = np.asarray(spec.mask, dtype=np.float32).reshape(goal_dim)
     ranges = _episode_ranges(dones)
+
+    # Cumulative KO-event count per step.  Two steps t and ft are in the same
+    # opponent-stock segment iff ko_cumsum[t] == ko_cumsum[ft].  Relabeling
+    # across a KO boundary would create nonsensical goals (e.g. "reach
+    # opponent_damage_pct=0" from a state where it is 0.65), so we skip those.
+    n_steps = int(obs.shape[0])
+    if op_ko_events is not None and op_ko_events.shape[0] == n_steps:
+        ko_cumsum = np.cumsum(op_ko_events.astype(np.int32))
+    else:
+        ko_cumsum = np.zeros(n_steps, dtype=np.int32)
 
     out_obs: list[np.ndarray] = []
     out_actions: list[np.ndarray] = []
@@ -255,6 +275,12 @@ def _build_goal_relabel_dataset(
             for h in horizons:
                 ft = t + h
                 if ft > end:
+                    continue
+
+                # Never relabel across an opponent-KO boundary: damage resets
+                # to 0 on the new stock, so future goals become meaningless or
+                # actively misleading for pre-KO timesteps.
+                if ko_cumsum[ft] != ko_cumsum[t]:
                     continue
 
                 future_base = obs[ft, :base_dim]
@@ -293,7 +319,7 @@ def main() -> None:
     if args.vecnorm_output:
         print("[BC pretrain] vecnorm-output is ignored (no .pkl files are saved).")
 
-    obs_np, act_np, dones_np, resolved_phase = _load_dataset(demos_path, expected_phase=args.phase)
+    obs_np, act_np, dones_np, op_ko_np, resolved_phase = _load_dataset(demos_path, expected_phase=args.phase)
     if str(args.phase).strip().lower() == "auto":
         print(f"[BC pretrain] Auto phase detected from dataset: {resolved_phase}")
         if not args.output.strip():
@@ -315,6 +341,22 @@ def main() -> None:
 
     if args.goal_relabel:
         horizons = _parse_horizons(args.relabel_horizons)
+
+        # For combat demos (short hit-terminated episodes), adapt horizons
+        # so they fit within typical episode lengths.
+        ep_ranges = _episode_ranges(dones_np)
+        if ep_ranges:
+            ep_lens = [end - start + 1 for start, end in ep_ranges]
+            median_ep_len = int(np.median(ep_lens))
+            if median_ep_len < max(horizons):
+                horizons = [h for h in horizons if h < median_ep_len]
+                if not horizons:
+                    horizons = [1]
+                print(
+                    f"[BC pretrain] Adapted relabel horizons to {horizons} "
+                    f"(median episode length={median_ep_len})"
+                )
+
         obs_np, act_np, episode_count, relabeled_count = _build_goal_relabel_dataset(
             obs=obs_np,
             actions=act_np,
@@ -323,6 +365,7 @@ def main() -> None:
             horizons=horizons,
             max_relabels_per_step=max(0, int(args.max_relabels_per_step)),
             include_original_samples=bool(args.include_original_samples),
+            op_ko_events=op_ko_np,
         )
         print("=" * 68)
         print("GOAL RELABELING ENABLED")

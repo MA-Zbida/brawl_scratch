@@ -24,7 +24,6 @@ PHASES = (
     "locomotion_airborne",
     "locomotion_recovery",
     "locomotion",
-    "fist_attack",
     "weapon_control",
     "damage_static_fist",
     "damage_static_weapon",
@@ -147,8 +146,9 @@ def _set_combat_relational_target(
     *,
     requires_weapon: bool,
     rel_distance_range: tuple[float, float],
-    opponent_damage_range: tuple[float, float],
+    opponent_damage_delta: tuple[float, float],
     frame_advantage_range: tuple[float, float],
+    current_opponent_damage: float = 0.0,
 ) -> np.ndarray:
     t[GOAL_INDEX["player_has_weapon"]] = 1.0 if requires_weapon else 0.0
     t[GOAL_INDEX["weapon_dx"]] = 0.5
@@ -156,61 +156,58 @@ def _set_combat_relational_target(
     t[GOAL_INDEX["in_strike_range"]] = 1.0
 
     dist_lo, dist_hi = rel_distance_range
-    dmg_lo, dmg_hi = opponent_damage_range
+    delta_lo, delta_hi = opponent_damage_delta
     adv_lo, adv_hi = frame_advantage_range
 
     t[GOAL_INDEX["rel_distance"]] = float(np.random.uniform(max(0.0, dist_lo), min(1.0, dist_hi)))
     t[GOAL_INDEX["facing_opponent"]] = 1.0
     t[GOAL_INDEX["frame_advantage_estimate"]] = float(np.random.uniform(max(0.0, adv_lo), min(1.0, adv_hi)))
-    t[GOAL_INDEX["opponent_damage_pct"]] = float(np.random.uniform(max(0.0, dmg_lo), min(1.0, dmg_hi)))
+    # Target is current opponent damage + a positive delta (damage only goes up
+    # until a KO, and episode resets don't restart the match).
+    dmg_target = current_opponent_damage + float(np.random.uniform(delta_lo, delta_hi))
+    t[GOAL_INDEX["opponent_damage_pct"]] = float(np.clip(dmg_target, 0.0, 1.0))
     t[GOAL_INDEX["player_is_offstage"]] = 0.0
     return t
 
 
-def _sampler_fist_attack(_: np.ndarray) -> np.ndarray:
+def _sampler_damage_static_fist(obs: np.ndarray) -> np.ndarray:
     t = _base_target()
-    _set_combat_relational_target(
-        t,
-        requires_weapon=False,
-        rel_distance_range=(0.12, 0.30),
-        opponent_damage_range=(0.20, 0.55),
-        frame_advantage_range=(0.45, 0.85),
-    )
-    return clip_goal_target(t)
-
-
-def _sampler_damage_static_fist(_: np.ndarray) -> np.ndarray:
-    t = _base_target()
+    cur_dmg = float(np.clip(StateSpec.get(obs, "opponent_damage_pct"), 0.0, 1.0))
     _set_combat_relational_target(
         t,
         requires_weapon=False,
         rel_distance_range=(0.10, 0.30),
-        opponent_damage_range=(0.00, 0.35),
+        opponent_damage_delta=(0.05, 0.20),
         frame_advantage_range=(0.40, 0.90),
+        current_opponent_damage=cur_dmg,
     )
     return clip_goal_target(t)
 
 
-def _sampler_damage_static_weapon(_: np.ndarray) -> np.ndarray:
+def _sampler_damage_static_weapon(obs: np.ndarray) -> np.ndarray:
     t = _base_target()
+    cur_dmg = float(np.clip(StateSpec.get(obs, "opponent_damage_pct"), 0.0, 1.0))
     _set_combat_relational_target(
         t,
         requires_weapon=True,
         rel_distance_range=(0.08, 0.22),
-        opponent_damage_range=(0.55, 1.00),
+        opponent_damage_delta=(0.10, 0.20),
         frame_advantage_range=(0.60, 1.00),
+        current_opponent_damage=cur_dmg,
     )
     return clip_goal_target(t)
 
 
-def _sampler_damage_dynamic(_: np.ndarray) -> np.ndarray:
+def _sampler_damage_dynamic(obs: np.ndarray) -> np.ndarray:
     t = _base_target()
+    cur_dmg = float(np.clip(StateSpec.get(obs, "opponent_damage_pct"), 0.0, 1.0))
     _set_combat_relational_target(
         t,
         requires_weapon=True,
         rel_distance_range=(0.10, 0.28),
-        opponent_damage_range=(0.70, 1.00),
+        opponent_damage_delta=(0.15, 0.35),
         frame_advantage_range=(0.70, 1.00),
+        current_opponent_damage=cur_dmg,
     )
     return clip_goal_target(t)
 
@@ -320,52 +317,10 @@ def build_phase_spec(
             resample_goal_on_timer=False,
         )
 
-    if phase == "fist_attack":
-        return StageSpec(
-            stage_id=4,
-            name="phase4_fist_attack",
-            mask=_mask_for(
-                ("player_has_weapon", 1.0),
-                ("in_strike_range", 1.0),
-                ("rel_distance", 1.0),
-                ("facing_opponent", 0.8),
-                ("opponent_damage_pct", 0.6),
-                ("player_is_offstage", 0.7),
-            ),
-            target_sampler=_sampler_fist_attack,
-            feature_names=list(CURRICULUM_GOAL_FEATURES),
-            goal_extractor=extract_curriculum_goal_features,
-            min_goal_duration=16,
-            max_goal_duration=30,
-            progress_scale=2.0,
-            progress_clip_min=-0.25,
-            progress_clip_max=0.8,
-            success_threshold=0.06,
-            success_bonus=1.2,
-            proximity_scale=0.28,
-            chase_rel_distance_scale=0.25,
-            in_strike_range_bonus=0.06,
-            facing_opponent_bonus=0.05,
-            hit_event_bonus=0.10,
-            damage_dealt_scale=1.4,
-            self_damage_penalty_scale=1.0,
-            offstage_penalty_scale=0.08,
-            death_penalty=float(death_penalty),
-            reward_clip=4.0,
-            disable_attack=False,
-            allowed_attack_actions=(0, 1, 2),
-            disable_dodge=False,
-            disable_jump=False,
-            reset_perturb_steps=0,
-            terminate_on_death=bool(terminate_on_death),
-            terminate_on_goal_success=True,
-            resample_goal_on_timer=False,
-        )
-
     if phase == "weapon_control":
         return StageSpec(
-            stage_id=5,
-            name="phase5_weapon_control",
+            stage_id=4,
+            name="phase4_weapon_control",
             mask=_mask_for(
                 ("player_has_weapon", 1.0),
                 ("player_is_offstage", 1.0),
@@ -409,13 +364,13 @@ def build_phase_spec(
 
     if phase == "damage_static_fist":
         return StageSpec(
-            stage_id=6,
-            name="phase6_damage_static_fist",
+            stage_id=5,
+            name="phase5_damage_static_fist",
             mask=_mask_for(
-                ("player_has_weapon", 1.0),
+                ("player_has_weapon", 0.0),
                 ("in_strike_range", 1.0),
-                ("rel_distance", 1.0),
-                ("facing_opponent", 1.0),
+                ("rel_distance", 0.8),
+                ("facing_opponent", 0.9),
                 ("opponent_damage_pct", 1.0),
                 ("player_is_offstage", 0.8),
             ),
@@ -447,15 +402,16 @@ def build_phase_spec(
             step_penalty=0.01,
             terminate_on_death=bool(terminate_on_death),
             terminate_on_goal_success=False,
-            terminate_on_hit_event=True,
-            hit_event_damage_threshold=1e-3,
+            terminate_on_hit_event=False,
             resample_goal_on_timer=False,
+            resample_goal_on_opponent_stock_loss=True,
+            opponent_ko_bonus=5.0,
         )
 
     if phase == "damage_static_weapon":
         return StageSpec(
-            stage_id=7,
-            name="phase7_damage_static_weapon",
+            stage_id=6,
+            name="phase6_damage_static_weapon",
             mask=_mask_for(
                 ("player_has_weapon", 1.0),
                 ("weapon_dx", 0.5),
@@ -493,12 +449,14 @@ def build_phase_spec(
             terminate_on_death=bool(terminate_on_death),
             terminate_on_goal_success=True,
             resample_goal_on_timer=False,
+            resample_goal_on_opponent_stock_loss=True,
+            opponent_ko_bonus=5.0,
         )
 
     if phase == "damage_dynamic":
         return StageSpec(
-            stage_id=8,
-            name="phase8_damage_dynamic",
+            stage_id=7,
+            name="phase7_damage_dynamic",
             mask=_mask_for(
                 ("player_has_weapon", 0.3),
                 ("in_strike_range", 1.0),
@@ -535,6 +493,8 @@ def build_phase_spec(
             terminate_on_death=bool(terminate_on_death),
             terminate_on_goal_success=True,
             resample_goal_on_timer=False,
+            resample_goal_on_opponent_stock_loss=True,
+            opponent_ko_bonus=5.0,
         )
 
     raise ValueError(f"Unknown phase '{phase}'. Expected one of: {', '.join(PHASES)}")

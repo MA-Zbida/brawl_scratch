@@ -111,9 +111,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tracker-max-missing", type=int, default=2, help="Tracker persistence in missed frames")
     p.add_argument("--tracker-smooth-alpha", type=float, default=0.85, help="Tracker smoothing alpha [0,1], higher = closer to YOLO")
 
-    # Keep compatibility with train_stage_model interface.
-    p.add_argument("--algo", type=str, default="ppo", choices=["ppo"])
-
     return p.parse_args()
 
 

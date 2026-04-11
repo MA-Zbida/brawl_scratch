@@ -67,6 +67,16 @@ def read_action_from_keyboard(allowed_attack_values: set[int]) -> np.ndarray:
     return np.array([movement, jump, dodge, attack], dtype=np.int64)
 
 
+_DAMAGE_PHASES = frozenset({"damage_static_fist", "damage_static_weapon", "damage_dynamic", "damage_static"})
+
+_DEFAULT_MAX_STEPS = {
+    # Locomotion / weapon: short episodes suffice.
+    "default": 100,
+    # Damage phases need much longer episodes to match PPO training (1200).
+    "damage": 600,
+}
+
+
 def _build_env(args: argparse.Namespace) -> StageGoalEnv:
     spec = build_phase_spec(
         phase=args.phase,
@@ -75,16 +85,34 @@ def _build_env(args: argparse.Namespace) -> StageGoalEnv:
     )
     # Demo collection should never inject random reset actions.
     spec = replace(spec, reset_perturb_steps=0)
-    if spec.resample_goal_on_timer:
+
+    is_damage = args.phase in _DAMAGE_PHASES
+
+    # For damage phases the PPO spec has resample_goal_on_timer=False, but
+    # for BC collection we NEED fresh goals so the human always has a target.
+    # Override to timer-based resampling with the CLI durations.
+    if is_damage and not spec.resample_goal_on_timer:
+        spec = replace(
+            spec,
+            resample_goal_on_timer=True,
+            min_goal_duration=max(1, int(args.min_goal_duration)),
+            max_goal_duration=max(int(args.min_goal_duration), int(args.max_goal_duration)),
+        )
+    elif spec.resample_goal_on_timer:
         spec = replace(
             spec,
             min_goal_duration=max(1, int(args.min_goal_duration)),
             max_goal_duration=max(int(args.min_goal_duration), int(args.max_goal_duration)),
         )
 
+    # Auto-pick max_episode_steps when the user didn't explicitly set it.
+    max_ep_steps = int(args.max_episode_steps)
+    if max_ep_steps == _DEFAULT_MAX_STEPS["default"] and is_damage:
+        max_ep_steps = _DEFAULT_MAX_STEPS["damage"]
+
     config = EnvConfig(
         terminate_on_stock_out=False,
-        max_episode_steps=int(args.max_episode_steps),
+        max_episode_steps=max_ep_steps,
         yolo_infer_every_n_steps=1,
         action_repeat_steps=1,
         action_repeat_min_steps=1,
@@ -187,15 +215,24 @@ def main() -> None:
     args = parse_args()
     out_path = _resolve_output_path(args)
     hit_damage_threshold = float(max(0.0, args.hit_damage_threshold))
+    phase_lower = str(args.phase).strip().lower()
+    is_damage = phase_lower in _DAMAGE_PHASES
+    phase_requires_weapon = phase_lower in ("damage_static_weapon", "damage_dynamic")
+
+    # Default: never end on first hit — BC episodes should mirror PPO episodes,
+    # which continue after hits until goal progress / max steps.
     if args.end_episode_on_first_hit is None:
-        end_episode_on_first_hit = str(args.phase).strip().lower() == "damage_static_fist"
+        end_episode_on_first_hit = False
     else:
         end_episode_on_first_hit = bool(args.end_episode_on_first_hit)
+
+    # Auto-disable weapon drop for phases that require the agent to hold a weapon.
+    force_drop = bool(args.force_drop_on_episode_end) and not phase_requires_weapon
 
     env = _build_env(args)
     drop_controller: PyDirectInputController | None = None
     drop_warning_printed = False
-    if args.force_drop_on_episode_end:
+    if force_drop:
         try:
             drop_controller = PyDirectInputController()
         except Exception as exc:
@@ -227,12 +264,20 @@ def main() -> None:
     else:
         print("Controls: A/D/S, Space, E (attacks disabled by phase)")
     print(f"Episodes: {args.episodes} | Output: {out_path}")
+    eff_max_steps = int(args.max_episode_steps)
+    if eff_max_steps == _DEFAULT_MAX_STEPS["default"] and is_damage:
+        eff_max_steps = _DEFAULT_MAX_STEPS["damage"]
+    print(f"Max episode steps: {eff_max_steps}")
+    if is_damage:
+        print(f"Damage phase: goal resampling every {spec.min_goal_duration}-{spec.max_goal_duration} steps")
     if mouse_guidance_enabled:
         print("Mouse guidance: enabled (cursor moves to target_x,target_y)")
     elif args.move_mouse_to_goal:
         print("Mouse guidance: disabled (phase goals are relational/non-XY)")
-    if args.force_drop_on_episode_end:
+    if force_drop:
         print("Episode end action: force drop weapon via NUM_5")
+    if phase_requires_weapon:
+        print("Weapon drop disabled (phase requires weapon)")
     if end_episode_on_first_hit:
         print(f"Episode end action: stop on first hit (op_delta_damage >= {hit_damage_threshold:.4f})")
     print("Press Ctrl+C to stop and save partial data.")
@@ -246,6 +291,7 @@ def main() -> None:
     goal_xy_buf: list[np.ndarray] = []
     goal_target_buf: list[np.ndarray] = []
     goal_mask_buf: list[np.ndarray] = []
+    op_ko_buf: list[bool] = []
 
     step_total = 0
     episodes_collected = 0
@@ -277,6 +323,8 @@ def main() -> None:
 
                 next_obs, _reward, terminated, truncated, info = env.step(action_seq)
                 op_delta_damage = float(max(0.0, info.get("op_delta_damage", 0.0)))
+                op_ko_event = float(info.get("op_stock_lost_step", 0.0)) > 0.0
+                op_ko_buf.append(op_ko_event)
                 hit_event = op_delta_damage >= hit_damage_threshold
                 if hit_event:
                     ep_had_hit = True
@@ -303,10 +351,19 @@ def main() -> None:
                 step_total += 1
 
                 if step_total % 100 == 0:
-                    print(
-                        f"steps={step_total} ep={ep}/{args.episodes} ep_steps={ep_steps} "
-                        f"goal_xy=({float(goal_target[0]):.3f}, {float(goal_target[1]):.3f})"
-                    )
+                    if is_damage:
+                        # Show combat-relevant info for damage phases.
+                        op_dd = float(info.get("op_delta_damage", 0.0))
+                        g_err = float(info.get("goal_error", 0.0))
+                        print(
+                            f"steps={step_total} ep={ep}/{args.episodes} ep_steps={ep_steps} "
+                            f"op_delta_dmg={op_dd:.4f} goal_err={g_err:.3f}"
+                        )
+                    else:
+                        print(
+                            f"steps={step_total} ep={ep}/{args.episodes} ep_steps={ep_steps} "
+                            f"goal_xy=({float(goal_target[0]):.3f}, {float(goal_target[1]):.3f})"
+                        )
 
                 if ep_steps >= int(args.max_episode_steps):
                     if not done and len(done_buf) > 0:
@@ -325,7 +382,7 @@ def main() -> None:
                 f"Episode {ep}/{args.episodes} collected steps={ep_steps} "
                 f"reason={end_reason} had_hit={int(ep_had_hit)}"
             )
-            if args.force_drop_on_episode_end:
+            if force_drop:
                 dropped = _force_drop_weapon_num5_key(drop_controller=drop_controller)
                 if not dropped and not drop_warning_printed:
                     print("Force-drop warning: could not send NUM_5 synthetic key press.")
@@ -360,6 +417,7 @@ def main() -> None:
         "goal_xy": len(goal_xy_buf),
         "goal_target": len(goal_target_buf),
         "goal_mask": len(goal_mask_buf),
+        "op_ko_events": len(op_ko_buf),
     }
     aligned_n = min(lengths.values())
     if aligned_n <= 0:
@@ -373,6 +431,7 @@ def main() -> None:
         goal_xy_buf = goal_xy_buf[:aligned_n]
         goal_target_buf = goal_target_buf[:aligned_n]
         goal_mask_buf = goal_mask_buf[:aligned_n]
+        op_ko_buf = op_ko_buf[:aligned_n]
         if len(done_buf) > 0:
             done_buf[-1] = True
 
@@ -382,6 +441,7 @@ def main() -> None:
     goal_xy_arr = np.stack(goal_xy_buf).astype(np.float32)
     goal_target_arr = np.stack(goal_target_buf).astype(np.float32)
     goal_mask_arr = np.stack(goal_mask_buf).astype(np.float32)
+    op_ko_arr = np.asarray(op_ko_buf, dtype=bool)
 
     np.savez_compressed(
         str(out_path),
@@ -391,6 +451,7 @@ def main() -> None:
         goal_xy=goal_xy_arr,
         goal_target=goal_target_arr,
         goal_mask=goal_mask_arr,
+        op_ko_events=op_ko_arr,
         phase=np.asarray([args.phase]),
     )
 

@@ -1,0 +1,1025 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{geometry}
+\usepackage{setspace}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,calc,fit}
+\usepackage[numbers,sort&compress]{natbib}
+\geometry{margin=1in}
+\setstretch{1.12}
+
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{remark}{Remark}
+
+\title{Hierarchical Goal-Conditioned Reinforcement Learning\\for Real-Time Platform Fighting Games:\\A Case Study in Brawlhalla}
+\author{
+  Technical Research Report
+}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% ══════════════════════════════════════════════════════════════
+\begin{abstract}
+We present a hierarchical goal-conditioned reinforcement learning framework for mastering Brawlhalla, a fast-paced competitive platform fighting game.
+The domain poses severe challenges: continuous real-time control at human speed (${\sim}15$ fps), sparse terminal rewards (stock losses separated by thousands of frames), adversarial non-stationarity, and coupled locomotion-combat dynamics that defeat standard flat RL approaches.
+We document a multi-year iterative design trajectory---from naive frame-stacked pixel policies, through intrinsic-curiosity augmentation and deep visual encoders, to the current system---exposing the failure modes that motivated each architectural pivot.
+The final agent combines:
+(i)~a fine-tuned YOLO detector accelerated via TensorRT for structured state extraction,
+(ii)~a Low-Level Controller (LLC) trained as a Universal Value Function Approximator (UVFA) with FiLM-modulated goal conditioning and masked partial-goal specifications,
+(iii)~a staged skill curriculum that decomposes the full game into locomotion, recovery, weapon control, and combat phases, and
+(iv)~a High-Level Strategic Planner (HSP) that issues macro-goals to a frozen LLC.
+The LLC reward is a single principled signal: masked mean absolute error between current feature state and goal target, augmented with sparse terminal events.
+We formalize the goal-conditioned MDP, derive the reward structure from potential-based shaping theory, and detail the FiLM architecture that enables continuous behavioral modulation over a shared motor backbone.
+The resulting agent demonstrates proficient weapon acquisition and combat movement, establishing that goal-conditioned hierarchical RL with structured state abstraction can tractably address domains traditionally considered intractable for end-to-end learning.
+\end{abstract}
+
+% ══════════════════════════════════════════════════════════════
+\section{Introduction}
+\label{sec:intro}
+
+Competitive platform fighting games represent one of the most demanding testbeds for autonomous agent design.
+Unlike board games or turn-based strategy, platform fighters require continuous real-time motor control, long-horizon strategic reasoning, and fast adaptation to an adversary's behavior---all simultaneously.
+Brawlhalla, a free-to-play platform fighter with an active competitive scene, exemplifies these challenges: matches are stock-based (each player has a limited number of lives), damage accumulates continuously, knockback scales with accumulated damage, and the action space encompasses movement, jumping, dodging, and a combinatorial attack system that depends on weapon state, positioning, and frame timing.
+
+Standard deep reinforcement learning methods struggle with such domains for several interconnected reasons.
+First, the \emph{reward signal is extremely sparse}: terminal events (stock losses and wins) can be thousands of frames apart, and intermediate progress signals are not available from the game interface.
+Second, the \emph{observation space is perceptually complex} and mechanically ambiguous: raw pixel inputs conflate visual effects with decision-relevant state.
+Third, the \emph{action space is combinatorial}: at each frame, the agent must jointly decide on movement direction, jump, dodge, and attack type.
+Fourth, training must occur \emph{at human speed} against a running game client, limiting throughput to ${\sim}15$ fps---orders of magnitude slower than typical simulation-based RL.
+
+This paper documents the complete design trajectory of an agent for Brawlhalla, including the failed approaches and the insights they produced.
+The journey from naive pixel-policy methods to the current hierarchical goal-conditioned system was driven by a series of empirically grounded diagnoses of failure:
+pixel-based state representations prevented state differentiation (Section~\ref{sec:pixel-failures});
+intrinsic curiosity failed to resolve reward sparsity under perceptual aliasing (Section~\ref{sec:curiosity-failure});
+deep visual encoders improved state discrimination but could not overcome reward sparsity at ${\sim}2$--$5$ fps throughput (Section~\ref{sec:resnet-failure});
+and flat reward functions proved fundamentally intractable for a game requiring sequential achievement of heterogeneous sub-objectives (Section~\ref{sec:flat-reward-failure}).
+
+These failures converged on the central contribution of this work: a \emph{hierarchical goal-conditioned architecture} in which a Low-Level Controller (LLC) is trained as a Universal Value Function Approximator (UVFA)~\cite{schaul2015universal} over structured, partially-masked feature-space goals, using FiLM-based conditioning~\cite{perez2018film} for continuous behavioral modulation, and organized through a staged skill curriculum.
+A High-Level Strategic Planner (HSP) then composes these skills into match-level play.
+
+\subsection{Contributions}
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Empirical failure analysis} of standard RL approaches (pixel-policy, curiosity-driven exploration, pretrained visual encoders) applied to real-time fighting games, with diagnostic identification of the root causes.
+    \item \textbf{Structured state extraction} via fine-tuned YOLO object detection with TensorRT acceleration, combined with a physics-based Kalman-like memory that yields a 55-dimensional feature observation at $15$ fps.
+    \item \textbf{A UVFA formulation with masked partial goals} and FiLM conditioning, enabling a single policy-value network to serve as a universal controller across locomotion, recovery, spacing, and combat skill categories.
+    \item \textbf{A principled reward function} expressed as masked feature-space MAE augmented with sparse terminal signals, grounded in potential-based reward shaping theory.
+    \item \textbf{A multi-phase skill curriculum} that decomposes the full game into eight training stages with progressive difficulty, action masking, and phase-specific goal distributions.
+    \item \textbf{A world model for imagination-based training} that enables ${\sim}1000\times$ acceleration of LLC training through learned dynamics rollouts.
+\end{enumerate}
+
+
+% ══════════════════════════════════════════════════════════════
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Reinforcement Learning in Fighting and Real-Time Games}
+Early work on fighting game AI relied on scripted state machines or search-based methods~\cite{barriga2019survey}.
+Deep RL approaches have achieved success in Atari~\cite{mnih2015human}, StarCraft~\cite{vinyals2019grandmaster}, and Dota 2~\cite{berner2019dota}, but these either operate in turn-based or heavily discretized time, or benefit from massive parallelized simulation.
+Platform fighters differ qualitatively: they require $60$ Hz motor precision (though our agent operates at ${\sim}15$ Hz with action repetition), continuous spatial reasoning, and tight temporal credit assignment over knockback-death chains that can span hundreds of frames.
+
+\subsection{Goal-Conditioned Reinforcement Learning}
+Goal-conditioned RL~\cite{kaelbling1993learning,schaul2015universal} learns policies $\pi(a|s,g)$ and value functions $V(s,g)$ or $Q(s,a,g)$ conditioned on task-specifying goals.
+Universal Value Function Approximators (UVFAs)~\cite{schaul2015universal} provide the theoretical foundation: a single parameterized family generalizes over both states and goals.
+Hindsight Experience Replay (HER)~\cite{andrychowicz2017hindsight} addresses the sparse reward problem by relabeling failed trajectories with achieved goals, converting every transition into a learning signal.
+Our work extends UVFA to a masked partial-goal formulation where only a subset of feature dimensions are constrained per goal, enabling the same controller to handle goals as diverse as ``reach platform center'' and ``achieve frame advantage in strike range.''
+
+\subsection{Hierarchical Reinforcement Learning}
+Hierarchical RL~\cite{barto2003recent,nachum2018data,levy2019learning} decomposes complex tasks into sub-problems at different temporal abstractions.
+The Options framework~\cite{sutton1999between} and feudal networks~\cite{dayan1992feudal,vezhnevets2017feudal} formalize this decomposition.
+HAM (Hierarchical Abstract Machines)~\cite{parr1997reinforcement} and MAXQ~\cite{dietterich2000hierarchical} provide alternative decomposition strategies.
+Our two-level hierarchy (HSP/LLC) is closest to goal-conditioned HRL~\cite{nachum2018data}, where the high-level policy outputs goals in the same feature space that the low-level policy optimizes over, ensuring objective consistency across levels.
+
+\subsection{Feature-wise Linear Modulation}
+FiLM~\cite{perez2018film} was originally proposed for visual question answering, where linguistic features modulate visual processing via learned affine transforms.
+In RL, FiLM has been applied to multi-task and meta-learning settings~\cite{rakelly2019efficient} to condition shared network backbones on task descriptors.
+We use FiLM to condition an LLC motor backbone on goal latents, enabling continuous behavioral modulation without discrete skill switching.
+
+\subsection{Curriculum Learning for RL}
+Automatic curriculum generation~\cite{bengio2009curriculum,narvekar2020curriculum} sequences tasks to maximize learning progress.
+In goal-conditioned settings, goal curriculum methods~\cite{florensa2018automatic,fang2019curriculum} progressively increase goal difficulty.
+Our staged curriculum is manually designed around the natural skill decomposition of platform fighters (locomotion $\to$ recovery $\to$ weapon acquisition $\to$ combat), with phase-specific action masking and goal distributions.
+
+
+% ══════════════════════════════════════════════════════════════
+\section{The Brawlhalla Domain}
+\label{sec:domain}
+
+Brawlhalla is a two-dimensional platform fighting game in which two (or more) players compete on a floating stage with ledges.
+Each player begins with three stocks (lives).
+Attacks deal damage, increasing the opponent's damage percentage; higher damage causes greater knockback when hit.
+A player loses a stock when knocked off-stage beyond recovery.
+The match ends when one player's stock count reaches zero.
+
+\subsection{Formal Game Characterization}
+
+The game can be characterized by the following properties that distinguish it from domains where deep RL has been most successful:
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Continuous real-time control:} actions must be issued every frame ($60$ Hz native; our agent operates at ${\sim}15$ Hz via dxcam screen capture with action repetition).
+    \item \textbf{Combinatorial action space:} at each decision step, the agent selects from $\mathcal{A} = \{0,1,2,3\} \times \{0,1\} \times \{0,1\} \times \{0,1,2,3\}$, i.e., movement direction, jump, dodge, and attack type simultaneously, yielding $|\mathcal{A}| = 64$ composite actions.
+    \item \textbf{Terminal reward sparsity:} the only unambiguous signals from the game are stock loss/gain events, separated by $500$--$5000$ frames of complex interaction.
+    \item \textbf{Perceptual complexity:} the game renders particle effects, animations, knockback trails, and damage flashes that are visually correlated with but not identical to the underlying game state.
+    \item \textbf{State aliasing under pixels:} multiple mechanically distinct situations produce nearly identical pixel framse (e.g., the same animation at different damage percentages yields identical frames but radically different knockback physics).
+    \item \textbf{Non-stationary adversary:} the opponent adapts or uses unpredictable policies, requiring robust generalization.
+\end{itemize}
+
+\subsection{Why Standard RL Fails}
+\label{sec:why-standard-fails}
+
+The combination of these properties creates a \emph{compound intractability}: reward sparsity prevents learning what to do, perceptual aliasing prevents learning what state the agent is in, and real-time throughput constraints prevent the brute-force data collection that might overcome both.
+No single technique addresses all three simultaneously.
+This motivates the modular approach developed in this work: first solve state representation (YOLO + tracker), then solve credit assignment (goal-conditioned rewards), then solve behavioral complexity (curriculum + hierarchy).
+
+
+% ══════════════════════════════════════════════════════════════
+\section{Failure Modes and Iterative Design}
+\label{sec:failures}
+
+This section documents the failed approaches chronologically, as each failure's diagnosis directly motivated the next architectural decision.
+We consider this trajectory essential for reproducibility and for illuminating the design space of RL for fighting games.
+
+\subsection{Attempt 1: Flat RL with Frame-Stacked Pixel Observations}
+\label{sec:pixel-failures}
+
+\paragraph{Setup.}
+The initial approach was end-to-end deep RL from raw pixels: a convolutional encoder processed $4$-frame stacks, and a single reward function combined stock events, damage deltas, and proximity terms.
+The policy was trained with PPO~\cite{schulman2017proximal}.
+
+\paragraph{Observed failure.}
+The agent converged to trivial degenerate policies: either constant idle or oscillating movement.
+Training curves showed no sustained reward improvement over $500$K frames.
+
+\paragraph{Diagnosis.}
+Examination of the learned representations revealed that the convolutional encoder could not reliably differentiate game states that were visually similar but mechanically distinct.
+Brawlhalla's visual effects (knockback trails, damage flashes, stage particles) dominated the pixel variance while carrying limited state information.
+The agent could not distinguish ``opponent at 30\% damage nearby'' from ``opponent at 150\% damage nearby''---states requiring radically different strategies.
+
+\paragraph{Root cause.}
+\emph{Perceptual aliasing}: the mapping from game state to pixel observation is many-to-one, and the game-relevant features (damage percentage, frame advantage, weapon state) occupy negligible pixel area relative to visual noise.
+
+\subsection{Attempt 2: Intrinsic Curiosity and Exploration Bonuses}
+\label{sec:curiosity-failure}
+
+\paragraph{Hypothesis.}
+If the extrinsic reward is too sparse, intrinsic motivation (curiosity, prediction error bonuses) should drive exploration toward reward-bearing states.
+
+\paragraph{Setup.}
+We augmented the flat pixel-based agent with ICM-style intrinsic rewards~\cite{pathak2017curiosity}: a forward dynamics model in latent space generated prediction-error bonuses to encourage visitation of novel states.
+
+\paragraph{Observed failure.}
+The curiosity signal was dominated by stochastic visual events (particle effects, opponent movement) rather than strategic novelty.
+The agent was ``curious'' about visually noisy states (explosions, knockback effects) but not about strategically meaningful states (positioning for a kill, recovering from offstage).
+
+\paragraph{Diagnosis.}
+Intrinsic curiosity in pixel space conflates visual noise with genuine state novelty.
+In Brawlhalla, death events produce the most visually chaotic frames---the exact frames the curiosity module found most interesting---creating a perverse incentive to die repeatedly.
+
+\paragraph{Root cause.}
+\emph{Curiosity is not goal-directed}: in high-entropy visual domains, prediction error is not aligned with task-relevant exploration.
+The fundamental issue is still state representation, not exploration strategy.
+
+\subsection{Attempt 3: Pretrained Visual Encoders (ResNet)}
+\label{sec:resnet-failure}
+
+\paragraph{Hypothesis.}
+If the problem is feature extraction quality, a pretrained deep visual encoder (ResNet-18, frozen or fine-tuned) should produce more discriminative state embeddings.
+
+\paragraph{Setup.}
+We replaced the trained-from-scratch CNN with a pretrained ResNet-18 encoder, mapping frames to 512-dimensional embeddings.
+The policy network received these embeddings instead of raw pixels.
+
+\paragraph{Partial success.}
+State discrimination improved measurably: t-SNE visualizations of the embeddings showed clearer separation between game phases (neutral, combat, offstage).
+The agent occasionally learned non-trivial movement patterns.
+
+\paragraph{Observed failure.}
+Despite better state embeddings, the agent still failed to learn coherent combat behavior.
+Training throughput dropped to $2$--$5$ fps due to the ResNet forward pass on every frame.
+At this throughput, collecting $500$K training frames required ${\sim}28$--$70$ hours of wall-clock time---per experiment.
+
+\paragraph{Root cause.}
+\emph{Reward sparsity is orthogonal to state quality}: even with perfect state discrimination, if the reward signal only arrives every $2000$ frames, credit assignment remains intractable at $2$--$5$ fps throughput.
+The approach required both a better state representation \emph{and} a fundamentally different reward mechanism.
+
+\subsection{Attempt 4: Flat Reward Shaping with YOLO-Based State}
+\label{sec:flat-reward-failure}
+
+\paragraph{Breakthrough: YOLO for state extraction.}
+The insight that resolved the state representation problem was to treat game-state extraction as an object detection task.
+We fine-tuned a YOLOv8-based detector on annotated Brawlhalla frames to detect players, opponents (in three weapon states), and ground weapons.
+Converting the detector to TensorRT (FP16 precision) increased throughput from ${\sim}5$ fps to ${\sim}15$ fps, making each experiment $3\times$ faster.
+The detected bounding boxes, combined with a physics-based tracker, produce a structured 55-dimensional observation vector (Section~\ref{sec:state-representation}).
+
+\paragraph{Remaining failure.}
+With structured state, we designed a 9-component hand-crafted reward function combining damage dealt, KO bonuses, proximity, weapon possession, and edge penalties.
+The agent learned basic approach behavior but failed to develop coherent multi-phase combat: it would not learn to pick up a weapon \emph{then} approach \emph{then} attack, because the flat reward did not decompose temporal dependencies.
+
+\paragraph{Root cause.}
+\emph{A single reward function cannot decompose sequential sub-objectives.}
+In Brawlhalla, winning requires a chain of skills: recover from offstage, establish center control, acquire a weapon, approach to strike range, achieve frame advantage, and execute an attack.
+A flat reward that sums all these terms creates contradictory gradients (e.g., ``approach opponent'' conflicts with ``stay on stage'' when offstage) and provides no mechanism to prioritize temporally sequential goals.
+
+This diagnosis motivated the transition to hierarchical goal-conditioned RL.
+
+
+% ══════════════════════════════════════════════════════════════
+\section{System Architecture}
+\label{sec:architecture}
+
+The failure analysis converges on three requirements: (1)~structured state representation independent of pixels, (2)~decomposed reward through goal conditioning, and (3)~temporal abstraction through hierarchy.
+The resulting architecture, illustrated in Figure~\ref{fig:architecture}, has three major components.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+    block/.style={rectangle, draw, rounded corners, minimum width=2.8cm, minimum height=0.9cm, align=center, font=\small},
+    component/.style={rectangle, draw, thick, rounded corners, minimum width=3.0cm, minimum height=1.0cm, align=center, font=\small\bfseries, fill=blue!8},
+    arrow/.style={-{Stealth[length=3mm]}, thick},
+    label/.style={font=\footnotesize\itshape, text=gray},
+    scale=0.85, transform shape
+]
+    % Game environment
+    \node[component, fill=red!8] (game) at (0,0) {Brawlhalla\\Game Client};
+
+    % Screen capture + YOLO
+    \node[block, fill=yellow!10] (capture) at (0, 2.0) {dxcam\\Screen Capture};
+    \node[block, fill=yellow!10] (yolo) at (3.5, 2.0) {YOLO Detector\\(TensorRT FP16)};
+    \node[block, fill=yellow!10] (tracker) at (7.0, 2.0) {Tracker +\\Physics Memory};
+
+    % State
+    \node[component, fill=green!8] (state) at (7.0, 4.0) {Structured State\\$s \in \mathbb{R}^{55}$};
+
+    % LLC
+    \node[component, fill=blue!12] (llc) at (3.5, 5.5) {LLC\\$\pi(a|s,g)$, $V(s,g)$};
+    \node[block, fill=blue!5] (film) at (7.5, 5.5) {FiLM\\Extractor};
+
+    % HSP
+    \node[component, fill=purple!10] (hsp) at (0, 7.5) {HSP\\$\pi_H(g|s)$};
+
+    % Goal
+    \node[block, fill=orange!12] (goal) at (3.5, 7.5) {Goal $g = (t, m)$\\$t \in [0,1]^k$, $m \in \{0,1\}^k$};
+
+    % Curriculum
+    \node[block, fill=orange!5] (curriculum) at (7.5, 7.5) {Skill\\Curriculum};
+
+    % Arrows
+    \draw[arrow] (game) -- (capture);
+    \draw[arrow] (capture) -- (yolo);
+    \draw[arrow] (yolo) -- (tracker);
+    \draw[arrow] (tracker) -- (state);
+    \draw[arrow] (state) -- (llc);
+    \draw[arrow] (state) -| (hsp);
+    \draw[arrow] (hsp) -- (goal);
+    \draw[arrow] (goal) -- (llc);
+    \draw[arrow] (curriculum) -- (goal);
+    \draw[arrow] (film) -- (llc);
+    \draw[arrow] (goal) -- (film);
+    \draw[arrow] (llc) -- node[right, label] {action $a$} (game);
+\end{tikzpicture}
+\caption{System architecture. The game client is accessed only through screen capture; YOLO detection and physics-based tracking produce a structured 55-dimensional state. The HSP selects goals from a curriculum-defined distribution; the LLC executes motor control conditioned on goals via FiLM modulation.}
+\label{fig:architecture}
+\end{figure}
+
+
+% ══════════════════════════════════════════════════════════════
+\section{State Representation}
+\label{sec:state-representation}
+
+\subsection{Object Detection via Fine-Tuned YOLO}
+
+The agent observes the game exclusively through screen capture (dxcam, non-blocking mode).
+Each captured frame is processed by a YOLOv8-based object detector fine-tuned on annotated Brawlhalla frames.
+The detector recognizes five classes: \texttt{agent} (self), \texttt{op} (opponent, unarmed), \texttt{op1}/\texttt{op2} (opponent with weapon variants), and \texttt{weapons} (ground items).
+This classification simultaneously solves player identification and weapon-state inference.
+
+For training throughput, the YOLO model is converted from PyTorch to TensorRT with FP16 precision (\texttt{best.engine}), reducing inference latency by ${\sim}3\times$ and enabling the $15$ fps training loop that makes learning tractable.
+
+\subsection{Physics-Based Tracking and State Memory}
+\label{sec:tracker}
+
+Raw YOLO detections are noisy (bounding box jitter, occasional missed frames).
+A SORT-like tracker~\cite{bewley2016simple} with IoU-based Hungarian matching provides temporal consistency, assigning persistent track IDs and estimating per-object velocities.
+Detected positions are fused with physics predictions using exponential smoothing:
+\begin{equation}
+\hat{p}_t = \alpha \cdot p_t^{\text{YOLO}} + (1 - \alpha) \cdot p_t^{\text{physics}}
+\label{eq:position-fusion}
+\end{equation}
+where $\alpha = 0.85$ (tuned for the Brawlhalla detection characteristics) and $p_t^{\text{physics}}$ is a constant-velocity prediction from the previous frame.
+
+A structured memory module maintains persistent state including:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Kinematic state}: position $(x, y) \in [0,1]^2$ (normalized to screen), velocity $(v_x, v_y)$, grounded flag, airborne frame counter.
+    \item \textbf{Combat state}: damage percentage (read from HUD pixel colors via a 9-stage color gradient mapping), hitstun timer, dodge cooldown, frame advantage estimate.
+    \item \textbf{Game state}: stock counts, weapon possession, weapon-on-ground flag.
+    \item \textbf{Relational geometry}: signed displacement to opponent $(dx, dy)$, Euclidean distance, in-strike-range flag ($d < 0.18$), facing direction, displacement to nearest weapon.
+    \item \textbf{Recovery geometry}: distance to nearest ledge, signed horizontal/vertical offsets, offstage flag.
+    \item \textbf{Temporal context}: time-since-last-hit, knockback velocity, relative velocities.
+\end{itemize}
+
+The full observation vector $s \in \mathbb{R}^{55}$ is documented in Table~\ref{tab:state-spec}.
+
+\begin{table}[t]
+\centering
+\caption{State vector $s \in \mathbb{R}^{55}$: feature groups and dimensions.}
+\label{tab:state-spec}
+\small
+\begin{tabular}{@{}llcl@{}}
+\toprule
+\textbf{Group} & \textbf{Features} & \textbf{Dim} & \textbf{Range} \\
+\midrule
+Player kinematics & $x, y, v_x, v_y$, grounded, dmg\%, weapon, jumps, edge, offstage & 10 & $[0,1]$ / $\mathbb{R}$ \\
+Opponent kinematics & (mirrored player features) & 10 & $[0,1]$ / $\mathbb{R}$ \\
+Relational geometry & $dx, dy, d$, strike-range, facing, facing-dir, weapon $dx$/$dy$ & 8 & $[-1,1]$ / $[0,2]$ \\
+Game state & stocks (self/opp), dodge cooldown, weapon-on-ground & 4 & $[0,1]$ \\
+Recovery & ledge distance, signed $dx$/$dy$ to ledge & 3 & $[0,2]$ / $[-1,1]$ \\
+Temporal/strategic & airborne time (self/opp), hitstun (self/opp) & 4 & $[0,1]$ \\
+Combat extended & opp-facing, time-since-hit, knockback, center-dist, \ldots & 12 & various \\
+Previous action & movement, jump, dodge, attack (normalized) & 4 & $[0,1]$ \\
+\midrule
+\textbf{Total} & & \textbf{55} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Damage Estimation from HUD Pixels}
+
+Brawlhalla does not expose damage values programmatically.
+We extract damage percentages by reading pixels from the HUD damage display regions (whose screen coordinates are fixed) and mapping color to damage via a hand-calibrated 9-stage gradient:
+\begin{equation}
+\text{dmg} = f_{\text{color}}(r, g, b) \in [0, 351]
+\end{equation}
+where $f_{\text{color}}$ maps the white$\to$yellow$\to$orange$\to$red$\to$black color progression to damage values.
+Similarly, stock events (stock lost, stock taken) are detected via red/cyan flash detection in HUD regions.
+
+This approach trades robustness for zero-latency state access: it requires fixed HUD positions but avoids any game memory reading or API hooks.
+
+
+% ══════════════════════════════════════════════════════════════
+\section{Goal-Conditioned Low-Level Controller}
+\label{sec:llc}
+
+The LLC is the central contribution of this work.
+It is a goal-conditioned policy $\pi(a | s, g)$ with a corresponding value function $V(s, g)$, trained via PPO under a Universal Value Function Approximator (UVFA) formulation.
+
+\subsection{Goal-Conditioned MDP Formulation}
+
+\begin{definition}[Goal-Conditioned MDP]
+A goal-conditioned MDP is a tuple $(\mathcal{S}, \mathcal{A}, \mathcal{G}, P, r, \gamma)$ where $\mathcal{S}$ is the state space, $\mathcal{A}$ the action space, $\mathcal{G}$ the goal space, $P(s'|s,a)$ the transition dynamics, $r(s, a, g)$ the goal-conditioned reward, and $\gamma \in [0,1)$ the discount factor.
+\end{definition}
+
+In our formulation, $\mathcal{S} = \mathbb{R}^{55}$ (the structured state vector), $\mathcal{A}$ is a $\text{MultiDiscrete}([4, 2, 2, 4])$ action space (64 composite actions), and $\mathcal{G}$ is a structured goal space defined below.
+
+\subsection{Structured Goals with Partial Masking}
+\label{sec:structured-goals}
+
+A key design principle is that goals should specify \emph{regions in feature space}, not point targets.
+Different tactical intentions constrain different subsets of state features.
+We formalize this through a masked goal representation.
+
+\begin{definition}[Masked Partial Goal]
+Let $f: \mathcal{S} \to [0,1]^k$ be a feature extractor mapping states to $k$ normalized goal-relevant features.
+A goal $g = (\mathbf{t}, \mathbf{m})$ consists of a target vector $\mathbf{t} \in [0,1]^k$ and a binary mask $\mathbf{m} \in \{0,1\}^k$.
+The mask indicates which feature dimensions are constrained: $m_i = 1$ means feature $i$ is active, $m_i = 0$ means feature $i$ is unconstrained.
+\end{definition}
+
+The full goal vector is the concatenation $g = [\mathbf{t}; \mathbf{m}] \in \mathbb{R}^{2k}$.
+In our implementation, $k = 7$ (for the HSP combat goals) or $k = 11$ (for the curriculum stages), yielding goal vectors of dimensionality $14$ or $22$.
+
+The seven goal features for combat are:
+\begin{equation}
+f(s) = \bigl[\underbrace{x_{\text{player}}}_{\text{position}},\; \underbrace{d_{\text{ledge}}}_{\text{recovery}},\; \underbrace{\mathbb{1}_{\text{strike}}}_{\text{range}},\; \underbrace{\mathbb{1}_{\text{ground}}}_{\text{grounded}},\; \underbrace{\mathbb{1}_{\text{offstage}}}_{\text{recovery}},\; \underbrace{d_{\text{opponent}}}_{\text{spacing}},\; \underbrace{\Delta_{\text{frame}}}_{\text{advantage}}\bigr]
+\label{eq:goal-features}
+\end{equation}
+Each feature is normalized to $[0,1]$ via per-feature affine bounds.
+
+\begin{remark}[Why partial masking]
+Partial masking is essential for fighting games.
+Consider two tactical goals:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Center control}: constrain $x_{\text{player}} \approx 0.12$, $\mathbb{1}_{\text{ground}} = 1$, $\mathbb{1}_{\text{offstage}} = 0$; leave spacing and frame advantage unconstrained ($m = [1,0,0,1,1,0,0]$).
+    \item \textbf{Pressure}: constrain $\mathbb{1}_{\text{strike}} = 1$, $d_{\text{opponent}} \approx 0.2$, $\Delta_{\text{frame}} \approx 0.8$; leave position and recovery unconstrained ($m = [0,0,1,0,0,1,1]$).
+\end{itemize}
+A single policy must handle both, requiring that unconstrained dimensions do not pollute the goal-error signal.
+The mask achieves this by zeroing out irrelevant dimensions in the error computation.
+\end{remark}
+
+\subsection{Goal Error and Reward Function}
+\label{sec:reward}
+
+The instantaneous goal error is the masked mean absolute error (MAE) between current features and targets:
+
+\begin{definition}[Masked Goal Error]
+\begin{equation}
+\varepsilon(s, g) = \sum_{i=1}^{k} m_i \cdot |f_i(s) - t_i|
+\label{eq:goal-error}
+\end{equation}
+\end{definition}
+
+The LLC reward combines goal progress (a potential-based shaping term) with sparse terminal events:
+
+\begin{equation}
+r(s_t, a_t, g) = \underbrace{\text{clip}\bigl(\lambda_p \cdot [\varepsilon(s_t, g) - \varepsilon(s_{t+1}, g)],\; r_{\min},\; r_{\max}\bigr)}_{\text{goal progress (dense)}} + \underbrace{r_{\text{sparse}}(s_t, s_{t+1})}_{\text{terminal events}}
+\label{eq:llc-reward}
+\end{equation}
+
+where $\lambda_p$ is a progress scale, $[r_{\min}, r_{\max}]$ is a clipping interval (default $[-0.1, 0.3]$), and $r_{\text{sparse}}$ captures stock loss/gain and success bonuses:
+
+\begin{equation}
+r_{\text{sparse}} = \begin{cases}
+    +r_{\text{success}} & \text{if } \varepsilon(s_{t+1}, g) < \varepsilon_{\text{thresh}} \\[4pt]
+    -r_{\text{death}} & \text{if player loses a stock} \\[4pt]
+    +r_{\text{hit}} \cdot \Delta d_{\text{opp}} & \text{if opponent damage increases} \\[4pt]
+    0 & \text{otherwise}
+\end{cases}
+\label{eq:sparse-reward}
+\end{equation}
+
+\begin{proposition}[Reward shaping consistency]
+The goal-progress component $\varepsilon(s_t, g) - \varepsilon(s_{t+1}, g)$ is a potential-based shaping function with potential $\Phi(s, g) = -\varepsilon(s, g)$.
+By the potential-based shaping theorem~\cite{ng1999policy}, adding this term to the base reward preserves the optimal policy (up to the sparse terminal signal), while providing dense gradient information.
+\end{proposition}
+
+\paragraph{The ``one true reward.''}
+After extensive experimentation with multi-component reward functions (Section~\ref{sec:flat-reward-failure}), the system converged to a single principled reward signal:
+\begin{equation}
+\boxed{r = \mathbf{m}^\top \cdot |\,f(s) - \mathbf{t}\,| \;\;\text{(reduction)} + \text{sparse events}}
+\end{equation}
+This is the masked MAE progress plus sparse stock/hit signals.
+No proximity bonuses, no edge penalties, no hand-tuned component weights.
+The mask $\mathbf{m}$ does all the work of directing attention to the relevant features, and the curriculum (Section~\ref{sec:curriculum}) does all the work of sequencing difficulty.
+
+\subsection{Universal Value Function Approximation}
+\label{sec:uvfa}
+
+The LLC is trained as a UVFA: a single parameterized policy-value pair $(\pi_\theta, V_\phi)$ that generalizes across the full distribution of goals.
+
+\begin{definition}[UVFA~\cite{schaul2015universal}]
+A Universal Value Function Approximator is a parameterized function $V_\phi(s, g)$ that approximates the value of state $s$ under goal $g$ for all $(s,g) \in \mathcal{S} \times \mathcal{G}$, with shared parameters $\phi$ across the goal distribution.
+\end{definition}
+
+In the classical formulation, UVFA refers to a $Q$-function $Q(s,a,g)$ learned via temporal-difference methods.
+Our implementation uses the actor-critic variant: PPO trains both $\pi_\theta(a | s, g)$ and $V_\phi(s, g)$, where the goal is included in the observation:
+\begin{equation}
+\tilde{s} = [s;\; \mathbf{t};\; \mathbf{m}] \in \mathbb{R}^{55 + 2k}
+\label{eq:augmented-obs}
+\end{equation}
+
+This augmented observation is processed by the FiLM extractor (Section~\ref{sec:film}), which ensures that goal information modulates state processing rather than being naively concatenated.
+
+\subsection{Hindsight Experience Replay for On-Policy Learning}
+\label{sec:her}
+
+Hindsight Experience Replay (HER)~\cite{andrychowicz2017hindsight} addresses the fundamental sparse-reward problem in goal-conditioned RL by relabeling failed trajectories: if the agent attempted to reach goal $g$ but ended up in state $s'$, HER creates an additional training sample with $g' = f(s')$ as the relabeled goal, under which the transition is ``successful.''
+
+HER was originally designed for off-policy algorithms (DQN, DDPG).
+Combining HER with on-policy methods (PPO) is non-trivial because PPO's policy-gradient estimator assumes that training data was collected under the current policy~\cite{rauber2019hindsight}.
+In our implementation, hindsight relabeling is applied at the behavioral cloning pretraining stage: collected demonstrations are augmented with multiple goal relabeling horizons ($h \in \{1, 2, 4, 8\}$ future steps), generating goal-conditioned supervision tuples $(s_t, g_{t+h}, a_t)$ where $g_{t+h} = f(s_{t+h})$.
+This produces a diverse goal-conditioned initialization that PPO then fine-tunes.
+
+During PPO training itself, the GoalSampler provides goal diversity, and the potential-based reward ensures that every trajectory produces non-trivial gradient signal regardless of whether the goal is achieved, partially substituting for the role of HER in off-policy methods.
+
+
+% ══════════════════════════════════════════════════════════════
+\section{FiLM-Based Goal Modulation}
+\label{sec:film}
+
+The architecture that conditions the LLC policy on goals is critical.
+Naive concatenation of state and goal into a flat vector provides no inductive bias about the \emph{role} of goal information: it forces the network to rediscover that goals should modulate behavior, not simply add input dimensions.
+
+Feature-wise Linear Modulation (FiLM)~\cite{perez2018film} provides a structured alternative: goal information generates affine transformation parameters that modulate the state encoding.
+This creates an inductive bias toward ``the goal tells me \emph{how} to process what I see,'' rather than ``the goal is another thing I see.''
+
+\subsection{Architecture}
+
+Let $s \in \mathbb{R}^{55}$ be the state, $\mathbf{t} \in [0,1]^k$ the goal target, and $\mathbf{m} \in \{0,1\}^k$ the goal mask.
+
+\paragraph{Step 1: State augmentation.}
+Extract the $k$ goal-relevant features from the raw state and compute auxiliary signals:
+\begin{align}
+    \hat{f} &= \text{normalize}\bigl(f(s)\bigr) \in [0,1]^k \label{eq:norm-feats} \\
+    e &= \hat{f} - \mathbf{t} \in [-1,1]^k \quad \text{(goal error)} \label{eq:goal-error-vec} \\
+    \tilde{e} &= \mathbf{m} \odot e \in [-1,1]^k \quad \text{(masked error)} \label{eq:masked-error} \\
+    v_{\text{speed}} &= \tanh\!\bigl(\sqrt{v_x^2 + v_y^2}\bigr) \label{eq:speed} \\
+    \alpha &= \mathbf{m} \odot \text{sign}(e) \cdot v_{\text{speed}} \in [-1,1]^k \quad \text{(goal alignment)} \label{eq:goal-alignment}
+\end{align}
+
+The augmented state input is:
+\begin{equation}
+    s_{\text{aug}} = [s;\; \tilde{e};\; \mathbf{m};\; \alpha] \in \mathbb{R}^{55 + 3k}
+\label{eq:state-aug}
+\end{equation}
+
+The goal-alignment signal $\alpha$ provides the network with a velocity-weighted directional cue: ``I am moving toward/away from each goal feature, at this speed.''
+This auxiliary input accelerates learning by making the relationship between motor output and goal progress directly observable.
+
+\paragraph{Step 2: Dual encoding.}
+State and goal are encoded by separate MLPs:
+\begin{align}
+    \phi(s) &= \text{MLP}_{\text{state}}(s_{\text{aug}}) \in \mathbb{R}^{256} \label{eq:state-enc} \\
+    \psi(g) &= \text{MLP}_{\text{goal}}([\mathbf{t};\; \mathbf{m}]) \in \mathbb{R}^{128} \label{eq:goal-enc}
+\end{align}
+
+\paragraph{Step 3: FiLM modulation with residual.}
+The goal latent generates affine parameters:
+\begin{align}
+    [\gamma;\; \beta] &= W_{\text{FiLM}} \cdot \psi(g) + b_{\text{FiLM}}, \quad \gamma, \beta \in \mathbb{R}^{256} \label{eq:film-params} \\
+    h &= \gamma \odot \phi(s) + \beta + \phi(s) \label{eq:film-modulation}
+\end{align}
+
+The residual connection ($+ \phi(s)$) ensures that the unmodulated state encoding is always available, preventing collapse when the goal provides weak modulation signals (e.g., when few mask dimensions are active).
+
+\paragraph{Step 4: Post-modulation processing.}
+\begin{equation}
+    z = \text{MLP}_{\text{post}}(\text{ReLU}(h)) \in \mathbb{R}^{256}
+\label{eq:post-film}
+\end{equation}
+
+The output $z$ feeds into the PPO policy and value heads (shared extractor, separate heads).
+
+\subsection{Why FiLM over Alternatives}
+\label{sec:film-alternatives}
+
+\paragraph{vs.\ Concatenation.}
+Concatenation treats goal as additional state features with no structural role.
+The network must learn from scratch that goal information is contextual, not observational.
+In practice, we observed that concatenation-based policies learned goal-specific behaviors much more slowly and exhibited sharper performance drops when goal distributions shifted.
+
+\paragraph{vs.\ Discrete skill/intent heads.}
+Discrete skill heads (e.g., one policy head per goal type) impose hard partitions on behavior space.
+This creates boundary artifacts between skills and prevents generalization: the ``center control'' head learns nothing from ``recovery'' experience, even though both involve locomotion to a target.
+FiLM provides continuous modulation over a shared motor backbone, preserving gradient flow across the entire behavior manifold.
+
+\paragraph{vs.\ Hypernetworks.}
+Generating the full policy network from goal context (as in hypernetworks) is more expressive but dramatically increases parameter count and variance.
+FiLM strikes a balance: the goal modulates processing through a low-rank affine transform (${\sim}66$K parameters for the FiLM layer), which is sufficient for our goal dimensionality.
+
+
+% ══════════════════════════════════════════════════════════════
+\section{Skill Curriculum}
+\label{sec:curriculum}
+
+The LLC is not trained on the full game from the start.
+Instead, we decompose the required skill set into a staged curriculum that progressively introduces complexity.
+
+\subsection{Curriculum Design Principles}
+
+The curriculum follows three principles derived from fighting game pedagogy:
+\begin{enumerate}[leftmargin=1.5em]
+    \item \textbf{Motor before strategy:} learn to move before learning to fight.
+    \item \textbf{Constrained before free:} learn with action masking and simplified dynamics before full action access.
+    \item \textbf{Static before dynamic:} learn against static or scripted opponents before adaptive adversaries.
+\end{enumerate}
+
+\subsection{Training Phases}
+
+Each curriculum phase is defined by a \texttt{StageSpec} configuration that specifies: (a) the active goal feature mask, (b) the goal target sampling distribution, (c) action masking (which actions are disabled), (d) reward shaping coefficients, and (e) termination conditions.
+
+Table~\ref{tab:curriculum} summarizes the eight-phase curriculum.
+
+\begin{table}[t]
+\centering
+\caption{LLC training curriculum. Each phase specifies active goal features, action restrictions, and reward focus. Phases are trained sequentially with model warm-starting.}
+\label{tab:curriculum}
+\small
+\begin{tabular}{@{}clp{3.5cm}p{2.8cm}p{3.0cm}@{}}
+\toprule
+\textbf{Phase} & \textbf{Stage Name} & \textbf{Active Goals} & \textbf{Action Mask} & \textbf{Key Reward} \\
+\midrule
+1 & Locomotion (ground) & $x_{\text{player}}, y_{\text{player}}$ & No jump, no attack & Progress + step penalty \\
+2 & Locomotion (air) & $x_{\text{player}}, y_{\text{player}}$ & No attack & Progress + jump penalty \\
+3 & Recovery & $x_{\text{player}}, y_{\text{player}}$ & Dodge allowed & Progress + offstage penalty \\
+4 & Fist attack & 6D combat goal & No weapon required & Hit bonus + dmg scale \\
+5 & Weapon control & weapon $dx$, $dy$, has-weapon & Full & Weapon pickup bonus \\
+6 & Damage (static, fist) & Combat (no weapon) & Full & Damage dealt scale \\
+7 & Damage (static, weapon) & Combat (with weapon) & Full & Damage dealt $\times 2$ \\
+8 & Damage (dynamic) & Full combat goal & Full & Damage dealt $\times 2.5$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Phase transitions.}
+Each phase is trained for a fixed number of timesteps (typically $500$K--$1$M).
+The model from phase $n$ warm-starts phase $n+1$, transferring both the FiLM extractor weights and the policy/value heads.
+Because the FiLM architecture separates state processing from goal modulation, the shared motor backbone transfers well across phases, while the goal encoder adapts to the new goal distribution.
+
+\paragraph{Action masking.}
+Early phases disable combat actions (attack, dodge) so the agent cannot accidentally stumble into reward from combat interactions while learning locomotion.
+This prevents the degenerate policy of ``ignoring locomotion goals but occasionally hitting the opponent by chance.''
+Later phases progressively enable the full action space.
+
+
+% ══════════════════════════════════════════════════════════════
+\section{Hierarchical Strategic Planner}
+\label{sec:hsp}
+
+Once the LLC is trained across the full curriculum, it is frozen and wrapped as a macro-action executor for the High-Level Strategic Planner (HSP).
+
+\subsection{HSP-LLC Interface}
+
+The HSP operates at a coarser temporal resolution: every $T_{\text{macro}} = 12$ primitive steps, the HSP observes the current state $s$ and outputs a goal $g \in \mathcal{G}$.
+The frozen LLC then executes $T_{\text{macro}}$ primitive actions under that goal.
+The HSP's action space is the continuous goal space $\mathcal{G} = [0,1]^k \times \{0,1\}^k$.
+
+\subsection{HSP Reward}
+
+The HSP reward aggregates three signals over the macro-step:
+\begin{equation}
+r_{\text{HSP}} = \lambda_g \sum_{t=1}^{T_{\text{macro}}} [\varepsilon(s_t, g) - \varepsilon(s_{t+1}, g)] + \lambda_c \sum_{t=1}^{T_{\text{macro}}} (\Delta d_{\text{opp}} - \Delta d_{\text{self}}) + \lambda_s \sum_{t=1}^{T_{\text{macro}}} (\Delta k_{\text{opp}} - \Delta k_{\text{self}})
+\label{eq:hsp-reward}
+\end{equation}
+
+where $\Delta d$ denotes damage changes, $\Delta k$ denotes stock changes, and $\lambda_g = 1.0$, $\lambda_c = 0.03$, $\lambda_s = 0.5$ are tuned coefficients.
+
+This reward structure aligns the HSP's optimization with the LLC's capabilities: the HSP is rewarded for choosing goals that the LLC can make progress on \emph{and} that lead to combat advantage.
+
+\subsection{Objective Consistency Across Levels}
+
+A key property of the hierarchy is that both levels share the same goal-error metric $\varepsilon(s, g)$.
+The LLC optimizes $\varepsilon$ directly; the HSP is rewarded for reductions in $\varepsilon$ at the macro level.
+This prevents the planner-controller mismatch that plagues many HRL systems, where the high-level policy's reward function is disconnected from what the low-level policy actually optimizes.
+
+\subsection{Discarded Component: Win Probability Network}
+\label{sec:wpn}
+
+An earlier iteration of the hierarchy included a Win Probability Network (WPN) that predicted win probability from state history.
+The WPN was intended to provide the HSP with a value-like signal for strategic evaluation.
+
+This component was discarded because: (1) the WPN's predictions were excessively noisy under the stochastic game dynamics, (2) the noise propagated into HSP rewards, preventing the planner from distinguishing between beneficial and harmful goal sequences, and (3) the goal-progress-based reward (Eq.~\ref{eq:hsp-reward}) proved sufficient for HSP training once the LLC was competent.
+
+
+% ══════════════════════════════════════════════════════════════
+\section{World Model for Imagination-Based Training}
+\label{sec:world-model}
+
+Training at $15$ fps on a live game client remains a severe bottleneck.
+To accelerate LLC training, we learn a forward dynamics model and use it to generate synthetic rollouts.
+
+\subsection{Dynamics Model}
+
+The world model is a simple MLP that predicts state deltas:
+\begin{equation}
+\hat{s}_{t+1} = s_t + \Delta_\theta(s_t, \text{onehot}(a_t))
+\label{eq:world-model}
+\end{equation}
+
+where $\Delta_\theta: \mathbb{R}^{55} \times \mathbb{R}^{12} \to \mathbb{R}^{55}$ is a 3-layer MLP with LayerNorm and SiLU activations, and $\text{onehot}(a_t) \in \mathbb{R}^{12}$ is the one-hot encoding of the $\text{MultiDiscrete}([4,2,2,4])$ action.
+
+The model is trained on real transitions collected from the game client:
+\begin{equation}
+\mathcal{L} = \frac{1}{N} \sum_{i=1}^{N} \left\| \frac{\Delta_\theta(s_i, a_i) - \mu_\Delta}{\sigma_\Delta} - \frac{(s_i' - s_i) - \mu_\Delta}{\sigma_\Delta} \right\|^2
+\label{eq:wm-loss}
+\end{equation}
+
+where $\mu_\Delta, \sigma_\Delta$ are per-feature delta statistics computed from the training set, and normalization prevents features with large dynamic range from dominating the loss.
+
+\subsection{Imagination Environment}
+
+The trained world model is wrapped as a drop-in Gymnasium environment (\texttt{WorldModelEnv}).
+Reset samples an initial state from the collected real-state pool (filtered to grounded states).
+Steps are computed via $\hat{s}_{t+1} = s_t + \Delta_\theta(s_t, a_t)$ with post-hoc consistency enforcement:
+derived features (relative distances, ledge distances, stage-center distance) are recomputed from the predicted positions to prevent accumulation of geometric inconsistencies during long rollouts.
+
+This imagination environment enables ${\sim}1000\times$ training speedup for the locomotion and recovery curriculum phases, where the dynamics are primarily kinematic and well-captured by the MLP.
+Combat phases still require real-game training due to the discontinuous dynamics of hit events and knockback.
+
+
+% ══════════════════════════════════════════════════════════════
+\section{Theoretical Analysis}
+\label{sec:theory}
+
+\subsection{UVFA Generalization Bounds}
+
+The key theoretical question is whether a single parameterized family $(\pi_\theta, V_\phi)$ can generalize across the goal distribution $\mathcal{G}$.
+Following~\cite{schaul2015universal}, the UVFA approximation error decomposes as:
+\begin{equation}
+\mathbb{E}_{g \sim p(\mathcal{G})}\left[\|V_\phi(\cdot, g) - V^*(\cdot, g)\|_\infty\right] \leq \epsilon_{\text{approx}}(\phi) + \epsilon_{\text{gen}}(|\mathcal{D}|, |\mathcal{G}_{\text{eff}}|)
+\label{eq:uvfa-bound}
+\end{equation}
+
+where $\epsilon_{\text{approx}}$ is the function approximation error (network expressiveness) and $\epsilon_{\text{gen}}$ is the generalization error depending on dataset size $|\mathcal{D}|$ and effective goal dimensionality $|\mathcal{G}_{\text{eff}}|$.
+
+Our masked goal formulation reduces $|\mathcal{G}_{\text{eff}}|$ relative to the full goal space: with $k=7$ dimensions and typical masks activating $2$--$3$ features, the effective goal manifold has dimensionality $2$--$3$ rather than $7$.
+This low effective dimensionality is by design: the mask constrains the goal distribution to fight-game-meaningful manifolds (Section~\ref{sec:structured-goals}).
+
+\subsection{Potential-Based Shaping Preserves Optimality}
+
+\begin{proposition}
+Let $\Phi(s, g) = -\varepsilon(s, g)$ where $\varepsilon$ is the masked goal error (Eq.~\ref{eq:goal-error}).
+The shaping reward $F(s, s', g) = \gamma \Phi(s', g) - \Phi(s, g)$ is a valid potential-based shaping function in the sense of~\cite{ng1999policy}.
+Therefore, any policy optimal under the shaped reward $r + F$ is also optimal under the base reward $r$ alone.
+\end{proposition}
+
+In practice, we use the undiscounted version $F \approx \varepsilon(s_t, g) - \varepsilon(s_{t+1}, g)$ with reward clipping for variance control.
+The clipping introduces a bounded approximation error but dramatically improves training stability.
+
+\subsection{FiLM as Conditional Computation}
+
+FiLM modulation can be interpreted as a form of conditional computation~\cite{bengio2013estimating}: the goal determines which ``mode'' of the shared motor network is activated, without requiring discrete mode selection.
+Formally, the affine transformation $\gamma \odot \phi(s) + \beta$ spans a family of linear operators parameterized by $\psi(g)$:
+\begin{equation}
+h(s, g) = \text{diag}(\gamma(g)) \cdot \phi(s) + \beta(g) + \phi(s)
+\end{equation}
+
+The residual connection ensures that $h(s, g)$ is at least as expressive as $\phi(s)$ alone (the ``unmodulated'' case where $\gamma = 0, \beta = 0$), providing a smooth interpolation between goal-agnostic and goal-specific processing.
+
+
+% ══════════════════════════════════════════════════════════════
+\section{Implementation Details}
+\label{sec:implementation}
+
+\subsection{Training Infrastructure}
+
+All training uses Stable-Baselines3~\cite{raffin2021stable} with PPO.
+Key hyperparameters:
+\begin{itemize}[leftmargin=1.5em]
+    \item Learning rate: $3 \times 10^{-4}$ (phases 1--3), $1 \times 10^{-4}$ (phases 4--8).
+    \item Rollout length: 2048 steps.
+    \item Batch size: 256.
+    \item Discount $\gamma = 0.99$, GAE $\lambda = 0.95$.
+    \item Clip range: $0.2$.
+    \item Entropy coefficient: $0.01$.
+    \item FiLM extractor output dimension: 256.
+    \item State encoder hidden: 256; goal encoder hidden: 128.
+\end{itemize}
+
+\subsection{Environment Configuration}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item Screen capture: dxcam (non-blocking mode), ${\sim}15$ fps effective rate.
+    \item YOLO inference: every 2 frames (alternating with physics-only prediction).
+    \item Position fusion: $\alpha = 0.90$ YOLO / $0.10$ physics prediction.
+    \item Action space: \texttt{MultiDiscrete([4, 2, 2, 4])} flattened to \texttt{Discrete(64)} via mixed-radix encoding.
+    \item Goal resampling: every $[16, 32]$ steps (uniform random duration per goal episode).
+\end{itemize}
+
+\subsection{Behavioral Cloning Pretraining}
+
+Before PPO fine-tuning, the initial LLC policy is pretrained via behavioral cloning on human demonstration data.
+Demonstrations are collected with a goal-relabeling procedure: for each state-action pair $(s_t, a_t)$, multiple future states $s_{t+h}$ ($h \in \{1, 2, 4, 8\}$) provide hindsight goal targets $g_{t+h} = f(s_{t+h})$.
+This generates a diverse goal-conditioned dataset from a small number of expert trajectories.
+
+The BC loss is cross-entropy over the discrete action space:
+\begin{equation}
+\mathcal{L}_{\text{BC}} = -\mathbb{E}_{(s, g, a) \sim \mathcal{D}_{\text{demo}}} \left[\log \pi_\theta(a | s, g)\right]
+\label{eq:bc-loss}
+\end{equation}
+
+
+% ══════════════════════════════════════════════════════════════
+\section{Results and Current Status}
+\label{sec:results}
+
+\subsection{Achieved Capabilities}
+
+The LLC trained through the first five curriculum phases demonstrates:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Grounded locomotion:} the agent reliably navigates to target positions on the platform with sub-$5\%$ position error within ${\sim}30$ frames.
+    \item \textbf{Airborne control:} the agent uses jumps to reach aerial targets and returns to platform.
+    \item \textbf{Recovery:} when launched offstage, the agent navigates back to the nearest ledge using jumps and dodge.
+    \item \textbf{Weapon acquisition:} the agent locates ground weapons, approaches, and picks them up.
+    \item \textbf{Basic combat movement:} the agent enters strike range, maintains spacing, and adjusts position relative to the opponent.
+\end{itemize}
+
+These capabilities transfer across the goal distribution: the same LLC serves center control, recovery, spacing, and pressure goals without retraining, validating the UVFA generalization.
+
+\subsection{Training Efficiency}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Real-game training:} ${\sim}15$ fps, with $500$K steps per phase requiring ${\sim}9$ hours wall-clock.
+    \item \textbf{Imagination training:} ${\sim}15{,}000$ fps (world model rollout), enabling $500$K steps in ${\sim}30$ seconds for locomotion phases.
+    \item \textbf{YOLO vs. ResNet throughput:} TensorRT-accelerated YOLO achieves ${\sim}15$ fps; ResNet-18 encoder achieved ${\sim}3$ fps. The $5\times$ speedup was critical for iterative experimentation.
+\end{itemize}
+
+\subsection{Ongoing and Future Work}
+
+Remaining curriculum phases (6--8: combat with damage objectives) are in active development.
+HSP training (Section~\ref{sec:hsp}) requires a fully trained LLC across all combat skills.
+The WPN was discarded (Section~\ref{sec:wpn}) in favor of the simpler goal-progress-based HSP reward.
+
+
+% ══════════════════════════════════════════════════════════════
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Lessons from the Failure Trajectory}
+
+The most valuable insight from this project is that \emph{each standard RL technique fails in a specific, diagnosable way} when applied to platform fighters:
+
+\begin{enumerate}[leftmargin=1.5em]
+    \item Pixel observations fail due to \emph{perceptual aliasing}: mechanically distinct states produce identical images.
+    \item Intrinsic curiosity fails because \emph{visual entropy is not aligned with strategic novelty}: the most visually interesting events (deaths, explosions) are not the states the agent needs to explore.
+    \item Pretrained encoders solve aliasing but not reward sparsity, and \emph{throughput becomes the binding constraint}.
+    \item Flat reward functions fail because \emph{fighting games require sequential sub-objective decomposition}: a single reward cannot express ``first do A, then B, then C.''
+\end{enumerate}
+
+Each failure mode is individually well-understood in the RL literature, but their \emph{simultaneous co-occurrence} in platform fighters makes the domain a uniquely challenging testbed.
+
+\subsection{The Role of Domain Structure}
+
+The success of the current approach relies heavily on injecting domain structure at multiple levels:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{State representation:} YOLO detection injects the structure ``the world contains identifiable objects with positions and velocities.''
+    \item \textbf{Goal features:} the seven goal dimensions inject the structure ``tactical relevance is determined by position, spacing, grounding, and frame advantage.''
+    \item \textbf{Curriculum:} the phase ordering injects the structure ``locomotion precedes combat in the skill hierarchy.''
+    \item \textbf{FiLM:} the conditioning architecture injects the structure ``goals modulate how states are processed, not what states look like.''
+\end{itemize}
+
+This is a principled departure from end-to-end learning.
+We argue that for domains with strong inherent structure and limited training throughput, structured inductive biases are not a compromise but a necessity.
+
+\subsection{Generalizability}
+
+The framework is applicable to other real-time competitive games with similar characteristics:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Object-detection state extraction} applies wherever game state can be read from visual output (most games without API access).
+    \item \textbf{Masked goal conditioning} applies to any multi-objective control problem where different tasks constrain different state subsets.
+    \item \textbf{FiLM-based UVFA} applies to any goal-conditioned policy learning setting with continuous goal spaces.
+    \item \textbf{Staged curriculum with action masking} applies wherever skills have a natural dependency ordering.
+\end{itemize}
+
+The specific goal features and curriculum phases are Brawlhalla-specific, but the meta-architecture (YOLO $\to$ structured state $\to$ UVFA+FiLM $\to$ curriculum $\to$ hierarchy) transfers to the broader class of real-time adversarial games.
+
+
+% ══════════════════════════════════════════════════════════════
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented a hierarchical goal-conditioned reinforcement learning framework for Brawlhalla, developed through an iterative process of failure analysis and principled architectural response.
+The key message is that real-time fighting games constitute a compound-intractability domain where reward sparsity, perceptual aliasing, combinatorial actions, and throughput limitations co-occur, defeating standard RL methods individually and collectively.
+
+The solution required structured intervention at every level of the learning pipeline:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{State representation:} replacing pixel observations with YOLO-extracted structured features, accelerated via TensorRT.
+    \item \textbf{Credit assignment:} replacing flat reward engineering with a single masked MAE goal-progress signal grounded in potential-based shaping theory.
+    \item \textbf{Behavioral complexity:} decomposing the full skill set through a staged curriculum with progressive action access and goal complexity.
+    \item \textbf{Goal generalization:} training a single UVFA policy with FiLM conditioning to serve as a universal motor controller across all tactical contexts.
+    \item \textbf{Temporal abstraction:} composing learned skills through a hierarchical planner that issues macro-goals to the frozen LLC.
+\end{itemize}
+
+The resulting agent demonstrates proficient locomotion, recovery, weapon acquisition, and basic combat positioning---capabilities that emerge from a single principled reward signal and transfer across the full goal distribution.
+This establishes that goal-conditioned hierarchical RL with structured state abstraction is a viable path toward mastery of domains previously considered intractable for learning-based agents.
+
+
+% ══════════════════════════════════════════════════════════════
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{30}
+
+\bibitem[Andrychowicz et~al.(2017)]{andrychowicz2017hindsight}
+M.~Andrychowicz, F.~Wolski, A.~Ray, J.~Schneider, R.~Fong, P.~Welinder, B.~McGrew, J.~Tobin, P.~Abbeel, and W.~Zaremba.
+\newblock Hindsight experience replay.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2017.
+
+\bibitem[Barriga et~al.(2019)]{barriga2019survey}
+N.~A. Barriga, M.~J.~H. Stanescu, and M.~Buro.
+\newblock Game AI for domination-style games.
+\newblock \emph{IEEE Transactions on Games}, 11(4):339--352, 2019.
+
+\bibitem[Barto and Mahadevan(2003)]{barto2003recent}
+A.~G. Barto and S.~Mahadevan.
+\newblock Recent advances in hierarchical reinforcement learning.
+\newblock \emph{Discrete Event Dynamic Systems}, 13(1-2):41--77, 2003.
+
+\bibitem[Bengio(2013)]{bengio2013estimating}
+Y.~Bengio.
+\newblock Estimating or propagating gradients through stochastic neurons for conditional computation.
+\newblock \emph{arXiv preprint arXiv:1308.3432}, 2013.
+
+\bibitem[Bengio et~al.(2009)]{bengio2009curriculum}
+Y.~Bengio, J.~Louradour, R.~Collobert, and J.~Weston.
+\newblock Curriculum learning.
+\newblock In \emph{Proceedings of the 26th International Conference on Machine Learning (ICML)}, 2009.
+
+\bibitem[Berner et~al.(2019)]{berner2019dota}
+C.~Berner, G.~Brockman, B.~Chan, V.~Cheung, P.~D\k{e}biak, C.~Dennison, D.~Farhi, Q.~Fischer, S.~Hashme, C.~Hesse, et~al.
+\newblock Dota 2 with large scale deep reinforcement learning.
+\newblock \emph{arXiv preprint arXiv:1912.06680}, 2019.
+
+\bibitem[Bewley et~al.(2016)]{bewley2016simple}
+A.~Bewley, Z.~Ge, L.~Ott, F.~Ramos, and B.~Upcroft.
+\newblock Simple online and realtime tracking.
+\newblock In \emph{IEEE International Conference on Image Processing (ICIP)}, 2016.
+
+\bibitem[Dayan and Hinton (1992)]{dayan1992feudal}
+P.~Dayan and G.~E. Hinton.
+\newblock Feudal reinforcement learning.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 1992.
+
+\bibitem[Dietterich(2000)]{dietterich2000hierarchical}
+T.~G. Dietterich.
+\newblock Hierarchical reinforcement learning with the MAXQ value function decomposition.
+\newblock \emph{Journal of Artificial Intelligence Research}, 13:227--303, 2000.
+
+\bibitem[Fang et~al.(2019)]{fang2019curriculum}
+M.~Fang, T.~Zhou, Y.~Du, L.~Han, and Z.~Zhang.
+\newblock Curriculum-guided hindsight experience replay.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2019.
+
+\bibitem[Florensa et~al.(2018)]{florensa2018automatic}
+C.~Florensa, D.~Held, X.~Geng, and P.~Abbeel.
+\newblock Automatic goal generation for reinforcement learning agents.
+\newblock In \emph{Proceedings of the 35th International Conference on Machine Learning (ICML)}, 2018.
+
+\bibitem[Kaelbling(1993)]{kaelbling1993learning}
+L.~P. Kaelbling.
+\newblock Learning to achieve goals.
+\newblock In \emph{Proceedings of the 13th International Joint Conference on Artificial Intelligence (IJCAI)}, 1993.
+
+\bibitem[Levy et~al.(2019)]{levy2019learning}
+A.~Levy, G.~Konidaris, R.~Platt, and K.~Saenko.
+\newblock Learning multi-level hierarchies with hindsight.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2019.
+
+\bibitem[Mnih et~al.(2015)]{mnih2015human}
+V.~Mnih, K.~Kavukcuoglu, D.~Silver, A.~A. Rusu, J.~Veness, M.~G. Bellemare, A.~Graves, M.~Riedmiller, A.~K. Fidjeland, G.~Ostrovski, et~al.
+\newblock Human-level control through deep reinforcement learning.
+\newblock \emph{Nature}, 518(7540):529--533, 2015.
+
+\bibitem[Nachum et~al.(2018)]{nachum2018data}
+O.~Nachum, S.~Gu, H.~Lee, and S.~Levine.
+\newblock Data-efficient hierarchical reinforcement learning.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2018.
+
+\bibitem[Narvekar et~al.(2020)]{narvekar2020curriculum}
+S.~Narvekar, B.~Peng, M.~Leonetti, J.~Sinapov, M.~E. Taylor, and P.~Stone.
+\newblock Curriculum learning for reinforcement learning domains: A framework and survey.
+\newblock \emph{Journal of Machine Learning Research}, 21(181):1--50, 2020.
+
+\bibitem[Ng et~al.(1999)]{ng1999policy}
+A.~Y. Ng, D.~Harada, and S.~Russell.
+\newblock Policy invariance under reward transformations: Theory and application to reward shaping.
+\newblock In \emph{Proceedings of the 16th International Conference on Machine Learning (ICML)}, 1999.
+
+\bibitem[Parr and Russell(1997)]{parr1997reinforcement}
+R.~Parr and S.~Russell.
+\newblock Reinforcement learning with hierarchies of machines.
+\newblock In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 1997.
+
+\bibitem[Pathak et~al.(2017)]{pathak2017curiosity}
+D.~Pathak, P.~Agrawal, A.~A. Efros, and T.~Darrell.
+\newblock Curiosity-driven exploration by self-supervised prediction.
+\newblock In \emph{Proceedings of the 34th International Conference on Machine Learning (ICML)}, 2017.
+
+\bibitem[Perez et~al.(2018)]{perez2018film}
+E.~Perez, F.~Strub, H.~de~Vries, V.~Dumoulin, and A.~Courville.
+\newblock FiLM: Visual reasoning with a general conditioning layer.
+\newblock In \emph{Proceedings of the AAAI Conference on Artificial Intelligence}, 2018.
+
+\bibitem[Raffin et~al.(2021)]{raffin2021stable}
+A.~Raffin, A.~Hill, A.~Gleave, A.~Kanervisto, M.~Ernestus, and N.~Dormann.
+\newblock Stable-Baselines3: Reliable reinforcement learning implementations.
+\newblock \emph{Journal of Machine Learning Research}, 22(268):1--8, 2021.
+
+\bibitem[Rakelly et~al.(2019)]{rakelly2019efficient}
+K.~Rakelly, A.~Zhou, C.~Finn, S.~Levine, and D.~Quillen.
+\newblock Efficient off-policy meta-reinforcement learning via probabilistic context variables.
+\newblock In \emph{Proceedings of the 36th International Conference on Machine Learning (ICML)}, 2019.
+
+\bibitem[Rauber et~al.(2019)]{rauber2019hindsight}
+P.~Rauber, A.~Ummadisingu, F.~Mutz, and J.~Schmidhuber.
+\newblock Hindsight policy gradients.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2019.
+
+\bibitem[Schaul et~al.(2015)]{schaul2015universal}
+T.~Schaul, D.~Horgan, K.~Gregor, and D.~Silver.
+\newblock Universal value function approximators.
+\newblock In \emph{Proceedings of the 32nd International Conference on Machine Learning (ICML)}, 2015.
+
+\bibitem[Schulman et~al.(2017)]{schulman2017proximal}
+J.~Schulman, F.~Wolski, P.~Dhariwal, A.~Radford, and O.~Klimov.
+\newblock Proximal policy optimization algorithms.
+\newblock \emph{arXiv preprint arXiv:1707.06347}, 2017.
+
+\bibitem[Sutton et~al.(1999)]{sutton1999between}
+R.~S. Sutton, D.~Precup, and S.~Singh.
+\newblock Between MDPs and semi-MDPs: A framework for temporal abstraction in reinforcement learning.
+\newblock \emph{Artificial Intelligence}, 112(1-2):181--211, 1999.
+
+\bibitem[Vezhnevets et~al.(2017)]{vezhnevets2017feudal}
+A.~S. Vezhnevets, S.~Osindero, T.~Schaul, N.~Hadsell, N.~Heess, and R.~Munos.
+\newblock FeUdal networks for hierarchical reinforcement learning.
+\newblock In \emph{Proceedings of the 34th International Conference on Machine Learning (ICML)}, 2017.
+
+\bibitem[Vinyals et~al.(2019)]{vinyals2019grandmaster}
+O.~Vinyals, I.~Babuschkin, W.~M. Czarnecki, M.~Mathieu, A.~Dudzik, J.~Chung, D.~H. Choi, R.~Powell, T.~Ewalds, P.~Georgiev, et~al.
+\newblock Grandmaster level in StarCraft II using multi-agent reinforcement learning.
+\newblock \emph{Nature}, 575(7782):350--354, 2019.
+
+\end{thebibliography}
+
+\end{document}

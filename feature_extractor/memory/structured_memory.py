@@ -71,7 +71,7 @@ class Physics:
 
 
 class Memory:
-    def __init__(self, yolo_blend_alpha: float = 0.85):
+    def __init__(self, yolo_blend_alpha: float = 0.95):
         self.max_health = 351.0
         self.max_stocks = 3.0
         self.min_xy = 0.0
@@ -131,7 +131,7 @@ class Memory:
         self._prev_action = np.zeros(4, dtype=np.float32)
 
     def set_yolo_blend_alpha(self, alpha: float) -> None:
-        """Set fusion weight for YOLO position vs physics fallback."""
+        """Set fusion weight for YOLO position vs tracker output."""
         self._alpha_blend = float(np.clip(alpha, 0.0, 1.0))
 
     def _clamp_position(self, x: float, y: float) -> Tuple[float, float]:
@@ -158,7 +158,8 @@ class Memory:
     def _update_fighter(
         self,
         state: FighterState,
-        detection: Optional[dict],
+        yolo_detection: Optional[dict],
+        tracker_detection: Optional[dict],
         dt: float = 1.0 / 41.0,
         max_vel: float = 3.0,
         max_missing: int = 10,
@@ -166,57 +167,71 @@ class Memory:
     ) -> None:
         dt = max(1e-6, float(dt))
 
-        # ── physics prediction from previous state ──────────────
-        x_phys = state.x + state.vx * dt
+        yolo_xy: Optional[Tuple[float, float]] = None
+        tracker_xy: Optional[Tuple[float, float]] = None
 
-        if state.grounded:
-            y_phys = state.y
-            vx_phys = state.vx * max(0.0, 1.0 - self.physics.ground_friction * dt)
-            vy_phys = 0.0
-        else:
-            vy_phys = state.vy + self.physics.gravity * dt
-            y_phys = state.y + state.vy * dt + 0.5 * self.physics.gravity * dt * dt
-            vx_phys = state.vx * max(0.0, 1.0 - self.physics.air_friction * dt)
+        if yolo_detection is not None:
+            x, y = bbox_center(yolo_detection)
+            yolo_xy = self._clamp_position(x, y + float(y_offset))
 
-        if detection is not None:
-            x_yolo, y_yolo = bbox_center(detection)
-            y_yolo += float(y_offset)
-            x_yolo, y_yolo = self._clamp_position(x_yolo, y_yolo)
+        if tracker_detection is not None:
+            x, y = bbox_center(tracker_detection)
+            tracker_xy = self._clamp_position(x, y + float(y_offset))
 
-            # Blend: pos = alpha * YOLO + (1 - alpha) * physics
+        if yolo_xy is not None and tracker_xy is not None:
+            # Desired fusion: alpha * YOLO + (1 - alpha) * tracker.
             alpha = self._alpha_blend
-            x_new = alpha * x_yolo + (1.0 - alpha) * x_phys
-            y_new = alpha * y_yolo + (1.0 - alpha) * y_phys
-            x_new, y_new = self._clamp_position(x_new, y_new)
-
+            x_new = (alpha * yolo_xy[0]) + ((1.0 - alpha) * tracker_xy[0])
+            y_new = (alpha * yolo_xy[1]) + ((1.0 - alpha) * tracker_xy[1])
+        elif yolo_xy is not None:
+            x_new, y_new = yolo_xy
+        elif tracker_xy is not None:
+            x_new, y_new = tracker_xy
+        else:
+            # No physics fallback: keep last location until detections return.
             state.last_x, state.last_y = state.x, state.y
-            state.vx = clamp((x_new - state.x) / dt, -max_vel, max_vel)
-            state.vy = clamp((y_new - state.y) / dt, -max_vel, max_vel)
-            state.x, state.y = x_new, y_new
-            state.exists = True
-            state.missing_frames = 0
-            state.confidence = min(1.0, state.confidence + 0.15)
+            state.vx = 0.0
+            state.vy = 0.0
+            state.missing_frames += 1
+            state.confidence *= 0.92
+            if state.missing_frames > max_missing:
+                state.exists = False
             return
 
-        # ── no detection: pure physics fallback ─────────────────
+        x_new, y_new = self._clamp_position(x_new, y_new)
         state.last_x, state.last_y = state.x, state.y
-        state.x, state.y = self._clamp_position(x_phys, y_phys)
-        state.vx = clamp(vx_phys, -max_vel, max_vel)
-        state.vy = clamp(vy_phys, -max_vel, max_vel)
+        state.vx = clamp((x_new - state.x) / dt, -max_vel, max_vel)
+        state.vy = clamp((y_new - state.y) / dt, -max_vel, max_vel)
+        state.x, state.y = x_new, y_new
+        state.exists = True
+        state.missing_frames = 0
 
-        state.missing_frames += 1
-        state.confidence *= 0.95
-        if state.missing_frames > max_missing:
-            state.exists = False
+        if yolo_detection is not None:
+            det_conf = float(yolo_detection.get("confidence", 0.0))
+        elif tracker_detection is not None:
+            det_conf = 0.85 * float(tracker_detection.get("confidence", 0.0))
+        else:
+            det_conf = 0.0
+        state.confidence = float(np.clip((0.5 * state.confidence) + (0.5 * det_conf), 0.0, 1.0))
 
-    def update_from_detections(self, detections: List[dict], dt: float = 1.0 / 41.0) -> None:
-        player_det = self._select_detection(detections, ["agent"], self.player)
-        opponent_det = self._select_detection(detections, ["op", "op1", "op2"], self.opponent)
-        weapon_candidates = [d for d in detections if d.get("class_name") == "weapons"]
+    def update_from_detections(
+        self,
+        detections: List[dict],
+        dt: float = 1.0 / 41.0,
+        raw_detections: Optional[List[dict]] = None,
+    ) -> None:
+        tracked_detections = list(detections or [])
+        yolo_detections = list(raw_detections if raw_detections is not None else tracked_detections)
 
-        self._update_fighter(self.player, player_det, dt=dt, y_offset=self.player.height)
-        self._update_fighter(self.opponent, opponent_det, dt=dt)
+        player_yolo = self._select_detection(yolo_detections, ["agent"], self.player)
+        player_track = self._select_detection(tracked_detections, ["agent"], self.player)
+        opponent_yolo = self._select_detection(yolo_detections, ["op", "op1", "op2"], self.opponent)
+        opponent_track = self._select_detection(tracked_detections, ["op", "op1", "op2"], self.opponent)
 
+        self._update_fighter(self.player, player_yolo, player_track, dt=dt, y_offset=self.player.height)
+        self._update_fighter(self.opponent, opponent_yolo, opponent_track, dt=dt)
+
+        opponent_det = opponent_yolo if opponent_yolo is not None else opponent_track
         if opponent_det is not None:
             op_name = str(opponent_det.get("class_name", "op"))
             if op_name == "op1":
@@ -226,14 +241,42 @@ class Memory:
             else:
                 self.opponent.weapon_state = 0.0
 
-        if weapon_candidates:
-            closest = min(
-                weapon_candidates,
+        yolo_weapon_candidates = [d for d in yolo_detections if d.get("class_name") == "weapons"]
+        tracker_weapon_candidates = [d for d in tracked_detections if d.get("class_name") == "weapons"]
+
+        yolo_weapon = None
+        tracker_weapon = None
+        if yolo_weapon_candidates:
+            yolo_weapon = min(
+                yolo_weapon_candidates,
                 key=lambda d: euclidian(bbox_center(d), (self.player.x, self.player.y)),
             )
-            wx, wy = bbox_center(closest)
-            wx, wy = self._clamp_position(wx, wy)
-            self.weapon.x, self.weapon.y = wx, wy
+        if tracker_weapon_candidates:
+            tracker_weapon = min(
+                tracker_weapon_candidates,
+                key=lambda d: euclidian(bbox_center(d), (self.player.x, self.player.y)),
+            )
+
+        if yolo_weapon is not None or tracker_weapon is not None:
+            if yolo_weapon is not None:
+                wx_yolo, wy_yolo = self._clamp_position(*bbox_center(yolo_weapon))
+            else:
+                wx_yolo, wy_yolo = 0.0, 0.0
+            if tracker_weapon is not None:
+                wx_track, wy_track = self._clamp_position(*bbox_center(tracker_weapon))
+            else:
+                wx_track, wy_track = 0.0, 0.0
+
+            if yolo_weapon is not None and tracker_weapon is not None:
+                alpha = self._alpha_blend
+                wx = (alpha * wx_yolo) + ((1.0 - alpha) * wx_track)
+                wy = (alpha * wy_yolo) + ((1.0 - alpha) * wy_track)
+            elif yolo_weapon is not None:
+                wx, wy = wx_yolo, wy_yolo
+            else:
+                wx, wy = wx_track, wy_track
+
+            self.weapon.x, self.weapon.y = self._clamp_position(wx, wy)
             self.weapon.exists = True
             self.weapon.missing_frames = 0
         else:
@@ -263,7 +306,9 @@ class Memory:
 
     def update_on_ground(self, vy_threshold: float | None = None) -> None:
         _ = vy_threshold
-        player_foot_y = self.player.y + (self.player.height / 2.0)
+        # Player y is already shifted by player.height at detection update time
+        # (see update_from_detections -> _update_fighter with y_offset=self.player.height).
+        player_foot_y = self.player.y
         opponent_foot_y = self.opponent.y + (self.opponent.height / 2.0)
 
         player_in_x = self.platform.x_min <= self.player.x <= self.platform.x_max
@@ -504,12 +549,37 @@ class Memory:
             euclidian((self.player.x, self.player.y), (self.opponent.x, self.opponent.y)) if both else 1.0
         )
 
-        strike_range = 0.18
-        in_strike_range = 1.0 if (both and self.rel_distance < strike_range) else 0.0
+        # User-calibrated hit windows:
+        # - ~0.01: guaranteed/light-confirm range
+        # - ~0.15: enlarged awareness band for policy shaping
+        guaranteed_hit_range = 0.01
+        extended_hit_range = 0.15
+        if both:
+            if self.rel_distance <= guaranteed_hit_range:
+                in_strike_range = 1.0
+            elif self.rel_distance <= extended_hit_range:
+                # Smoothly decay confidence through the extended range band.
+                in_strike_range = float(
+                    (extended_hit_range - self.rel_distance)
+                    / max(1e-6, extended_hit_range - guaranteed_hit_range)
+                )
+            else:
+                in_strike_range = 0.0
+        else:
+            in_strike_range = 0.0
 
         facing = 0.0
-        if both and abs(self._player_last_dx) > 0.1:
-            facing = 1.0 if (self.rel_dx * self._player_last_dx > 0) else -1.0
+        if both:
+            # Facing from previous horizontal input:
+            # movement=1 (right) and opponent on right => facing opponent
+            # movement=0 (left) and opponent on left  => facing opponent
+            prev_move = int(np.clip(self._prev_action[0], 0.0, 3.0))
+            if prev_move == 1:
+                facing = 1.0 if self.rel_dx > 0.0 else -1.0
+            elif prev_move == 0:
+                facing = 1.0 if self.rel_dx < 0.0 else -1.0
+            else:
+                facing = -1.0
 
         player_facing_dir = 0.0
         if abs(self._player_last_dx) > 0.1:

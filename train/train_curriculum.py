@@ -107,7 +107,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-terminate-on-death", action="store_true")
     p.add_argument("--move-mouse-to-goal", action="store_true", default=False)
     p.add_argument("--yolo-every", type=int, default=2, help="Run YOLO every N env steps (1 = max YOLO authority)")
-    p.add_argument("--yolo-blend-alpha", type=float, default=0.90, help="YOLO fusion weight in memory update [0,1]")
+    p.add_argument("--yolo-blend-alpha", type=float, default=0.95, help="YOLO fusion weight in memory update [0,1]")
     p.add_argument("--tracker-max-missing", type=int, default=2, help="Tracker persistence in missed frames")
     p.add_argument("--tracker-smooth-alpha", type=float, default=0.85, help="Tracker smoothing alpha [0,1], higher = closer to YOLO")
 
@@ -119,7 +119,7 @@ def make_env(
     spec,
     move_mouse_to_goal: bool = False,
     yolo_every: int = 2,
-    yolo_blend_alpha: float = 0.90,
+    yolo_blend_alpha: float = 0.95,
     tracker_max_missing: int = 4,
     tracker_smooth_alpha: float = 0.75,
 ) -> gym.Env:

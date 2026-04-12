@@ -75,6 +75,18 @@ class StageSpec:
     damage_dealt_scale: float = 0.0
     self_damage_penalty_scale: float = 0.0
     offstage_penalty_scale: float = 0.0
+    combo_penalty_scale: float = 0.0  # penalize opponent_time_since_hit to encourage combos
+    attack_whiff_penalty_scale: float = 0.0  # penalize attack inputs that do not connect
+    attack_commit_threshold: float = 0.7
+    attack_commit_bonus: float = 0.0
+    no_attack_in_range_penalty: float = 0.0
+    attack_out_of_range_threshold: float = 0.5
+    attack_out_of_range_keep_prob: float = 1.0
+    combo_chain_bonus_scale: float = 0.0
+    combo_chain_reset_time_since_hit: float = 0.12
+    require_attack_for_success: bool = False
+    require_opponent_damage_for_success: bool = False
+    opponent_damage_success_tolerance: float = 0.01
     use_l2_error: bool = False
     death_penalty: float = 0.0    # penalty applied when agent loses a stock
     velocity_penalty_scale: float = 0.0   # penalise speed when near goal
@@ -159,6 +171,8 @@ class StageGoalEnv(gym.Wrapper):
         self._awaiting_respawn_after_death = False
         self._prev_error: float | None = None
         self._prev_has_weapon: Optional[bool] = None
+        self._prev_in_range: float = 0.0
+        self._combo_chain_hits: int = 0
         self._allowed_attack_actions: Optional[set[int]] = None
         if spec.allowed_attack_actions is not None:
             allowed = {int(v) for v in spec.allowed_attack_actions}
@@ -387,6 +401,8 @@ class StageGoalEnv(gym.Wrapper):
             self._maybe_update_player_xy_goal(obs)
             self._active_mask = self._effective_mask_for_step(init_feats)
         self._prev_has_weapon = self._feature_value(init_feats, "player_has_weapon", 0.0) > 0.5
+        self._prev_in_range = float(np.clip(self._feature_value(init_feats, "in_strike_range", 0.0), 0.0, 1.0))
+        self._combo_chain_hits = 0
         self._prev_error = None
 
         info["stage_name"] = self.stage_spec.name
@@ -401,6 +417,16 @@ class StageGoalEnv(gym.Wrapper):
             action_arr[3] = 0
         elif self._allowed_attack_actions is not None and int(action_arr[3]) not in self._allowed_attack_actions:
             action_arr[3] = 0
+
+        # Action grounding: when clearly out of range, reduce attack frequency
+        # to bias the policy toward spacing first, then commit.
+        if action_arr.shape[0] > 3 and int(action_arr[3]) != 0:
+            keep_prob = float(np.clip(self.stage_spec.attack_out_of_range_keep_prob, 0.0, 1.0))
+            if keep_prob < 1.0:
+                if self._prev_in_range < float(np.clip(self.stage_spec.attack_out_of_range_threshold, 0.0, 1.0)):
+                    if float(np.random.rand()) > keep_prob:
+                        action_arr[3] = 0
+
         attack_input = int(action_arr[3]) if action_arr.shape[0] > 3 else 0
         if self.stage_spec.disable_dodge:
             action_arr[2] = 0
@@ -457,6 +483,11 @@ class StageGoalEnv(gym.Wrapper):
         damage_bonus = 0.0
         self_damage_penalty = 0.0
         offstage_penalty = 0.0
+        combo_delay_penalty = 0.0
+        attack_whiff_penalty = 0.0
+        attack_commit_bonus_applied = 0.0
+        no_attack_in_range_penalty_applied = 0.0
+        combo_chain_bonus = 0.0
         if self._goal_active:
             self._maybe_update_player_xy_goal(obs)
             self._active_mask = self._effective_mask_for_step(curr_feats)
@@ -486,6 +517,17 @@ class StageGoalEnv(gym.Wrapper):
             facing_norm = float(np.clip(self._feature_value(curr_feats, "facing_opponent", 0.5), 0.0, 1.0))
             facing_score = max(0.0, (2.0 * facing_norm) - 1.0)
             offstage = float(np.clip(self._feature_value(curr_feats, "player_is_offstage", 0.0), 0.0, 1.0))
+            time_since_hit = float(np.clip(StateSpec.get(obs, "opponent_time_since_hit"), 0.0, 1.0))
+
+            # Stage A: immediate supervision on attack timing.
+            commit_threshold = float(np.clip(self.stage_spec.attack_commit_threshold, 0.0, 1.0))
+            if in_range > commit_threshold:
+                if attack_input != 0 and self.stage_spec.attack_commit_bonus > 0.0:
+                    attack_commit_bonus_applied = float(self.stage_spec.attack_commit_bonus)
+                    reward += attack_commit_bonus_applied
+                elif attack_input == 0 and self.stage_spec.no_attack_in_range_penalty > 0.0:
+                    no_attack_in_range_penalty_applied = float(self.stage_spec.no_attack_in_range_penalty)
+                    reward -= no_attack_in_range_penalty_applied
 
             if self.stage_spec.chase_rel_distance_scale > 0.0:
                 chase_bonus = float(self.stage_spec.chase_rel_distance_scale * (1.0 - rel_distance))
@@ -518,7 +560,41 @@ class StageGoalEnv(gym.Wrapper):
                 offstage_penalty = float(self.stage_spec.offstage_penalty_scale * offstage)
                 reward -= offstage_penalty
 
+            if self.stage_spec.combo_penalty_scale > 0.0:
+                combo_delay_penalty = float(self.stage_spec.combo_penalty_scale * time_since_hit)
+                reward -= combo_delay_penalty
+
+            if self.stage_spec.attack_whiff_penalty_scale > 0.0 and attack_input != 0 and op_delta_damage <= 1e-6:
+                attack_whiff_penalty = float(self.stage_spec.attack_whiff_penalty_scale)
+                reward -= attack_whiff_penalty
+
+            # Stage C: reward longer hit chains.
+            if op_delta_damage > 1e-6:
+                self._combo_chain_hits += 1
+                if self.stage_spec.combo_chain_bonus_scale > 0.0:
+                    combo_chain_bonus = float(self.stage_spec.combo_chain_bonus_scale * self._combo_chain_hits)
+                    reward += combo_chain_bonus
+            elif time_since_hit > float(np.clip(self.stage_spec.combo_chain_reset_time_since_hit, 0.0, 1.0)):
+                self._combo_chain_hits = 0
+
+            if op_stock_lost > 0.0:
+                self._combo_chain_hits = 0
+
             success = bool(curr_error < self.stage_spec.success_threshold)
+            if success and self.stage_spec.require_attack_for_success:
+                commit_threshold = float(np.clip(self.stage_spec.attack_commit_threshold, 0.0, 1.0))
+                success = bool(attack_input != 0 and in_range > commit_threshold)
+
+            if success and self.stage_spec.require_opponent_damage_for_success:
+                op_dmg_idx = self._feature_index.get("opponent_damage_pct")
+                if op_dmg_idx is None or self._active_mask[op_dmg_idx] <= 0.0:
+                    success = False
+                else:
+                    op_dmg_target = float(self._goal_target[op_dmg_idx])
+                    op_dmg_curr = float(curr_feats[op_dmg_idx])
+                    tol = float(max(0.0, self.stage_spec.opponent_damage_success_tolerance))
+                    success = bool((op_dmg_curr + tol) >= op_dmg_target)
+
             if success:
                 reward += self.stage_spec.success_bonus
         else:
@@ -590,6 +666,7 @@ class StageGoalEnv(gym.Wrapper):
         reward = float(np.clip(reward, -self.stage_spec.reward_clip, self.stage_spec.reward_clip))
         self._prev_error = curr_error
         self._prev_has_weapon = curr_has_weapon
+        self._prev_in_range = float(np.clip(self._feature_value(curr_feats, "in_strike_range", 0.0), 0.0, 1.0))
 
         info["stage_name"] = self.stage_spec.name
         info["goal_target"] = self._goal_target.copy()
@@ -617,8 +694,13 @@ class StageGoalEnv(gym.Wrapper):
         info["combat_bonus_facing"] = float(facing_bonus)
         info["combat_bonus_hit_event"] = float(hit_bonus)
         info["combat_bonus_damage_dealt"] = float(damage_bonus)
+        info["combat_bonus_attack_commit"] = float(attack_commit_bonus_applied)
+        info["combat_bonus_combo_chain"] = float(combo_chain_bonus)
         info["combat_penalty_self_damage"] = float(self_damage_penalty)
         info["combat_penalty_offstage"] = float(offstage_penalty)
+        info["combat_penalty_combo_delay"] = float(combo_delay_penalty)
+        info["combat_penalty_attack_whiff"] = float(attack_whiff_penalty)
+        info["combat_penalty_no_attack_in_range"] = float(no_attack_in_range_penalty_applied)
 
         aug_obs = self._augment(obs)
         return aug_obs, reward, terminated, truncated, info

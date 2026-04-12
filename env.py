@@ -395,7 +395,7 @@ class EnvConfig:
     yolo_verbose: bool = False
     yolo_infer_width: int = 640
     yolo_infer_height: int = 360
-    yolo_obs_blend_alpha: float = 0.85
+    yolo_obs_blend_alpha: float = 0.95
     use_tracker_layer: bool = True
     tracker_max_missing: int = 5
     tracker_iou_threshold: float = 0.1
@@ -463,6 +463,7 @@ class BrawlDeepEnv(gym.Env):
         self._step_count = 0
         self._last_raw_detections: list = []
         self._last_detections: list = []
+        self._raw_detections_fresh: bool = False
         self._step_time_sum = 0.0
         self._step_time_count = 0
         self._action_repeat_remaining = 0
@@ -589,6 +590,7 @@ class BrawlDeepEnv(gym.Env):
 
         infer_interval = max(1, int(self.config.yolo_infer_every_n_steps))
         should_infer = force_infer or self._step_count == 0 or (self._step_count % infer_interval == 0)
+        self._raw_detections_fresh = bool(should_infer)
 
         if should_infer:
             self._last_raw_detections = self.extractor.predict(frame)
@@ -771,6 +773,7 @@ class BrawlDeepEnv(gym.Env):
         self._step_count = 0
         self._last_raw_detections = []
         self._last_detections = []
+        self._raw_detections_fresh = False
         self._step_time_sum = 0.0
         self._step_time_count = 0
         self._action_repeat_remaining = 0
@@ -787,7 +790,11 @@ class BrawlDeepEnv(gym.Env):
         # Use real elapsed dt; fall back to ~47hz estimate for the very first frame.
         now = time.perf_counter()
         reset_dt = max(1e-6, now - self._last_step_time) if self._last_step_time > 0 else 1.0 / 47.0
-        self.memory.update_from_detections(detections, dt=reset_dt)
+        self.memory.update_from_detections(
+            detections,
+            dt=reset_dt,
+            raw_detections=self._last_raw_detections if self._raw_detections_fresh else None,
+        )
         self._last_step_time = now
 
         # Re-sync health/stocks from UI on reset without introducing artificial stock-loss events.
@@ -900,7 +907,11 @@ class BrawlDeepEnv(gym.Env):
             t0 = time.perf_counter()
             step_now = time.perf_counter()
             dt_for_dets = max(1e-6, step_now - self._last_step_time)
-            self.memory.update_from_detections(detections, dt=dt_for_dets)
+            self.memory.update_from_detections(
+                detections,
+                dt=dt_for_dets,
+                raw_detections=self._last_raw_detections if self._raw_detections_fresh else None,
+            )
             dist_to_weapon = self._distance_player_to_weapon()
             self.memory.update_player_weapon_from_action(action_pick_throw=action_pick_throw, dist_to_weapon=dist_to_weapon)
             self.memory.update_action(effective_action)

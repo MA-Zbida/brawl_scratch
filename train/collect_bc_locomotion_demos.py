@@ -16,10 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from env import BrawlDeepEnv, EnvConfig, NullInputController, PyDirectInputController
 from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv
+from wrappers.goal_env_wrapper import decode_action, encode_action
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Collect expert demos for BC (all curriculum phases)")
+    p.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Action encoding for saved dataset")
     p.add_argument("--phase", type=str, default="weapon_control", choices=list(PHASES))
     p.add_argument("--episodes", type=int, default=30)
     p.add_argument("--max-episode-steps", type=int, default=100)
@@ -258,6 +260,8 @@ def main() -> None:
 
     print("=" * 68)
     print(f"BC DEMO COLLECTION — {args.phase.upper()}")
+    print(f"Action encoding target: {'Discrete(64)' if args.algo == 'sac' else 'MultiDiscrete([4,2,2,4])'}")
+    print("Action source: keyboard -> MultiDiscrete([4,2,2,4]) (SAC mode only encodes this to Discrete(64) for saving)")
     print("Input mode: manual only (env key injection disabled)")
     if active_attack_keys:
         print(f"Controls: A/D/S, Space, E, {'/'.join(active_attack_keys)}")
@@ -286,7 +290,8 @@ def main() -> None:
     time.sleep(max(0.0, float(args.delay)))
 
     obs_buf: list[np.ndarray] = []
-    act_buf: list[np.ndarray] = []
+    act_multi_buf: list[np.ndarray] = []
+    act_discrete_buf: list[int] = []
     done_buf: list[bool] = []
     goal_xy_buf: list[np.ndarray] = []
     goal_target_buf: list[np.ndarray] = []
@@ -297,6 +302,7 @@ def main() -> None:
     episodes_collected = 0
     episodes_with_hit = 0
     episodes_ended_on_first_hit = 0
+    action_roundtrip_checked = False
 
     try:
         for ep in range(1, int(args.episodes) + 1):
@@ -314,9 +320,21 @@ def main() -> None:
             while not done:
                 action = read_action_from_keyboard(allowed_attack_values=allowed_attack_values)
                 action_seq = tuple(int(v) for v in action.tolist())
+                action_discrete = int(encode_action(np.asarray(action_seq, dtype=np.int64)))
+
+                # Safety check: ensure Discrete(64) labels are exactly the encoded
+                # form of keyboard MultiDiscrete actions.
+                if not action_roundtrip_checked:
+                    decoded = tuple(int(v) for v in decode_action(action_discrete).tolist())
+                    if decoded != action_seq:
+                        raise ValueError(
+                            f"Action encoding mismatch: multi={action_seq} -> discrete={action_discrete} -> decoded={decoded}"
+                        )
+                    action_roundtrip_checked = True
 
                 obs_buf.append(np.asarray(obs, dtype=np.float32).copy())
-                act_buf.append(np.asarray(action_seq, dtype=np.int64).copy())
+                act_multi_buf.append(np.asarray(action_seq, dtype=np.int64).copy())
+                act_discrete_buf.append(action_discrete)
                 goal_xy_buf.append(np.asarray(goal_target[:2], dtype=np.float32).copy())
                 goal_target_buf.append(np.asarray(goal_target, dtype=np.float32).copy())
                 goal_mask_buf.append(np.asarray(goal_mask, dtype=np.float32).copy())
@@ -412,7 +430,8 @@ def main() -> None:
 
     lengths = {
         "obs": len(obs_buf),
-        "actions": len(act_buf),
+        "actions_multi": len(act_multi_buf),
+        "actions_discrete": len(act_discrete_buf),
         "dones": len(done_buf),
         "goal_xy": len(goal_xy_buf),
         "goal_target": len(goal_target_buf),
@@ -426,7 +445,8 @@ def main() -> None:
     if any(v != aligned_n for v in lengths.values()):
         print(f"Buffer mismatch detected ({lengths}); trimming all arrays to {aligned_n} samples.")
         obs_buf = obs_buf[:aligned_n]
-        act_buf = act_buf[:aligned_n]
+        act_multi_buf = act_multi_buf[:aligned_n]
+        act_discrete_buf = act_discrete_buf[:aligned_n]
         done_buf = done_buf[:aligned_n]
         goal_xy_buf = goal_xy_buf[:aligned_n]
         goal_target_buf = goal_target_buf[:aligned_n]
@@ -436,7 +456,14 @@ def main() -> None:
             done_buf[-1] = True
 
     obs_arr = np.stack(obs_buf).astype(np.float32)
-    act_arr = np.stack(act_buf).astype(np.int64)
+    act_multi_arr = np.stack(act_multi_buf).astype(np.int64)
+    act_discrete_arr = np.asarray(act_discrete_buf, dtype=np.int64)
+    if str(args.algo).lower() == "sac":
+        act_arr = act_discrete_arr
+        action_encoding = "discrete64"
+    else:
+        act_arr = act_multi_arr
+        action_encoding = "multidiscrete"
     done_arr = np.asarray(done_buf, dtype=bool)
     goal_xy_arr = np.stack(goal_xy_buf).astype(np.float32)
     goal_target_arr = np.stack(goal_target_buf).astype(np.float32)
@@ -447,6 +474,10 @@ def main() -> None:
         str(out_path),
         obs=obs_arr,
         actions=act_arr,
+        actions_multidiscrete=act_multi_arr,
+        actions_discrete=act_discrete_arr,
+        action_encoding=np.asarray([action_encoding]),
+        algo=np.asarray([str(args.algo).lower()]),
         dones=done_arr,
         goal_xy=goal_xy_arr,
         goal_target=goal_target_arr,
@@ -458,7 +489,9 @@ def main() -> None:
     print(f"Saved {args.phase} demos")
     print(f"  path   : {out_path}")
     print(f"  obs    : {obs_arr.shape}")
-    print(f"  actions: {act_arr.shape}")
+    print(f"  actions(saved): {act_arr.shape} [{action_encoding}]")
+    print(f"  actions_multidiscrete: {act_multi_arr.shape}")
+    print(f"  actions_discrete: {act_discrete_arr.shape}")
 
 
 if __name__ == "__main__":

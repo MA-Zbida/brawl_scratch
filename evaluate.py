@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Sequence, cast
 
 import gymnasium as gym
 import numpy as np
@@ -17,10 +17,12 @@ from train.curriculum_config import PHASES, build_phase_spec
 from train.curriculum_goals import GOAL_DIM, GOAL_INDEX, clip_goal_target, default_goal_target
 from train.llc_stage_common import StageGoalEnv
 from feature_extractor.memory.state_spec import StateSpec
+from wrappers.goal_env_wrapper import FlattenMultiDiscreteWrapper, StageGoalDictEnv
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate a PPO model for N episodes")
+    p.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Algorithm used by checkpoint")
     p.add_argument("--model", type=str, required=True, help="Path to PPO .zip checkpoint")
     p.add_argument("--episodes", type=int, default=10, help="Number of evaluation episodes")
     p.add_argument("--phase", type=str, default=None, choices=list(PHASES), help="Use StageGoalEnv for this phase")
@@ -155,26 +157,45 @@ def make_env(args: argparse.Namespace):
         tap_latch_steps=1,
     )
     base_env = BrawlDeepEnv(config=config)
+    stage_spec = None
 
     if args.goal_mode == "none":
-        return base_env
+        env: gym.Env = base_env
+    elif args.goal_mode == "fixed":
+        env = FixedWeaponFightGoalEnv(base_env)
+    else:
+        if args.phase is None:
+            raise ValueError("--phase is required when --goal-mode=phase")
 
-    if args.goal_mode == "fixed":
-        return FixedWeaponFightGoalEnv(base_env)
+        stage_spec = build_phase_spec(
+            phase=args.phase,
+            death_penalty=float(args.death_penalty),
+            terminate_on_death=False,
+        )
+        # During evaluation, terminate only when a stock-out happens (or max-steps if configured).
+        stage_spec.terminate_on_death = False
+        stage_spec.terminate_on_goal_success = False
+        stage_spec.terminate_on_hit_event = False
+        env = StageGoalEnv(base_env, stage_spec)
 
-    if args.phase is None:
-        raise ValueError("--phase is required when --goal-mode=phase")
+    if args.algo == "sac":
+        env = FlattenMultiDiscreteWrapper(env)
+        if stage_spec is not None:
+            goal_dim = int(len(stage_spec.feature_names)) if stage_spec.feature_names is not None else int(
+                np.asarray(stage_spec.mask, dtype=np.float32).reshape(-1).shape[0]
+            )
+            env = StageGoalDictEnv(
+                env,
+                proximity_scale=float(stage_spec.proximity_scale),
+                success_threshold=float(stage_spec.success_threshold),
+                success_bonus=float(stage_spec.success_bonus),
+                mask=np.asarray(stage_spec.mask, dtype=np.float32),
+                goal_extractor=stage_spec.goal_extractor,
+                goal_dim=goal_dim,
+                use_l2_error=bool(stage_spec.use_l2_error),
+            )
 
-    spec = build_phase_spec(
-        phase=args.phase,
-        death_penalty=float(args.death_penalty),
-        terminate_on_death=False,
-    )
-    # During evaluation, terminate only when a stock-out happens (or max-steps if configured).
-    spec.terminate_on_death = False
-    spec.terminate_on_goal_success = False
-    spec.terminate_on_hit_event = False
-    return StageGoalEnv(base_env, spec)
+    return env
 
 
 def _resolve_outcome(self_stocks: float, op_stocks: float, truncated: bool) -> str:
@@ -189,7 +210,10 @@ def _resolve_outcome(self_stocks: float, op_stocks: float, truncated: bool) -> s
     return "UNRESOLVED"
 
 
-def _to_env_action(action: Any) -> Sequence[int]:
+def _to_env_action(action: Any, algo: str) -> Sequence[int] | int:
+    if algo == "sac":
+        return int(np.asarray(action, dtype=np.int64).reshape(-1)[0])
+
     arr = np.asarray(action, dtype=np.int64).reshape(-1)
     if arr.shape[0] < 4:
         raise ValueError(f"Predicted action must have 4 components, got shape {arr.shape}")
@@ -212,7 +236,12 @@ def main() -> None:
     env = make_env(args)
     deterministic = not bool(args.stochastic)
 
-    model = PPO.load(str(model_path), device=args.device)
+    if args.algo == "sac":
+        from algo.discrete_sac import DiscreteSAC
+
+        model = DiscreteSAC.load(str(model_path), device=args.device)
+    else:
+        model = PPO.load(str(model_path), device=args.device)
 
     rewards: list[float] = []
     lengths: list[int] = []
@@ -226,7 +255,7 @@ def main() -> None:
     print(f"Evaluating: {model_path}")
     phase_view = args.phase if args.goal_mode == "phase" else "n/a"
     print(
-        f"Episodes: {args.episodes} | Goal mode: {args.goal_mode} | "
+        f"Algo: {args.algo} | Episodes: {args.episodes} | Goal mode: {args.goal_mode} | "
         f"Phase: {phase_view} | Deterministic: {deterministic}"
     )
     print("Episode ends on stock-out of either side.")
@@ -247,9 +276,8 @@ def main() -> None:
                 action, _ = model.predict(obs, deterministic=deterministic)
                 if isinstance(action, np.ndarray) and action.ndim > 1:
                     action = action[0]
-                env_action = _to_env_action(action)
-
-                obs, reward, done, truncated, info = env.step(env_action)
+                env_action = _to_env_action(action, args.algo)
+                obs, reward, done, truncated, info = cast(Any, env).step(env_action)
                 ep_reward += float(reward)
                 ep_len += 1
                 ep_op_dmg += float(info.get("op_delta_damage", 0.0))

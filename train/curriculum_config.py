@@ -33,7 +33,7 @@ PHASES = (
 
 LOCO_PLATFORM_X_MARGIN = 0.03
 LOCO_GROUNDED_Y_EPS = 0.015
-LOCO_AIRBORNE_Y_DELTA = 0.35
+LOCO_AIRBORNE_Y_DELTA = 0.3
 LOCO_RECOVERY_OUTSIDE_PROB = 0.40
 LOCO_RECOVERY_OUTSIDE_BAND = 0.10
 LOCO_RECOVERY_SIDE_OFFSET = 0.01
@@ -246,7 +246,7 @@ def build_phase_spec(
             min_goal_duration=20,
             max_goal_duration=40,
             success_threshold=0.02,
-            success_bonus=1.2,
+            success_bonus=1.5,
             proximity_scale=0.0,
             use_l2_error=True,
             vertical_velocity_penalty_scale=0.10,
@@ -256,7 +256,7 @@ def build_phase_spec(
             disable_dodge=True,
             disable_jump=True,
             reset_perturb_steps=0,
-            step_penalty=0.01,
+            step_penalty=0.1,
             terminate_on_death=bool(terminate_on_death),
             terminate_on_goal_success=True,
             resample_goal_on_timer=False,
@@ -285,7 +285,7 @@ def build_phase_spec(
             disable_dodge=True,
             disable_jump=False,
             reset_perturb_steps=0,
-            step_penalty=0.01,
+            step_penalty=0.1,
             terminate_on_death=bool(terminate_on_death),
             terminate_on_goal_success=True,
             resample_goal_on_timer=False,

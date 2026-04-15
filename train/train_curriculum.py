@@ -77,6 +77,7 @@ class GoalMouseTrackerWrapper(gym.Wrapper):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train PPO curriculum phase")
+    p.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Training algorithm")
     p.add_argument("--phase", type=str, required=True, choices=list(PHASES))
     p.add_argument("--timesteps", type=int, default=500_000)
     p.add_argument("--max-episode-steps", type=int, default=1200)
@@ -97,6 +98,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clip-range", type=float, default=0.15)
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--vf-coef", type=float, default=0.5)
+
+    p.add_argument("--buffer-size", type=int, default=100_000, help="SAC replay buffer size")
+    p.add_argument("--learning-starts", type=int, default=1_000, help="SAC warmup steps before learning")
+    p.add_argument("--tau", type=float, default=0.005, help="SAC target smoothing coefficient")
+    p.add_argument("--train-freq", type=int, default=1, help="SAC train frequency in env steps")
+    p.add_argument("--gradient-steps", type=int, default=1, help="SAC gradient updates per train call")
+    p.add_argument("--sac-ent-coef", type=str, default="auto", help="SAC entropy coefficient, e.g. auto or auto_0.1")
+    p.add_argument("--her-n-goals", type=int, default=4, help="HER sampled goals per transition for SAC")
 
     p.add_argument("--plot-every", type=int, default=2500)
     p.add_argument("--log-csv", action="store_true", help="Write step/episode CSV logs")
@@ -146,7 +155,7 @@ def main() -> None:
     args = parse_args()
 
     if not args.model_name:
-        args.model_name = f"llc_{args.phase}"
+        args.model_name = f"llc_{args.phase}" if args.algo == "ppo" else f"llc_{args.phase}_sac"
 
     spec = build_phase_spec(
         phase=args.phase,
@@ -154,7 +163,7 @@ def main() -> None:
         terminate_on_death=not args.no_terminate_on_death,
     )
 
-    if args.phase.startswith("locomotion"):
+    if args.algo == "ppo" and args.phase.startswith("locomotion"):
         if not _has_cli_flag("--learning-rate"):
             args.learning_rate = 3e-4
         if not _has_cli_flag("--n-steps"):
@@ -166,6 +175,9 @@ def main() -> None:
 
     if args.move_mouse_to_goal:
         print("[train_curriculum] Mouse goal tracking enabled.")
+
+    if args.algo == "sac":
+        print("[train_curriculum] Using Discrete SAC with flattened 64-action space and replay buffer.")
 
     train_stage_model(
         args=args,

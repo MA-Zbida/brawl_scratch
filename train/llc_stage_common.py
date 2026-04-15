@@ -16,6 +16,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormali
 from env import BrawlDeepEnv, EnvConfig
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goals import GOAL_FEATURE_NAMES, GOAL_STATE_SPEC_NAMES, GOAL_TARGET_DIM, extract_goal_features
+from wrappers.goal_env_wrapper import FlattenMultiDiscreteWrapper, StageGoalDictEnv, decode_action
 
 
 ActionAdapter = Callable[[np.ndarray], np.ndarray]
@@ -1175,9 +1176,10 @@ class DiagnosticCallback(BaseCallback):
     the training loop is sane before long runs.
     """
 
-    def __init__(self, report_every: int = 500, verbose: int = 0):
+    def __init__(self, report_every: int = 500, verbose: int = 0, flat_actions: bool = False):
         super().__init__(verbose)
         self._report_every = max(1, report_every)
+        self._flat_actions = flat_actions  # SAC uses Discrete(64); decode for stats
         self._rewards: list[float] = []
         self._errors: list[float] = []
         self._actions: list[np.ndarray] = []
@@ -1194,6 +1196,8 @@ class DiagnosticCallback(BaseCallback):
             self._successes.append(float(info.get("goal_success", 0.0)))
             if actions is not None and i < len(actions):
                 act = np.asarray(actions[i])
+                if self._flat_actions and act.ndim == 0:
+                    act = decode_action(int(act))
                 self._actions.append(act)
 
         if self.num_timesteps % self._report_every == 0 and len(self._rewards) > 0:
@@ -1280,6 +1284,7 @@ def default_env_config(max_episode_steps: int, terminate_on_stock_out: bool = Fa
 
 def parse_train_args(default_name: str, default_steps: int) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=f"Train {default_name}")
+    p.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"])
     p.add_argument("--timesteps", type=int, default=default_steps)
     p.add_argument("--learning-rate", type=float, default=3e-4)
     p.add_argument("--batch-size", type=int, default=256)
@@ -1302,6 +1307,14 @@ def parse_train_args(default_name: str, default_steps: int) -> argparse.Namespac
     p.add_argument("--clip-range", type=float, default=0.15)
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--vf-coef", type=float, default=0.5)
+    # Discrete SAC-specific
+    p.add_argument("--buffer-size", type=int, default=100_000)
+    p.add_argument("--learning-starts", type=int, default=1_000)
+    p.add_argument("--tau", type=float, default=0.005)
+    p.add_argument("--train-freq", type=int, default=1)
+    p.add_argument("--gradient-steps", type=int, default=1)
+    p.add_argument("--sac-ent-coef", type=str, default="auto")
+    p.add_argument("--her-n-goals", type=int, default=4)
     return p.parse_args()
 
 
@@ -1310,20 +1323,48 @@ def train_stage_model(
     make_env: Callable[[], gym.Env],
     stage_spec: Optional[StageSpec] = None,
 ) -> None:
-    """Train a stage LLC policy with PPO.
+    """Train a stage LLC policy (PPO or Discrete-SAC).
 
     Parameters
     ----------
     stage_spec:
-        When provided, uses StageGoalFiLMExtractor for goal-conditioned policy.
+        For PPO, stage goals are consumed directly by StageGoalFiLMExtractor.
+        For Discrete-SAC, stage goals additionally enable HER via StageGoalDictEnv.
     """
     from feature_extractor.film_extractor import StageGoalFiLMExtractor
+
+    algo = str(getattr(args, "algo", "ppo")).strip().lower()
+    if algo not in {"ppo", "sac"}:
+        raise ValueError(f"Unsupported algo '{algo}'. Expected one of: ppo, sac")
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     final_model = save_dir / f"{args.model_name}.zip"
 
-    base_vec = VecMonitor(DummyVecEnv([make_env]))
+    def _make_algo_env() -> gym.Env:
+        env = make_env()
+        if algo != "sac":
+            return env
+
+        env = FlattenMultiDiscreteWrapper(env)
+        if stage_spec is None:
+            return env
+
+        goal_dim = int(len(stage_spec.feature_names)) if stage_spec.feature_names is not None else int(
+            np.asarray(stage_spec.mask, dtype=np.float32).reshape(-1).shape[0]
+        )
+        return StageGoalDictEnv(
+            env,
+            proximity_scale=float(stage_spec.proximity_scale),
+            success_threshold=float(stage_spec.success_threshold),
+            success_bonus=float(stage_spec.success_bonus),
+            mask=np.asarray(stage_spec.mask, dtype=np.float32),
+            goal_extractor=stage_spec.goal_extractor,
+            goal_dim=goal_dim,
+            use_l2_error=bool(stage_spec.use_l2_error),
+        )
+
+    base_vec = VecMonitor(DummyVecEnv([_make_algo_env]))
     vecnorm_path = save_dir / f"{args.model_name}.vecnormalize.pkl"
 
     if args.resume and vecnorm_path.exists():
@@ -1338,16 +1379,22 @@ def train_stage_model(
     else:
         vec_env = VecNormalize(base_vec, norm_obs=False, norm_reward=False, clip_obs=10.0)
 
-    model = _build_ppo(args, vec_env, stage_spec, StageGoalFiLMExtractor)
+    if algo == "sac":
+        model = _build_sac(args, vec_env, stage_spec, StageGoalFiLMExtractor)
+    else:
+        model = _build_ppo(args, vec_env, stage_spec, StageGoalFiLMExtractor)
 
-    print(f"[{args.model_name}] Training PPO for {args.timesteps:,} timesteps")
+    print(f"[{args.model_name}] Training {algo.upper()} for {args.timesteps:,} timesteps")
     print(f"[{args.model_name}] Starting in {args.delay:.0f}s - switch to Brawlhalla")
     time.sleep(args.delay)
+
+    # For SAC, HER is handled by replay buffer; disable callback-side on-policy HER.
+    her_spec = stage_spec if algo == "ppo" else None
 
     dashboard_cb = StageDashboardCallback(
         save_dir=save_dir,
         model_name=args.model_name,
-        stage_spec=stage_spec,
+        stage_spec=her_spec,
         plot_every_episodes=max(1, int(args.plot_every)),
         moving_avg_window=args.moving_avg,
         enable_csv=bool(getattr(args, "log_csv", False)),
@@ -1356,7 +1403,7 @@ def train_stage_model(
     callbacks_list: list[BaseCallback] = [dashboard_cb]
     diag_every = int(getattr(args, "diag_report_every", 0))
     if diag_every > 0:
-        callbacks_list.append(DiagnosticCallback(report_every=diag_every))
+        callbacks_list.append(DiagnosticCallback(report_every=diag_every, flat_actions=(algo == "sac")))
     callbacks = CallbackList(callbacks_list)
 
     interrupted = False
@@ -1434,6 +1481,72 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
         max_grad_norm=args.max_grad_norm,
         seed=args.seed,
         policy_kwargs=policy_kwargs,
+        verbose=1,
+        device=args.device,
+    )
+
+
+def _build_sac(args, vec_env, stage_spec, FiLMClass):
+    """Build or resume a DiscreteSAC model with optional HER replay."""
+    from stable_baselines3 import HerReplayBuffer
+
+    from algo.discrete_sac import DiscreteSAC
+    from algo.discrete_sac_policy import DictToFlatExtractor, DiscreteSACPolicy
+
+    replay_buffer_class = None
+    replay_buffer_kwargs: dict[str, object] = {}
+    policy_kwargs: dict[str, object] = dict(net_arch=[256, 256])
+
+    if stage_spec is not None:
+        goal_feature_names = GOAL_STATE_SPEC_NAMES
+        if stage_spec.feature_names is not None:
+            goal_feature_names = list(stage_spec.feature_names)
+
+        replay_buffer_class = HerReplayBuffer
+        replay_buffer_kwargs = dict(
+            n_sampled_goal=int(getattr(args, "her_n_goals", 4)),
+            goal_selection_strategy="future",
+        )
+        policy_kwargs = dict(
+            features_extractor_class=DictToFlatExtractor,
+            features_extractor_kwargs=dict(
+                inner_extractor_class=FiLMClass,
+                inner_extractor_kwargs=dict(
+                    goal_feature_names=goal_feature_names,
+                    features_dim=256,
+                ),
+                mask=np.asarray(stage_spec.mask, dtype=np.float32),
+            ),
+            net_arch=[256, 256],
+        )
+
+    if args.resume:
+        print(f"[{args.model_name}] Resuming SAC from {args.resume}")
+        return DiscreteSAC.load(
+            args.resume,
+            env=vec_env,
+            learning_rate=args.learning_rate,
+            seed=args.seed,
+            device=args.device,
+        )
+
+    return DiscreteSAC(
+        DiscreteSACPolicy,
+        vec_env,
+        learning_rate=args.learning_rate,
+        buffer_size=int(getattr(args, "buffer_size", 100_000)),
+        learning_starts=int(getattr(args, "learning_starts", 1_000)),
+        batch_size=args.batch_size,
+        tau=float(getattr(args, "tau", 0.005)),
+        gamma=args.gamma,
+        train_freq=int(getattr(args, "train_freq", 1)),
+        gradient_steps=int(getattr(args, "gradient_steps", 1)),
+        ent_coef=getattr(args, "sac_ent_coef", "auto"),
+        max_grad_norm=args.max_grad_norm,
+        replay_buffer_class=replay_buffer_class,
+        replay_buffer_kwargs=replay_buffer_kwargs,
+        policy_kwargs=policy_kwargs,
+        seed=args.seed,
         verbose=1,
         device=args.device,
     )

@@ -3,27 +3,30 @@
 Provides two wrappers that sit on top of StageGoalEnv:
 
 1. ``FlattenMultiDiscreteWrapper`` — encodes MultiDiscrete([4,2,2,4]) to
-   Discrete(64) via mixed-radix encoding so the replay buffer stores a
-   single integer action.
+    Discrete(64) via mixed-radix encoding so replay buffers store one integer
+    action per step.
 
-2. ``StageGoalDictEnv`` — converts the flat 65-dim augmented observation
-   into a gymnasium ``Dict`` observation with keys ``observation``,
-   ``achieved_goal``, and ``desired_goal``.  Also exposes a vectorised
-   ``compute_reward()`` as required by ``HerReplayBuffer``.
+2. ``StageGoalDictEnv`` — converts augmented flat observations
+    ``[state | goal_target | mask]`` to Dict observations with keys
+    ``observation``, ``achieved_goal``, and ``desired_goal``. It supports
+    dynamic goal dimensions and custom goal extractors.
 
 Typical wrapping order (innermost first):
-    BrawlDeepEnv → StageGoalEnv → FlattenMultiDiscreteWrapper → StageGoalDictEnv
+     BrawlDeepEnv → StageGoalEnv → FlattenMultiDiscreteWrapper → StageGoalDictEnv
 """
 
 from __future__ import annotations
 
 from functools import reduce
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import gymnasium as gym
 import numpy as np
 
-from hierarchical.goals import GOAL_TARGET_DIM, extract_goal_features
+from hierarchical.goals import extract_goal_features
+
+
+GoalExtractor = Callable[[np.ndarray], np.ndarray]
 
 
 # ---------------------------------------------------------------------------
@@ -76,17 +79,17 @@ class FlattenMultiDiscreteWrapper(gym.ActionWrapper):
 class StageGoalDictEnv(gym.Wrapper):
     """Convert flat StageGoalEnv obs to Dict obs for HER.
 
-    Input obs layout (from StageGoalEnv):  [state(B) | goal_target(7) | mask(7)]
+    Input obs layout (from StageGoalEnv):  [state(B) | goal_target(G) | mask(G)]
     Output Dict obs:
         - ``observation``: state vector (B-dim)
-        - ``achieved_goal``: 7-dim goal features of current state
-        - ``desired_goal``: 7-dim goal target
+        - ``achieved_goal``: G-dim goal features of current state
+        - ``desired_goal``: G-dim goal target
 
     Parameters
     ----------
     env : gym.Env
         Must be a (possibly action-wrapped) StageGoalEnv whose obs is
-        flat (base_dim + 2*GOAL_TARGET_DIM).
+        flat (base_dim + 2*goal_dim).
     proximity_scale : float
         Reward penalty coefficient for distance to goal
         (used in ``compute_reward``).
@@ -95,7 +98,13 @@ class StageGoalDictEnv(gym.Wrapper):
     success_bonus : float
         Bonus reward for achieving the goal.
     mask : np.ndarray
-        7-dim mask selecting active goal dims.
+        G-dim mask selecting active goal dimensions.
+    goal_extractor : callable
+        Function mapping raw state vector -> achieved goal vector.
+    goal_dim : int
+        Goal dimension G. If omitted, inferred from ``mask`` length.
+    use_l2_error : bool
+        Whether compute_reward uses masked L2 (else masked L1).
     """
 
     def __init__(
@@ -105,17 +114,34 @@ class StageGoalDictEnv(gym.Wrapper):
         success_threshold: float,
         success_bonus: float,
         mask: np.ndarray,
+        goal_extractor: Optional[GoalExtractor] = None,
+        goal_dim: Optional[int] = None,
+        use_l2_error: bool = False,
     ):
         super().__init__(env)
 
         flat_dim = int(env.observation_space.shape[0])
-        self._base_dim = flat_dim - 2 * GOAL_TARGET_DIM  # 51
-        self._goal_dim = GOAL_TARGET_DIM  # 7
+        mask_arr = np.asarray(mask, dtype=np.float32).reshape(-1)
+        self._goal_dim = int(goal_dim) if goal_dim is not None else int(mask_arr.shape[0])
+        if self._goal_dim <= 0:
+            raise ValueError("goal_dim must be positive")
+        self._base_dim = flat_dim - 2 * self._goal_dim
+        if self._base_dim <= 0:
+            raise ValueError(
+                f"Invalid observation layout: flat_dim={flat_dim}, goal_dim={self._goal_dim}"
+            )
 
-        self._mask = np.asarray(mask, dtype=np.float32).reshape(self._goal_dim)
+        if mask_arr.shape[0] != self._goal_dim:
+            raise ValueError(
+                f"Mask dim mismatch: expected {self._goal_dim}, got {mask_arr.shape[0]}"
+            )
+
+        self._mask = mask_arr
         self._proximity_scale = float(proximity_scale)
         self._success_threshold = float(success_threshold)
         self._success_bonus = float(success_bonus)
+        self._goal_extractor = goal_extractor or extract_goal_features
+        self._use_l2_error = bool(use_l2_error)
 
         self.observation_space = gym.spaces.Dict(
             {
@@ -137,7 +163,11 @@ class StageGoalDictEnv(gym.Wrapper):
     def _split_obs(self, flat_obs: np.ndarray) -> dict[str, np.ndarray]:
         state = flat_obs[: self._base_dim].astype(np.float32)
         desired = flat_obs[self._base_dim : self._base_dim + self._goal_dim].astype(np.float32)
-        achieved = extract_goal_features(state)
+        achieved = np.asarray(self._goal_extractor(state), dtype=np.float32).reshape(-1)
+        if achieved.shape[0] != self._goal_dim:
+            raise ValueError(
+                f"goal_extractor returned dim={achieved.shape[0]}, expected {self._goal_dim}"
+            )
         return {
             "observation": state,
             "achieved_goal": achieved,
@@ -181,8 +211,11 @@ class StageGoalDictEnv(gym.Wrapper):
         achieved = np.asarray(achieved_goal, dtype=np.float32)
         desired = np.asarray(desired_goal, dtype=np.float32)
 
-        # Error per sample: masked L1
-        error = np.sum(self._mask * np.abs(achieved - desired), axis=-1)
+        if self._use_l2_error:
+            error = np.sqrt(np.sum(self._mask * np.square(achieved - desired), axis=-1))
+        else:
+            # Error per sample: masked L1
+            error = np.sum(self._mask * np.abs(achieved - desired), axis=-1)
 
         # Proximity reward (negative penalty for distance)
         reward = -self._proximity_scale * error

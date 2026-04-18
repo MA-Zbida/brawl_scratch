@@ -135,11 +135,14 @@ class _TensorReplayStore:
         self._append("returns", returns_tensor)
         self._trim()
 
-    def sample(self, batch_size: int, device: th.device) -> Optional[_PPOSamples]:
+    def sample(self, batch_size: int, device: th.device, allow_oversample: bool = False) -> Optional[_PPOSamples]:
         if self.size <= 0:
             return None
 
-        take = int(max(1, min(batch_size, self.size)))
+        if allow_oversample:
+            take = int(max(1, batch_size))
+        else:
+            take = int(max(1, min(batch_size, self.size)))
         indices = th.randint(0, self.size, (take,), device=th.device("cpu"))
 
         assert self.observations is not None
@@ -355,7 +358,13 @@ class AnchoredReplayPPO(PPO):
                 on_batch.advantages = self._normalize_advantages(on_batch.advantages)
             return on_batch, 0.0
 
-        replay_count = min(target_replay, self._replay_store.size)
+        replay_oversample = False
+        if self.strict_replay_mix:
+            replay_count = target_replay
+            replay_oversample = replay_count > self._replay_store.size
+        else:
+            replay_count = min(target_replay, self._replay_store.size)
+
         if replay_count <= 0:
             if self.normalize_advantage and self.normalize_advantage_per_source:
                 on_batch.advantages = self._normalize_advantages(on_batch.advantages)
@@ -373,7 +382,11 @@ class AnchoredReplayPPO(PPO):
         on_advantages = on_batch.advantages[on_idx]
         on_returns = on_batch.returns[on_idx]
 
-        replay_batch = self._replay_store.sample(replay_count, on_batch.observations.device)
+        replay_batch = self._replay_store.sample(
+            replay_count,
+            on_batch.observations.device,
+            allow_oversample=replay_oversample,
+        )
         if replay_batch is None:
             if self.normalize_advantage and self.normalize_advantage_per_source:
                 on_batch.advantages = self._normalize_advantages(on_batch.advantages)

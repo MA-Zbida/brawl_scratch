@@ -17,19 +17,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from env import BrawlDeepEnv, EnvConfig
 from feature_extractor.film_extractor import StageGoalFiLMExtractor
 from feature_extractor.memory.state_spec import StateSpec
+from hierarchical.goals import extract_goal_features
 from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv
-from hierarchical.goals import extract_goal_features
-from wrappers.goal_env_wrapper import FlattenMultiDiscreteWrapper, StageGoalDictEnv, decode_action, encode_action
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Behavioral cloning pretraining for curriculum PPO/SAC (all phases)")
-    p.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"])
+    p = argparse.ArgumentParser(description="Behavioral cloning pretraining for curriculum PPO (all phases)")
     p.add_argument("--phase", type=str, default="locomotion", choices=[*list(PHASES), "auto"])
     p.add_argument("--demos", type=str, default="")
-    p.add_argument("--resume", type=str, default="",
-                   help="Optional PPO .zip checkpoint to initialize BC pretraining from")
+    p.add_argument(
+        "--resume",
+        type=str,
+        default="",
+        help="Optional PPO .zip checkpoint to initialize BC pretraining from",
+    )
     p.add_argument("--epochs", type=int, default=15)
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--learning-rate", type=float, default=2e-4)
@@ -42,17 +44,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--goal-relabel", dest="goal_relabel", action="store_true", default=True)
     p.add_argument("--no-goal-relabel", dest="goal_relabel", action="store_false")
     p.add_argument("--relabel-horizons", type=str, default="1,2,4,8")
-    p.add_argument("--max-relabels-per-step", type=int, default=0,
-                   help="0 = keep all valid horizons, >0 caps relabel samples per source step")
+    p.add_argument(
+        "--max-relabels-per-step",
+        type=int,
+        default=0,
+        help="0 = keep all valid horizons, >0 caps relabel samples per source step",
+    )
     p.add_argument("--no-include-original-samples", dest="include_original_samples", action="store_false")
     p.set_defaults(include_original_samples=True)
-    p.add_argument("--buffer-size", type=int, default=100_000, help="SAC replay buffer size")
-    p.add_argument("--learning-starts", type=int, default=1_000, help="SAC warmup steps")
-    p.add_argument("--tau", type=float, default=0.005, help="SAC target smoothing coefficient")
-    p.add_argument("--gamma", type=float, default=0.99, help="SAC discount factor")
-    p.add_argument("--train-freq", type=int, default=1, help="SAC train frequency in env steps")
-    p.add_argument("--gradient-steps", type=int, default=1, help="SAC gradient updates per train call")
-    p.add_argument("--sac-ent-coef", type=str, default="auto", help="SAC entropy coefficient")
     return p.parse_args()
 
 
@@ -65,7 +64,7 @@ def _build_env(max_episode_steps: int, phase: str) -> StageGoalEnv:
         action_repeat_steps=1,
         action_repeat_min_steps=1,
         action_repeat_max_steps=1,
-        tap_latch_steps=1
+        tap_latch_steps=1,
     )
     base = BrawlDeepEnv(config=config)
     return StageGoalEnv(base, spec)
@@ -81,8 +80,7 @@ def _resolve_paths(args: argparse.Namespace) -> tuple[str, str]:
     if not demos:
         demos = f"train/models/{phase_for_default_paths}_demos.npz"
     if not output:
-        suffix = "_sac" if str(args.algo).strip().lower() == "sac" else ""
-        output = f"train/models/llc_{phase_for_default_paths}{suffix}_bc_init.zip"
+        output = f"train/models/llc_{phase_for_default_paths}_bc_init.zip"
     return demos, output
 
 
@@ -111,14 +109,12 @@ def _align_demo_lengths(
     if n_obs == n_actions == n_dones:
         return obs, actions, dones
 
-    # Keep obs/actions aligned first.
     n_pair = min(n_obs, n_actions)
     if n_pair <= 0:
         raise ValueError(f"Demo file has no usable samples after alignment: {path}")
     obs = obs[:n_pair]
     actions = actions[:n_pair]
 
-    # Legacy/partial collections can miss the last done flag by 1.
     if n_dones < n_pair:
         pad = n_pair - n_dones
         if pad <= 8:
@@ -154,42 +150,25 @@ def _align_demo_lengths(
     return obs, actions, dones
 
 
-def _resolve_actions_for_algo(data: np.lib.npyio.NpzFile, algo: str) -> np.ndarray:
-    algo = str(algo).strip().lower()
+def _resolve_actions_for_ppo(data: np.lib.npyio.NpzFile) -> np.ndarray:
     raw_actions = np.asarray(data["actions"])
 
-    if algo == "ppo":
-        if "actions_multidiscrete" in data:
-            actions = np.asarray(data["actions_multidiscrete"], dtype=np.int64)
-        elif raw_actions.ndim == 2 and raw_actions.shape[1] == 4:
-            actions = raw_actions.astype(np.int64)
-        elif raw_actions.ndim == 1:
-            actions = np.stack([decode_action(int(v)) for v in raw_actions.reshape(-1)], axis=0).astype(np.int64)
-        else:
-            raise ValueError(f"Could not resolve PPO actions from dataset shape {raw_actions.shape}")
+    if "actions_multidiscrete" in data:
+        actions = np.asarray(data["actions_multidiscrete"], dtype=np.int64)
+    elif raw_actions.ndim == 2 and raw_actions.shape[1] == 4:
+        actions = raw_actions.astype(np.int64)
+    else:
+        raise ValueError(
+            "Demo actions must be MultiDiscrete with shape (N,4). "
+            "Please recollect demos with the current PPO-only collector."
+        )
 
-        if actions.ndim != 2 or actions.shape[1] != 4:
-            raise ValueError(f"Expected PPO actions shape (N,4), got {actions.shape}")
-        return actions
-
-    if algo == "sac":
-        if "actions_discrete" in data:
-            actions = np.asarray(data["actions_discrete"], dtype=np.int64).reshape(-1)
-        elif raw_actions.ndim == 1:
-            actions = raw_actions.astype(np.int64).reshape(-1)
-        elif raw_actions.ndim == 2 and raw_actions.shape[1] == 4:
-            actions = np.asarray([encode_action(np.asarray(a, dtype=np.int64)) for a in raw_actions], dtype=np.int64)
-        else:
-            raise ValueError(f"Could not resolve SAC actions from dataset shape {raw_actions.shape}")
-
-        if np.any(actions < 0) or np.any(actions >= 64):
-            raise ValueError("SAC actions must be in [0, 63] for Discrete(64)")
-        return actions
-
-    raise ValueError(f"Unsupported algo '{algo}'. Expected ppo or sac")
+    if actions.ndim != 2 or actions.shape[1] != 4:
+        raise ValueError(f"Expected PPO actions shape (N,4), got {actions.shape}")
+    return actions
 
 
-def _load_dataset(path: str, expected_phase: str, algo: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
+def _load_dataset(path: str, expected_phase: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
     data = np.load(path)
     if "obs" not in data or "actions" not in data or "dones" not in data:
         raise ValueError("Demo file must contain 'obs', 'actions', and 'dones' arrays")
@@ -205,21 +184,13 @@ def _load_dataset(path: str, expected_phase: str, algo: str) -> tuple[np.ndarray
                 )
 
     obs = np.asarray(data["obs"], dtype=np.float32)
-    actions = _resolve_actions_for_algo(data, algo=algo)
+    actions = _resolve_actions_for_ppo(data)
     dones = np.asarray(data["dones"], dtype=bool)
     if obs.ndim != 2:
         raise ValueError(f"Expected obs shape (N,D), got {obs.shape}")
     if dones.ndim != 1:
         raise ValueError(f"Expected dones shape (N,), got {dones.shape}")
 
-    if str(algo).strip().lower() == "ppo":
-        if actions.ndim != 2 or actions.shape[1] != 4:
-            raise ValueError(f"Expected PPO actions shape (N,4), got {actions.shape}")
-    else:
-        if actions.ndim != 1:
-            raise ValueError(f"Expected SAC actions shape (N,), got {actions.shape}")
-
-    # Load opponent KO events if present (backward-compat: default all-False).
     if "op_ko_events" in data:
         op_ko_events = np.asarray(data["op_ko_events"], dtype=bool)
         if op_ko_events.shape[0] != obs.shape[0]:
@@ -299,10 +270,6 @@ def _build_goal_relabel_dataset(
     mask = np.asarray(spec.mask, dtype=np.float32).reshape(goal_dim)
     ranges = _episode_ranges(dones)
 
-    # Cumulative KO-event count per step.  Two steps t and ft are in the same
-    # opponent-stock segment iff ko_cumsum[t] == ko_cumsum[ft].  Relabeling
-    # across a KO boundary would create nonsensical goals (e.g. "reach
-    # opponent_damage_pct=0" from a state where it is 0.65), so we skip those.
     n_steps = int(obs.shape[0])
     if op_ko_events is not None and op_ko_events.shape[0] == n_steps:
         ko_cumsum = np.cumsum(op_ko_events.astype(np.int32))
@@ -328,9 +295,6 @@ def _build_goal_relabel_dataset(
                 if ft > end:
                     continue
 
-                # Never relabel across an opponent-KO boundary: damage resets
-                # to 0 on the new stock, so future goals become meaningless or
-                # actively misleading for pre-KO timesteps.
                 if ko_cumsum[ft] != ko_cumsum[t]:
                     continue
 
@@ -373,16 +337,13 @@ def main() -> None:
     obs_np, act_np, dones_np, op_ko_np, resolved_phase = _load_dataset(
         demos_path,
         expected_phase=args.phase,
-        algo=args.algo,
     )
     if str(args.phase).strip().lower() == "auto":
         print(f"[BC pretrain] Auto phase detected from dataset: {resolved_phase}")
         if not args.output.strip():
-            suffix = "_sac" if str(args.algo).strip().lower() == "sac" else ""
-            output_path = f"train/models/llc_{resolved_phase}{suffix}_bc_init.zip"
+            output_path = f"train/models/llc_{resolved_phase}_bc_init.zip"
 
     n_samples_raw = int(obs_np.shape[0])
-
     if n_samples_raw < 1000:
         print(f"WARNING: only {n_samples_raw} raw samples. BC may underfit.")
 
@@ -398,8 +359,6 @@ def main() -> None:
     if args.goal_relabel:
         horizons = _parse_horizons(args.relabel_horizons)
 
-        # For combat demos (short hit-terminated episodes), adapt horizons
-        # so they fit within typical episode lengths.
         ep_ranges = _episode_ranges(dones_np)
         if ep_ranges:
             ep_lens = [end - start + 1 for start, end in ep_ranges]
@@ -440,23 +399,10 @@ def main() -> None:
 
     n_samples = int(obs_np.shape[0])
 
-    def _make_env_for_algo():
-        env = _build_env(args.max_episode_steps, resolved_phase)
-        if str(args.algo).strip().lower() != "sac":
-            return env
-        env = FlattenMultiDiscreteWrapper(env)
-        return StageGoalDictEnv(
-            env,
-            proximity_scale=float(spec.proximity_scale),
-            success_threshold=float(spec.success_threshold),
-            success_bonus=float(spec.success_bonus),
-            mask=np.asarray(spec.mask, dtype=np.float32),
-            goal_extractor=spec.goal_extractor,
-            goal_dim=goal_dim,
-            use_l2_error=bool(spec.use_l2_error),
-        )
+    def _make_env_for_ppo():
+        return _build_env(args.max_episode_steps, resolved_phase)
 
-    vec_base = VecMonitor(DummyVecEnv([_make_env_for_algo]))
+    vec_base = VecMonitor(DummyVecEnv([_make_env_for_ppo]))
     vec_env = VecNormalize(vec_base, norm_obs=False, norm_reward=False, clip_obs=10.0)
 
     ppo_policy_kwargs = dict(
@@ -469,86 +415,12 @@ def main() -> None:
     )
 
     resume_path = str(args.resume).strip()
-    if str(args.algo).strip().lower() == "sac":
-        from algo.discrete_sac import DiscreteSAC
-        from algo.discrete_sac_policy import DictToFlatExtractor, DiscreteSACPolicy
-
-        goal_feature_names = list(spec.feature_names or [])
-        sac_policy_kwargs = dict(
-            features_extractor_class=DictToFlatExtractor,
-            features_extractor_kwargs=dict(
-                inner_extractor_class=StageGoalFiLMExtractor,
-                inner_extractor_kwargs=dict(
-                    goal_feature_names=goal_feature_names,
-                    features_dim=256,
-                ),
-                mask=np.asarray(spec.mask, dtype=np.float32),
-            ),
-            net_arch=[256, 256],
-        )
-
-        if resume_path:
-            print(f"[BC pretrain] Resuming SAC policy from {resume_path}")
-            try:
-                model = DiscreteSAC.load(
-                    resume_path,
-                    env=vec_env,
-                    learning_rate=float(args.learning_rate),
-                    seed=42,
-                    device=args.device,
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    "Could not load resume checkpoint for SAC BC pretrain. "
-                    "Use a compatible DiscreteSAC .zip or run without --resume."
-                ) from exc
-        else:
-            model = DiscreteSAC(
-                DiscreteSACPolicy,
-                vec_env,
-                learning_rate=float(args.learning_rate),
-                buffer_size=int(args.buffer_size),
-                learning_starts=int(args.learning_starts),
-                batch_size=int(args.batch_size),
-                tau=float(args.tau),
-                gamma=float(args.gamma),
-                train_freq=int(args.train_freq),
-                gradient_steps=int(args.gradient_steps),
-                ent_coef=str(args.sac_ent_coef),
-                max_grad_norm=float(args.max_grad_norm),
-                seed=42,
-                policy_kwargs=sac_policy_kwargs,
-                verbose=0,
-                device=args.device,
-            )
-    else:
-        if resume_path:
-            print(f"[BC pretrain] Resuming PPO policy from {resume_path}")
-            try:
-                model = PPO.load(
-                    resume_path,
-                    env=vec_env,
-                    learning_rate=float(args.learning_rate),
-                    n_steps=2048,
-                    batch_size=256,
-                    gamma=0.99,
-                    gae_lambda=0.95,
-                    clip_range=0.15,
-                    ent_coef=0.01,
-                    vf_coef=0.5,
-                    max_grad_norm=float(args.max_grad_norm),
-                    seed=42,
-                    device=args.device,
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    "Could not load resume checkpoint for PPO BC pretrain. "
-                    "Use a compatible PPO .zip (same action/observation schema) or run without --resume."
-                ) from exc
-        else:
-            model = PPO(
-                "MlpPolicy",
-                vec_env,
+    if resume_path:
+        print(f"[BC pretrain] Resuming PPO policy from {resume_path}")
+        try:
+            model = PPO.load(
+                resume_path,
+                env=vec_env,
                 learning_rate=float(args.learning_rate),
                 n_steps=2048,
                 batch_size=256,
@@ -559,33 +431,38 @@ def main() -> None:
                 vf_coef=0.5,
                 max_grad_norm=float(args.max_grad_norm),
                 seed=42,
-                policy_kwargs=ppo_policy_kwargs,
-                verbose=0,
                 device=args.device,
             )
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not load resume checkpoint for PPO BC pretrain. "
+                "Use a compatible PPO .zip (same action/observation schema) or run without --resume."
+            ) from exc
+    else:
+        model = PPO(
+            "MlpPolicy",
+            vec_env,
+            learning_rate=float(args.learning_rate),
+            n_steps=2048,
+            batch_size=256,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.15,
+            ent_coef=0.01,
+            vf_coef=0.5,
+            max_grad_norm=float(args.max_grad_norm),
+            seed=42,
+            policy_kwargs=ppo_policy_kwargs,
+            verbose=0,
+            device=args.device,
+        )
 
     device = model.policy.device
-    algo = str(args.algo).strip().lower()
-
-    if algo == "sac":
-        base_dim = int(StateSpec.dim())
-        obs_state_np = obs_np[:, :base_dim].astype(np.float32)
-        desired_goal_np = obs_np[:, base_dim : base_dim + goal_dim].astype(np.float32)
-        achieved_goal_np = np.stack(
-            [_extract_goal_from_base(obs_state_np[i], spec) for i in range(obs_state_np.shape[0])],
-            axis=0,
-        ).astype(np.float32)
-
-        obs_state_all = th.as_tensor(obs_state_np, dtype=th.float32, device=device)
-        desired_goal_all = th.as_tensor(desired_goal_np, dtype=th.float32, device=device)
-        achieved_goal_all = th.as_tensor(achieved_goal_np, dtype=th.float32, device=device)
-        act_all = th.as_tensor(act_np.reshape(-1), dtype=th.long, device=device)
-    else:
-        obs_all = th.as_tensor(obs_np, dtype=th.float32, device=device)
-        act_all = th.as_tensor(act_np, dtype=th.long, device=device)
+    obs_all = th.as_tensor(obs_np, dtype=th.float32, device=device)
+    act_all = th.as_tensor(act_np, dtype=th.long, device=device)
 
     print("=" * 68)
-    print(f"BC PRETRAIN — {resolved_phase.upper()} {algo.upper()}")
+    print(f"BC PRETRAIN - {resolved_phase.upper()} PPO")
     print(f"samples={n_samples} epochs={args.epochs} batch={args.batch_size}")
     print("=" * 68)
 
@@ -599,90 +476,47 @@ def main() -> None:
             if idx.numel() == 0:
                 continue
 
-            if algo == "sac":
-                sac_policy = cast(Any, model).policy
-                obs_b = {
-                    "observation": obs_state_all[idx],
-                    "achieved_goal": achieved_goal_all[idx],
-                    "desired_goal": desired_goal_all[idx],
-                }
-                act_b = act_all[idx].reshape(-1, 1)
+            ppo_policy = cast(Any, model).policy
+            obs_b = obs_all[idx]
+            act_b = act_all[idx]
 
-                probs, log_probs = sac_policy.get_action_dist(obs_b)
-                chosen_log_prob = log_probs.gather(1, act_b).squeeze(1)
-                entropy = -(probs * log_probs).sum(dim=1)
+            dist = ppo_policy.get_distribution(obs_b)
+            log_prob = dist.log_prob(act_b)
+            entropy = dist.entropy()
+            if entropy is None:
+                entropy_mean = th.zeros((), dtype=log_prob.dtype, device=log_prob.device)
+            else:
                 entropy_mean = entropy.mean()
 
-                loss = -chosen_log_prob.mean() - float(args.entropy_coef) * entropy_mean
+            loss = -log_prob.mean() - float(args.entropy_coef) * entropy_mean
 
-                sac_policy.actor_optimizer.zero_grad()
-                loss.backward()
-                clip_grad_norm_(
-                    list(sac_policy.actor.parameters())
-                    + list(sac_policy.actor_features_extractor.parameters()),
-                    float(args.max_grad_norm),
-                )
-                sac_policy.actor_optimizer.step()
-            else:
-                ppo_policy = cast(Any, model).policy
-                obs_b = obs_all[idx]
-                act_b = act_all[idx]
-
-                dist = ppo_policy.get_distribution(obs_b)
-                log_prob = dist.log_prob(act_b)
-                entropy = dist.entropy()
-                if entropy is None:
-                    entropy_mean = th.zeros((), dtype=log_prob.dtype, device=log_prob.device)
-                else:
-                    entropy_mean = entropy.mean()
-
-                loss = -log_prob.mean() - float(args.entropy_coef) * entropy_mean
-
-                ppo_policy.optimizer.zero_grad()
-                loss.backward()
-                clip_grad_norm_(ppo_policy.parameters(), float(args.max_grad_norm))
-                ppo_policy.optimizer.step()
+            ppo_policy.optimizer.zero_grad()
+            loss.backward()
+            clip_grad_norm_(ppo_policy.parameters(), float(args.max_grad_norm))
+            ppo_policy.optimizer.step()
 
             losses.append(float(loss.detach().cpu().item()))
             entropies.append(float(entropy_mean.detach().cpu().item()))
 
         with th.no_grad():
-            if algo == "sac":
-                sac_policy = cast(Any, model).policy
-                pred = sac_policy._predict(
-                    {
-                        "observation": obs_state_all,
-                        "achieved_goal": achieved_goal_all,
-                        "desired_goal": desired_goal_all,
-                    },
-                    deterministic=True,
-                )
-                exact = (pred.reshape(-1) == act_all).float().mean().item()
-                print(
-                    f"epoch {epoch:02d}/{args.epochs} loss={np.mean(losses):.4f} "
-                    f"entropy={np.mean(entropies):.4f} discrete_acc={exact:.3f}"
-                )
-            else:
-                ppo_policy = cast(Any, model).policy
-                pred = ppo_policy._predict(obs_all, deterministic=True)
-                exact = (pred == act_all).all(dim=1).float().mean().item()
-                per_dim = (pred == act_all).float().mean(dim=0).cpu().numpy()
-                print(
-                    f"epoch {epoch:02d}/{args.epochs} loss={np.mean(losses):.4f} "
-                    f"entropy={np.mean(entropies):.4f} exact_acc={exact:.3f} "
-                    f"dim_acc={np.round(per_dim, 3)}"
-                )
+            ppo_policy = cast(Any, model).policy
+            pred = ppo_policy._predict(obs_all, deterministic=True)
+            exact = (pred == act_all).all(dim=1).float().mean().item()
+            per_dim = (pred == act_all).float().mean(dim=0).cpu().numpy()
+            print(
+                f"epoch {epoch:02d}/{args.epochs} loss={np.mean(losses):.4f} "
+                f"entropy={np.mean(entropies):.4f} exact_acc={exact:.3f} "
+                f"dim_acc={np.round(per_dim, 3)}"
+            )
 
     out_model = Path(output_path)
     out_model.parent.mkdir(parents=True, exist_ok=True)
     model.save(str(out_model))
 
-    print(f"Saved BC-initialized {algo.upper()} checkpoint")
+    print("Saved BC-initialized PPO checkpoint")
     print(f"  model: {out_model}")
     print("Fine-tune with:")
-    print(
-        f"  python -m train.train_curriculum --algo {algo} --phase {resolved_phase} --resume {out_model}"
-    )
+    print(f"  python -m train.train_curriculum --phase {resolved_phase} --resume {out_model}")
 
 
 if __name__ == "__main__":

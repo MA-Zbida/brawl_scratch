@@ -1,0 +1,159 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper, margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{enumitem}
+\usepackage{titlesec}
+
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{1em}{}
+
+\title{Stabilizing Goal-Conditioned PPO for Brawlhalla RL Agent}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Goal Redesign}
+
+\subsection{Goal Factorization}
+Introduce a discrete goal type:
+\[
+g = (g_{\text{type}}, \tilde{g})
+\]
+
+Core goal types:
+\begin{itemize}[noitemsep]
+\item Recovery
+\item Approach
+\item Spacing
+\item Attack
+\item Weapon Acquisition
+\end{itemize}
+
+\subsection{Goal Definitions}
+
+\textbf{Recovery}
+\[
+g = (target_x, target_y, urgency)
+\]
+
+\textbf{Approach}
+\[
+g = (target\_rel\_distance, vertical\_alignment, facing\_required)
+\]
+
+\textbf{Spacing}
+\[
+g = (desired\_distance, maintain\_direction)
+\]
+
+\textbf{Attack}
+\[
+g = (in\_range, attack\_type, opponent\_state)
+\]
+
+\textbf{Weapon}
+\[
+g = (weapon\_dx, weapon\_dy, pickup\_flag)
+\]
+
+\subsection{Goal Masking}
+\[
+g_{\text{full}} = mask(g_{\text{type}}) \odot g
+\]
+
+\subsection{Remove Unstable Features}
+\begin{itemize}[noitemsep]
+\item Remove opponent damage from LLC goals
+\item Convert offstage into goal trigger
+\item Keep only relevant features per goal
+\end{itemize}
+
+\subsection{Goal Sampling Distribution}
+\[
+P(g) = 0.4\,G_{\text{core}} + 0.4\,G_{\text{HER}} + 0.2\,G_{\text{archive}}
+\]
+
+\subsection{Temporal Consistency}
+Goals persist for $k$ steps:
+\[
+g_t = g_{t+1} = \dots = g_{t+k}
+\]
+
+\section{Training Modifications}
+
+\subsection{PPO with Anchoring}
+\[
+L = L_{\text{PPO}} + \lambda_{KL} \cdot D_{KL}(\pi \| \pi_{\text{old}}) + \lambda_{BC} \cdot L_{BC}
+\]
+BC Loss on archive trajectories
+\subsection{Replay Integration}
+Training batch:
+\begin{itemize}[noitemsep]
+\item 70\% on-policy PPO
+\item 30\% replay (KL + BC only)
+\end{itemize}
+
+\subsection{Goal-Balanced Batching}
+Ensure equal sampling across goal types.
+
+\subsection{Advantage Normalization}
+\[
+A^{(g)} \leftarrow \frac{A^{(g)} - \mu_g}{\sigma_g}
+\]
+
+\subsection{Gradient Interference Mitigation}
+Use PCGrad or gradient projection to avoid destructive updates.
+
+\subsection{FiLM Regularization}
+Constrain modulation:
+\[
+\gamma \in [0.5, 1.5], \quad \beta \in [-1, 1]
+\]
+
+\subsection{Curriculum Learning}
+
+\textbf{Phase 1:}
+Train each goal independently
+
+\textbf{Phase 2:}
+Train pairs of goals.
+
+\textbf{Phase 3:}
+Full mixed training
+
+\subsection{Policy Snapshot Anchoring}
+Maintain past policies:
+\begin{itemize}[noitemsep]
+\item Store every $N$ updates
+\item Keep last $K$ snapshots
+\item Sample randomly for KL constraint
+\end{itemize}
+
+\subsection{Replay Prioritization}
+Prioritize successful trajectories:
+\begin{itemize}[noitemsep]
+\item Recovery success
+\item Successful hits
+\item Stable spacing
+\end{itemize}
+
+\subsection{Evaluation Metrics}
+Track per goal type:
+\begin{itemize}[noitemsep]
+\item Success rate
+\item Retention over time
+\end{itemize}
+
+\section{Result}
+
+These modifications:
+\begin{itemize}[noitemsep]
+\item Stabilize goal distribution
+\item Reduce skill interference
+\item Prevent catastrophic forgetting
+\item Prepare transition to hierarchical RL
+\end{itemize}
+
+\end{document}

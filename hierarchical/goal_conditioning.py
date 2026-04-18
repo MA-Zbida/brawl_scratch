@@ -10,6 +10,11 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goals import GOAL_DIM, GOAL_TARGET_DIM
 
+FILM_GAMMA_MIN = 0.5
+FILM_GAMMA_MAX = 1.5
+FILM_BETA_MIN = -1.0
+FILM_BETA_MAX = 1.0
+
 
 class GoalConditionedModulationExtractor(BaseFeaturesExtractor):
     """Encode state and goal structure, then apply FiLM modulation.
@@ -54,6 +59,8 @@ class GoalConditionedModulationExtractor(BaseFeaturesExtractor):
                 f"Goal feature index count ({len(self.goal_feature_indices)}) must match GOAL_TARGET_DIM ({self.goal_target_dim})"
             )
 
+        self.feat_min: torch.Tensor
+        self.feat_max: torch.Tensor
         self.register_buffer("feat_min", torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], dtype=torch.float32))
         self.register_buffer("feat_max", torch.tensor([2.0, 2.0, 1.0, 1.0, 1.0, 2.0, 1.0], dtype=torch.float32))
 
@@ -108,6 +115,8 @@ class GoalConditionedModulationExtractor(BaseFeaturesExtractor):
         phi_s = self.state_encoder(state_aug)
         goal_latent = self.goal_encoder(goal_full)
         gamma, beta = self.film_generator(goal_latent).chunk(2, dim=1)
+        gamma = gamma.clamp(FILM_GAMMA_MIN, FILM_GAMMA_MAX)
+        beta = beta.clamp(FILM_BETA_MIN, FILM_BETA_MAX)
 
         h = gamma * phi_s + beta
         h = h + phi_s

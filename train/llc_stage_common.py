@@ -5,18 +5,18 @@ import csv
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence, cast
 
 import gymnasium as gym
 import numpy as np
-from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
 
+from algo.anchored_replay_ppo import AnchoredReplayPPO
 from env import BrawlDeepEnv, EnvConfig
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goals import GOAL_FEATURE_NAMES, GOAL_STATE_SPEC_NAMES, GOAL_TARGET_DIM, extract_goal_features
-from wrappers.goal_env_wrapper import FlattenMultiDiscreteWrapper, StageGoalDictEnv, decode_action
+from train.curriculum_goals import GOAL_TYPE_INDEX, goal_type_onehot, normalize_goal_type
 
 
 ActionAdapter = Callable[[np.ndarray], np.ndarray]
@@ -58,6 +58,7 @@ class StageSpec:
     name: str
     mask: np.ndarray          # goal_dim, values in [0, 1]
     target_sampler: TargetSampler  # must return a goal_dim array in [0, 1]
+    goal_type: str = "spacing"
     feature_names: Optional[list[str]] = None  # logging + goal feature order
     goal_extractor: Optional[GoalExtractor] = None
     min_goal_duration: int = 100
@@ -125,6 +126,12 @@ class StageSpec:
     resample_goal_on_opponent_stock_loss: bool = False
     opponent_ko_bonus: float = 0.0
     sample_goal_only_when_player_exists: bool = True
+    sequential_goal_enabled: bool = False
+    sequential_target_sampler: Optional[TargetSampler] = None
+    sequential_step1_bonus: float = 0.0
+    sequential_failure_penalty: float = 0.0
+    sequential_require_offstage_first: bool = False
+    sequential_require_onstage_second: bool = False
 
 
 class StageGoalEnv(gym.Wrapper):
@@ -140,6 +147,9 @@ class StageGoalEnv(gym.Wrapper):
         self.stage_spec = spec
         self.action_adapter = action_adapter
         self.goal_extractor = spec.goal_extractor
+        self.goal_type = normalize_goal_type(spec.goal_type)
+        self.goal_type_index = int(GOAL_TYPE_INDEX[self.goal_type])
+        self._goal_type_onehot = goal_type_onehot(self.goal_type)
 
         if spec.feature_names is not None:
             self.goal_dim = int(len(spec.feature_names))
@@ -154,7 +164,11 @@ class StageGoalEnv(gym.Wrapper):
         self._active_mask = self.mask.copy()
         self._feature_index = {name: idx for idx, name in enumerate(self.feature_names)}
 
-        base_dim = int(env.observation_space.shape[0])
+        obs_shape = getattr(env.observation_space, "shape", None)
+        if obs_shape is None or len(obs_shape) == 0:
+            raise ValueError("Underlying env must expose a 1D observation space with known shape")
+
+        base_dim = int(obs_shape[0])
         self._base_dim = base_dim
         self._aug_dim = base_dim + (2 * self.goal_dim)
 
@@ -174,6 +188,8 @@ class StageGoalEnv(gym.Wrapper):
         self._prev_has_weapon: Optional[bool] = None
         self._prev_in_range: float = 0.0
         self._combo_chain_hits: int = 0
+        self._seq_phase: int = 1
+        self._seq_step1_completed: bool = False
         self._allowed_attack_actions: Optional[set[int]] = None
         if spec.allowed_attack_actions is not None:
             allowed = {int(v) for v in spec.allowed_attack_actions}
@@ -181,6 +197,18 @@ class StageGoalEnv(gym.Wrapper):
             if not allowed:
                 allowed = {0}
             self._allowed_attack_actions = allowed
+
+    def _sequential_enabled(self) -> bool:
+        return bool(self.stage_spec.sequential_goal_enabled and self.stage_spec.sequential_target_sampler is not None)
+
+    def _sample_goal_for_sequence_step(self, obs: np.ndarray, step: int) -> None:
+        if int(step) == 2 and self.stage_spec.sequential_target_sampler is not None:
+            self._seq_phase = 2
+            self._sample_goal(obs, sampler=self.stage_spec.sequential_target_sampler)
+            return
+        self._seq_phase = 1
+        self._seq_step1_completed = False
+        self._sample_goal(obs, sampler=self.stage_spec.target_sampler)
 
     def _extract(self, obs: np.ndarray) -> np.ndarray:
         if self.goal_extractor is not None:
@@ -310,8 +338,9 @@ class StageGoalEnv(gym.Wrapper):
         }
         return int(key_to_action.get(str(key or "").strip().lower(), 0))
 
-    def _sample_goal(self, obs: np.ndarray) -> None:
-        self._goal_target = np.asarray(self.stage_spec.target_sampler(obs), dtype=np.float32).reshape(-1)
+    def _sample_goal(self, obs: np.ndarray, sampler: Optional[TargetSampler] = None) -> None:
+        sampler_fn = self.stage_spec.target_sampler if sampler is None else sampler
+        self._goal_target = np.asarray(sampler_fn(obs), dtype=np.float32).reshape(-1)
         if self._goal_target.shape[0] != self.goal_dim:
             raise ValueError(
                 f"Target sampler returned dim={self._goal_target.shape[0]}, expected {self.goal_dim}"
@@ -392,13 +421,18 @@ class StageGoalEnv(gym.Wrapper):
             obs, info = self._perturb_reset()
         obs = np.asarray(obs, dtype=np.float32)
         init_feats = self._extract(obs)
+        self._seq_phase = 1
+        self._seq_step1_completed = False
         if self.stage_spec.sample_goal_only_when_player_exists and not self._player_is_controllable(info):
             self._goal_target.fill(0.0)
             self._goal_steps_left = -1
             self._goal_active = False
             self._active_mask = self.mask.copy()
         else:
-            self._sample_goal(obs)
+            if self._sequential_enabled():
+                self._sample_goal_for_sequence_step(obs, step=1)
+            else:
+                self._sample_goal(obs)
             self._maybe_update_player_xy_goal(obs)
             self._active_mask = self._effective_mask_for_step(init_feats)
         self._prev_has_weapon = self._feature_value(init_feats, "player_has_weapon", 0.0) > 0.5
@@ -407,6 +441,9 @@ class StageGoalEnv(gym.Wrapper):
         self._prev_error = None
 
         info["stage_name"] = self.stage_spec.name
+        info["goal_type"] = self.goal_type
+        info["goal_type_index"] = int(self.goal_type_index)
+        info["goal_type_onehot"] = self._goal_type_onehot.copy()
         info["goal_target"] = self._goal_target.copy()
         info["goal_mask"] = self._active_mask.copy()
         info["goal_active"] = float(1.0 if self._goal_active else 0.0)
@@ -450,21 +487,37 @@ class StageGoalEnv(gym.Wrapper):
 
         op_stock_lost = float(max(0.0, info.get("op_stock_lost_step", 0.0)))
 
+        seq_enabled = self._sequential_enabled()
+        seq_phase_before_step = int(self._seq_phase)
+        seq_step1_transition = False
+        seq_failure_penalty = 0.0
+
         goal_new_sampled = False
         if player_controllable:
             if not self._goal_active:
-                self._sample_goal(obs)
+                if seq_enabled:
+                    self._sample_goal_for_sequence_step(obs, step=1)
+                else:
+                    self._sample_goal(obs)
                 self._prev_error = None
                 goal_new_sampled = True
             elif self.stage_spec.resample_goal_on_opponent_stock_loss and op_stock_lost > 0.0:
                 # Opponent was KO'd — damage reset to 0, so the current goal
                 # target is stale.  Resample relative to the new (reset) state.
-                self._sample_goal(obs)
+                if seq_enabled:
+                    self._sample_goal_for_sequence_step(obs, step=self._seq_phase)
+                else:
+                    self._sample_goal(obs)
                 self._prev_error = None
                 goal_new_sampled = True
             elif self.stage_spec.resample_goal_on_timer:
                 if self._goal_steps_left <= 0:
-                    self._sample_goal(obs)
+                    if seq_enabled:
+                        if self._seq_phase == 2 and self.stage_spec.sequential_failure_penalty > 0.0:
+                            seq_failure_penalty = float(self.stage_spec.sequential_failure_penalty)
+                        self._sample_goal_for_sequence_step(obs, step=1)
+                    else:
+                        self._sample_goal(obs)
                     self._prev_error = None
                     goal_new_sampled = True
                 else:
@@ -472,6 +525,9 @@ class StageGoalEnv(gym.Wrapper):
         elif self.stage_spec.sample_goal_only_when_player_exists:
             self._goal_active = False
             self._goal_steps_left = -1
+            if seq_enabled:
+                self._seq_phase = 1
+                self._seq_step1_completed = False
 
         curr_feats = self._extract(obs)  # compute once; reused for error and HER buffer
         curr_has_weapon = self._feature_value(curr_feats, "player_has_weapon", 0.0) > 0.5
@@ -596,8 +652,40 @@ class StageGoalEnv(gym.Wrapper):
                     tol = float(max(0.0, self.stage_spec.opponent_damage_success_tolerance))
                     success = bool((op_dmg_curr + tol) >= op_dmg_target)
 
+            if seq_enabled:
+                offstage_now = self._feature_value(curr_feats, "player_is_offstage", 0.0) > 0.5
+                if self._seq_phase == 1:
+                    step1_ok = bool(success)
+                    if self.stage_spec.sequential_require_offstage_first:
+                        step1_ok = bool(step1_ok and offstage_now)
+
+                    if step1_ok:
+                        if self.stage_spec.sequential_step1_bonus > 0.0:
+                            reward += float(self.stage_spec.sequential_step1_bonus)
+                        self._seq_step1_completed = True
+                        self._sample_goal_for_sequence_step(obs, step=2)
+                        self._prev_error = None
+                        goal_new_sampled = True
+                        seq_step1_transition = True
+
+                    # Step-1 is never terminal success for the episode.
+                    success = False
+                else:
+                    step2_ok = bool(success)
+                    if self.stage_spec.sequential_require_onstage_second:
+                        step2_ok = bool(step2_ok and (not offstage_now))
+                    success = bool(step2_ok)
+
             if success:
                 reward += self.stage_spec.success_bonus
+
+            if seq_enabled and success and not self.stage_spec.terminate_on_goal_success:
+                # When not terminating on success (e.g., evaluation), immediately
+                # restart the sequence from step-1 for continuous rollouts.
+                self._sample_goal_for_sequence_step(obs, step=1)
+                self._prev_error = None
+                goal_new_sampled = True
+                self._seq_step1_completed = False
         else:
             self._active_mask = self.mask.copy()
             curr_error = 0.0
@@ -647,6 +735,15 @@ class StageGoalEnv(gym.Wrapper):
         if self.stage_spec.terminate_on_death and effective_self_stock_lost > 0.0:
             terminated = True
 
+        if seq_enabled and seq_phase_before_step == 2 and (not success) and effective_self_stock_lost > 0.0:
+            if self.stage_spec.sequential_failure_penalty > 0.0:
+                seq_failure_penalty = max(seq_failure_penalty, float(self.stage_spec.sequential_failure_penalty))
+            self._seq_phase = 1
+            self._seq_step1_completed = False
+
+        if seq_failure_penalty > 0.0:
+            reward -= float(seq_failure_penalty)
+
         forced_weapon_drop = float(self._force_drop_weapon_if_needed(curr_feats, truncated))
         agent_weapon_drop_event = 0.0
         agent_weapon_drop_penalty_applied = 0.0
@@ -670,6 +767,9 @@ class StageGoalEnv(gym.Wrapper):
         self._prev_in_range = float(np.clip(self._feature_value(curr_feats, "in_strike_range", 0.0), 0.0, 1.0))
 
         info["stage_name"] = self.stage_spec.name
+        info["goal_type"] = self.goal_type
+        info["goal_type_index"] = int(self.goal_type_index)
+        info["goal_type_onehot"] = self._goal_type_onehot.copy()
         info["goal_target"] = self._goal_target.copy()
         info["goal_mask"] = self._active_mask.copy()
         info["goal_error"] = float(curr_error)
@@ -702,6 +802,11 @@ class StageGoalEnv(gym.Wrapper):
         info["combat_penalty_combo_delay"] = float(combo_delay_penalty)
         info["combat_penalty_attack_whiff"] = float(attack_whiff_penalty)
         info["combat_penalty_no_attack_in_range"] = float(no_attack_in_range_penalty_applied)
+        info["sequential_goal_enabled"] = float(1.0 if seq_enabled else 0.0)
+        info["sequential_phase"] = int(self._seq_phase if seq_enabled else 0)
+        info["sequential_step1_completed"] = float(1.0 if self._seq_step1_completed else 0.0)
+        info["sequential_step1_transition"] = float(1.0 if seq_step1_transition else 0.0)
+        info["sequential_failure_penalty"] = float(seq_failure_penalty)
 
         aug_obs = self._augment(obs)
         return aug_obs, reward, terminated, truncated, info
@@ -800,6 +905,8 @@ class StageDashboardCallback(BaseCallback):
                 "op_delta_damage",
                 "self_delta_damage",
                 "stage_name",
+                "goal_type",
+                "goal_type_index",
             ],
         )
         self._step_writer.writeheader()
@@ -1008,6 +1115,8 @@ class StageDashboardCallback(BaseCallback):
                         "op_delta_damage": op_delta,
                         "self_delta_damage": self_delta,
                         "stage_name": self.stage_name,
+                        "goal_type": str(info.get("goal_type", "unknown")),
+                        "goal_type_index": int(info.get("goal_type_index", -1)),
                     }
                 )
 
@@ -1097,9 +1206,9 @@ class StageDashboardCallback(BaseCallback):
             self._her_orig_rewards.clear()
             return
 
-        try:
-            buffer = self.model.rollout_buffer
-        except AttributeError:
+        model_obj = cast(Any, self.model)
+        buffer = getattr(model_obj, "rollout_buffer", None)
+        if buffer is None:
             return
 
         mask = np.asarray(spec.mask, dtype=np.float32)
@@ -1176,10 +1285,9 @@ class DiagnosticCallback(BaseCallback):
     the training loop is sane before long runs.
     """
 
-    def __init__(self, report_every: int = 500, verbose: int = 0, flat_actions: bool = False):
+    def __init__(self, report_every: int = 500, verbose: int = 0):
         super().__init__(verbose)
         self._report_every = max(1, report_every)
-        self._flat_actions = flat_actions  # SAC uses Discrete(64); decode for stats
         self._rewards: list[float] = []
         self._errors: list[float] = []
         self._actions: list[np.ndarray] = []
@@ -1195,10 +1303,7 @@ class DiagnosticCallback(BaseCallback):
             self._errors.append(float(info.get("goal_error", 0.0)))
             self._successes.append(float(info.get("goal_success", 0.0)))
             if actions is not None and i < len(actions):
-                act = np.asarray(actions[i])
-                if self._flat_actions and act.ndim == 0:
-                    act = decode_action(int(act))
-                self._actions.append(act)
+                self._actions.append(np.asarray(actions[i]))
 
         if self.num_timesteps % self._report_every == 0 and len(self._rewards) > 0:
             r = np.asarray(self._rewards[-self._report_every:], dtype=np.float32)
@@ -1270,6 +1375,264 @@ class DiagnosticCallback(BaseCallback):
         return True
 
 
+class PeriodicEvalCallback(BaseCallback):
+    """Run periodic evaluation episodes during training without stopping learning."""
+
+    def __init__(
+        self,
+        make_eval_env: Callable[[], gym.Env],
+        eval_freq_steps: int,
+        eval_episodes: int = 5,
+        deterministic: bool = True,
+        seed: int = 42,
+        save_dir: Optional[Path] = None,
+        model_name: str = "model",
+        verbose: int = 0,
+    ):
+        super().__init__(verbose)
+        self.make_eval_env = make_eval_env
+        self.eval_freq_steps = max(1, int(eval_freq_steps))
+        self.eval_episodes = max(1, int(eval_episodes))
+        self.deterministic = bool(deterministic)
+        self.seed = int(seed)
+        self.save_dir = save_dir
+        self.model_name = str(model_name)
+
+        self._next_eval_step = self.eval_freq_steps
+        self._eval_index = 0
+        self._eval_env: Optional[gym.Env] = None
+
+        self.best_mean_reward = float("-inf")
+        self.best_model_path = (
+            (self.save_dir / f"{self.model_name}_best_eval.zip")
+            if self.save_dir is not None
+            else None
+        )
+
+        self.eval_csv_path = (
+            (self.save_dir / f"{self.model_name}_eval.csv")
+            if self.save_dir is not None
+            else None
+        )
+        self._eval_fh = None
+        self._eval_writer: Optional[csv.DictWriter] = None
+
+    @staticmethod
+    def _resolve_outcome(self_stocks: float, op_stocks: float, truncated: bool) -> str:
+        if op_stocks <= 0.0 and self_stocks > 0.0:
+            return "WIN"
+        if self_stocks <= 0.0 and op_stocks > 0.0:
+            return "LOSS"
+        if self_stocks <= 0.0 and op_stocks <= 0.0:
+            return "DRAW"
+        if truncated:
+            return "TRUNC"
+        return "UNRESOLVED"
+
+    @staticmethod
+    def _prepare_action(env: gym.Env, action: Any) -> Any:
+        if isinstance(action, np.ndarray) and action.ndim > 1:
+            action = action[0]
+
+        action_space = env.action_space
+        if isinstance(action_space, gym.spaces.Discrete):
+            return int(np.asarray(action, dtype=np.int64).reshape(-1)[0])
+
+        if isinstance(action_space, gym.spaces.MultiDiscrete):
+            arr = np.asarray(action, dtype=np.int64).reshape(-1)
+            expected_dim = int(np.asarray(action_space.nvec).reshape(-1).shape[0])
+            if arr.shape[0] != expected_dim:
+                raise ValueError(
+                    f"Evaluation action shape mismatch: expected {expected_dim}, got {arr.shape[0]}"
+                )
+            return arr
+
+        return action
+
+    @staticmethod
+    def _extract_base_env(env: gym.Env) -> Optional[BrawlDeepEnv]:
+        base = env.unwrapped
+        return base if isinstance(base, BrawlDeepEnv) else None
+
+    def _on_training_start(self) -> None:
+        self._eval_env = self.make_eval_env()
+        if self.save_dir is not None:
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.eval_csv_path is None:
+            return
+
+        self._eval_fh = open(self.eval_csv_path, "w", newline="", encoding="utf-8")
+        self._eval_writer = csv.DictWriter(
+            self._eval_fh,
+            fieldnames=[
+                "eval_index",
+                "train_steps",
+                "episodes",
+                "mean_reward",
+                "std_reward",
+                "mean_steps",
+                "mean_op_damage",
+                "mean_self_damage",
+                "mean_self_stocks",
+                "mean_op_stocks",
+                "wins",
+                "losses",
+                "draws",
+                "truncs",
+                "win_rate",
+            ],
+        )
+        self._eval_writer.writeheader()
+
+    def _run_eval(self) -> dict[str, float | int]:
+        if self._eval_env is None:
+            raise RuntimeError("PeriodicEvalCallback evaluation env is not initialized")
+
+        env = self._eval_env
+        rewards: list[float] = []
+        lengths: list[int] = []
+        self_stocks_list: list[float] = []
+        op_stocks_list: list[float] = []
+        op_dmg_totals: list[float] = []
+        self_dmg_totals: list[float] = []
+        outcomes: list[str] = []
+
+        for ep in range(self.eval_episodes):
+            eval_seed = int(self.seed + (self._eval_index * 10_000) + ep + 1)
+            obs, _ = env.reset(seed=eval_seed)
+            terminated = False
+            truncated = False
+            ep_reward = 0.0
+            ep_len = 0
+            ep_op_dmg = 0.0
+            ep_self_dmg = 0.0
+
+            while not (terminated or truncated):
+                action, _ = self.model.predict(obs, deterministic=self.deterministic)
+                env_action = self._prepare_action(env, action)
+                obs, reward, terminated, truncated, info = env.step(env_action)
+                ep_reward += float(reward)
+                ep_len += 1
+                ep_op_dmg += float(info.get("op_delta_damage", 0.0))
+                ep_self_dmg += float(info.get("self_delta_damage", 0.0))
+
+            base = self._extract_base_env(env)
+            if base is not None:
+                self_stocks = float(base.memory.self_stocks_left)
+                op_stocks = float(base.memory.op_stocks_left)
+            else:
+                self_stocks = float("nan")
+                op_stocks = float("nan")
+
+            outcome = self._resolve_outcome(self_stocks, op_stocks, bool(truncated))
+
+            rewards.append(ep_reward)
+            lengths.append(ep_len)
+            self_stocks_list.append(self_stocks)
+            op_stocks_list.append(op_stocks)
+            op_dmg_totals.append(ep_op_dmg)
+            self_dmg_totals.append(ep_self_dmg)
+            outcomes.append(outcome)
+
+        rewards_np = np.asarray(rewards, dtype=np.float32)
+        lengths_np = np.asarray(lengths, dtype=np.float32)
+        self_stocks_np = np.asarray(self_stocks_list, dtype=np.float32)
+        op_stocks_np = np.asarray(op_stocks_list, dtype=np.float32)
+        op_dmg_np = np.asarray(op_dmg_totals, dtype=np.float32)
+        self_dmg_np = np.asarray(self_dmg_totals, dtype=np.float32)
+
+        wins = int(sum(1 for x in outcomes if x == "WIN"))
+        losses = int(sum(1 for x in outcomes if x == "LOSS"))
+        draws = int(sum(1 for x in outcomes if x == "DRAW"))
+        truncs = int(sum(1 for x in outcomes if x == "TRUNC"))
+        win_rate = float(wins / max(1, len(outcomes)))
+
+        return {
+            "episodes": int(len(outcomes)),
+            "mean_reward": float(rewards_np.mean()),
+            "std_reward": float(rewards_np.std()),
+            "mean_steps": float(lengths_np.mean()),
+            "mean_op_damage": float(op_dmg_np.mean()),
+            "mean_self_damage": float(self_dmg_np.mean()),
+            "mean_self_stocks": float(self_stocks_np.mean()),
+            "mean_op_stocks": float(op_stocks_np.mean()),
+            "wins": wins,
+            "losses": losses,
+            "draws": draws,
+            "truncs": truncs,
+            "win_rate": win_rate,
+        }
+
+    def _log_eval_summary(self, summary: dict[str, float | int]) -> None:
+        self.logger.record("eval/mean_reward", float(summary["mean_reward"]))
+        self.logger.record("eval/std_reward", float(summary["std_reward"]))
+        self.logger.record("eval/mean_ep_length", float(summary["mean_steps"]))
+        self.logger.record("eval/win_rate", float(summary["win_rate"]))
+        self.logger.record("eval/mean_op_damage", float(summary["mean_op_damage"]))
+        self.logger.record("eval/mean_self_damage", float(summary["mean_self_damage"]))
+
+    def _on_step(self) -> bool:
+        while self.num_timesteps >= self._next_eval_step:
+            self._eval_index += 1
+            summary = self._run_eval()
+            self._log_eval_summary(summary)
+
+            mean_reward = float(summary["mean_reward"])
+            improved = mean_reward > self.best_mean_reward
+            if improved:
+                self.best_mean_reward = mean_reward
+                if self.best_model_path is not None:
+                    self.model.save(str(self.best_model_path))
+
+            if self._eval_writer is not None:
+                self._eval_writer.writerow(
+                    {
+                        "eval_index": self._eval_index,
+                        "train_steps": int(self.num_timesteps),
+                        "episodes": int(summary["episodes"]),
+                        "mean_reward": float(summary["mean_reward"]),
+                        "std_reward": float(summary["std_reward"]),
+                        "mean_steps": float(summary["mean_steps"]),
+                        "mean_op_damage": float(summary["mean_op_damage"]),
+                        "mean_self_damage": float(summary["mean_self_damage"]),
+                        "mean_self_stocks": float(summary["mean_self_stocks"]),
+                        "mean_op_stocks": float(summary["mean_op_stocks"]),
+                        "wins": int(summary["wins"]),
+                        "losses": int(summary["losses"]),
+                        "draws": int(summary["draws"]),
+                        "truncs": int(summary["truncs"]),
+                        "win_rate": float(summary["win_rate"]),
+                    }
+                )
+                if self._eval_fh is not None:
+                    self._eval_fh.flush()
+
+            print(
+                f"[Eval @{self.num_timesteps}] "
+                f"ep={int(summary['episodes'])} | "
+                f"W/L/D/T={int(summary['wins'])}/{int(summary['losses'])}/{int(summary['draws'])}/{int(summary['truncs'])} | "
+                f"win={float(summary['win_rate']):.3f} | "
+                f"reward={float(summary['mean_reward']):+.3f}±{float(summary['std_reward']):.3f} | "
+                f"len={float(summary['mean_steps']):.1f} | "
+                f"dmg(self/op)={float(summary['mean_self_damage']):.3f}/{float(summary['mean_op_damage']):.3f}"
+                + (" | best" if improved else "")
+            )
+
+            self._next_eval_step += self.eval_freq_steps
+
+        return True
+
+    def _on_training_end(self) -> None:
+        if self._eval_env is not None:
+            try:
+                self._eval_env.close()
+            except Exception:
+                pass
+        if self._eval_fh is not None:
+            self._eval_fh.close()
+
+
 def default_env_config(max_episode_steps: int, terminate_on_stock_out: bool = False) -> EnvConfig:
     return EnvConfig(
         terminate_on_stock_out=terminate_on_stock_out,
@@ -1284,7 +1647,6 @@ def default_env_config(max_episode_steps: int, terminate_on_stock_out: bool = Fa
 
 def parse_train_args(default_name: str, default_steps: int) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=f"Train {default_name}")
-    p.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"])
     p.add_argument("--timesteps", type=int, default=default_steps)
     p.add_argument("--learning-rate", type=float, default=3e-4)
     p.add_argument("--batch-size", type=int, default=256)
@@ -1298,23 +1660,32 @@ def parse_train_args(default_name: str, default_steps: int) -> argparse.Namespac
     p.add_argument("--log-csv", action="store_true", help="Write step/episode CSV logs")
     p.add_argument("--diag-report-every", type=int, default=0, help="Diagnostic print period in steps (0 disables)")
     p.add_argument("--moving-avg", type=int, default=300)
+    p.add_argument("--eval-every-steps", type=int, default=0, help="Run periodic evaluation every N timesteps (0 disables)")
+    p.add_argument("--eval-episodes", type=int, default=3, help="Episodes per periodic evaluation checkpoint")
+    p.add_argument("--eval-stochastic", action="store_true", help="Use stochastic policy during periodic evaluation")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--device", type=str, default="cpu")
-    # PPO-specific
     p.add_argument("--n-steps", type=int, default=2048)
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--clip-range", type=float, default=0.15)
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--vf-coef", type=float, default=0.5)
-    # Discrete SAC-specific
-    p.add_argument("--buffer-size", type=int, default=100_000)
-    p.add_argument("--learning-starts", type=int, default=1_000)
-    p.add_argument("--tau", type=float, default=0.005)
-    p.add_argument("--train-freq", type=int, default=1)
-    p.add_argument("--gradient-steps", type=int, default=1)
-    p.add_argument("--sac-ent-coef", type=str, default="auto")
-    p.add_argument("--her-n-goals", type=int, default=4)
+    p.add_argument("--replay-ratio", type=float, default=0.30, help="Fraction of PPO minibatch sampled from replay")
+    p.add_argument("--replay-capacity", type=int, default=262_144, help="Replay storage capacity in transitions")
+    p.add_argument("--replay-warmup-updates", type=int, default=1, help="Number of PPO updates before replay sampling")
+    p.add_argument("--strict-replay-mix", dest="strict_replay_mix", action="store_true", help="Enforce configured replay ratio when possible")
+    p.add_argument("--no-strict-replay-mix", dest="strict_replay_mix", action="store_false")
+    p.add_argument("--normalize-advantage-per-source", dest="normalize_advantage_per_source", action="store_true", help="Normalize on-policy and replay advantages separately")
+    p.add_argument("--no-normalize-advantage-per-source", dest="normalize_advantage_per_source", action="store_false")
+    p.add_argument("--anchor-kl-coef", type=float, default=0.02, help="KL anchor loss coefficient")
+    p.add_argument("--anchor-update-interval", type=int, default=8, help="Anchor snapshot refresh period in PPO updates")
+    p.add_argument("--bc-loss-coef", type=float, default=0.05, help="Behavior cloning loss coefficient")
+    p.add_argument("--bc-batch-size", type=int, default=128, help="BC mini-batch size")
+    p.add_argument("--bc-demos-path", type=str, default=None, help="Path to NPZ demonstrations used for BC anchor")
+    p.add_argument("--pcgrad", dest="pcgrad", action="store_true", help="Enable PCGrad between PPO and auxiliary losses")
+    p.add_argument("--no-pcgrad", dest="pcgrad", action="store_false")
+    p.set_defaults(strict_replay_mix=True, normalize_advantage_per_source=True, pcgrad=True)
     return p.parse_args()
 
 
@@ -1322,47 +1693,22 @@ def train_stage_model(
     args: argparse.Namespace,
     make_env: Callable[[], gym.Env],
     stage_spec: Optional[StageSpec] = None,
+    make_eval_env: Optional[Callable[[], gym.Env]] = None,
 ) -> None:
-    """Train a stage LLC policy (PPO or Discrete-SAC).
-
-    Parameters
-    ----------
-    stage_spec:
-        For PPO, stage goals are consumed directly by StageGoalFiLMExtractor.
-        For Discrete-SAC, stage goals additionally enable HER via StageGoalDictEnv.
-    """
+    """Train a stage LLC policy with PPO."""
     from feature_extractor.film_extractor import StageGoalFiLMExtractor
-
-    algo = str(getattr(args, "algo", "ppo")).strip().lower()
-    if algo not in {"ppo", "sac"}:
-        raise ValueError(f"Unsupported algo '{algo}'. Expected one of: ppo, sac")
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     final_model = save_dir / f"{args.model_name}.zip"
 
     def _make_algo_env() -> gym.Env:
-        env = make_env()
-        if algo != "sac":
-            return env
+        return make_env()
 
-        env = FlattenMultiDiscreteWrapper(env)
-        if stage_spec is None:
-            return env
-
-        goal_dim = int(len(stage_spec.feature_names)) if stage_spec.feature_names is not None else int(
-            np.asarray(stage_spec.mask, dtype=np.float32).reshape(-1).shape[0]
-        )
-        return StageGoalDictEnv(
-            env,
-            proximity_scale=float(stage_spec.proximity_scale),
-            success_threshold=float(stage_spec.success_threshold),
-            success_bonus=float(stage_spec.success_bonus),
-            mask=np.asarray(stage_spec.mask, dtype=np.float32),
-            goal_extractor=stage_spec.goal_extractor,
-            goal_dim=goal_dim,
-            use_l2_error=bool(stage_spec.use_l2_error),
-        )
+    def _make_algo_eval_env() -> gym.Env:
+        if make_eval_env is None:
+            raise RuntimeError("make_eval_env was requested but not provided")
+        return make_eval_env()
 
     base_vec = VecMonitor(DummyVecEnv([_make_algo_env]))
     vecnorm_path = save_dir / f"{args.model_name}.vecnormalize.pkl"
@@ -1379,17 +1725,13 @@ def train_stage_model(
     else:
         vec_env = VecNormalize(base_vec, norm_obs=False, norm_reward=False, clip_obs=10.0)
 
-    if algo == "sac":
-        model = _build_sac(args, vec_env, stage_spec, StageGoalFiLMExtractor)
-    else:
-        model = _build_ppo(args, vec_env, stage_spec, StageGoalFiLMExtractor)
+    model = _build_ppo(args, vec_env, stage_spec, StageGoalFiLMExtractor)
 
-    print(f"[{args.model_name}] Training {algo.upper()} for {args.timesteps:,} timesteps")
+    print(f"[{args.model_name}] Training PPO for {args.timesteps:,} timesteps")
     print(f"[{args.model_name}] Starting in {args.delay:.0f}s - switch to Brawlhalla")
     time.sleep(args.delay)
 
-    # For SAC, HER is handled by replay buffer; disable callback-side on-policy HER.
-    her_spec = stage_spec if algo == "ppo" else None
+    her_spec = stage_spec
 
     dashboard_cb = StageDashboardCallback(
         save_dir=save_dir,
@@ -1403,7 +1745,26 @@ def train_stage_model(
     callbacks_list: list[BaseCallback] = [dashboard_cb]
     diag_every = int(getattr(args, "diag_report_every", 0))
     if diag_every > 0:
-        callbacks_list.append(DiagnosticCallback(report_every=diag_every, flat_actions=(algo == "sac")))
+        callbacks_list.append(DiagnosticCallback(report_every=diag_every))
+    eval_every = int(getattr(args, "eval_every_steps", 0))
+    if eval_every > 0:
+        if make_eval_env is None:
+            print(f"[{args.model_name}] eval_every_steps={eval_every} requested, but no eval env builder was provided.")
+        else:
+            eval_cb = PeriodicEvalCallback(
+                make_eval_env=_make_algo_eval_env,
+                eval_freq_steps=eval_every,
+                eval_episodes=int(getattr(args, "eval_episodes", 3)),
+                deterministic=not bool(getattr(args, "eval_stochastic", False)),
+                seed=int(getattr(args, "seed", 42)),
+                save_dir=save_dir,
+                model_name=args.model_name,
+            )
+            callbacks_list.append(eval_cb)
+            print(
+                f"[{args.model_name}] Periodic eval enabled: every {eval_every} steps, "
+                f"{int(getattr(args, 'eval_episodes', 3))} episodes"
+            )
     callbacks = CallbackList(callbacks_list)
 
     interrupted = False
@@ -1427,10 +1788,38 @@ def train_stage_model(
 
 def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     """Build or resume a PPO model."""
+    replay_ratio = float(np.clip(getattr(args, "replay_ratio", 0.30), 0.0, 0.95))
+    replay_capacity = int(max(1, getattr(args, "replay_capacity", 262_144)))
+    replay_warmup_updates = int(max(0, getattr(args, "replay_warmup_updates", 1)))
+    strict_replay_mix = bool(getattr(args, "strict_replay_mix", True))
+    normalize_adv_per_source = bool(getattr(args, "normalize_advantage_per_source", True))
+    anchor_kl_coef = float(max(0.0, getattr(args, "anchor_kl_coef", 0.02)))
+    anchor_update_interval = int(max(1, getattr(args, "anchor_update_interval", 8)))
+    bc_loss_coef = float(max(0.0, getattr(args, "bc_loss_coef", 0.05)))
+    bc_batch_size = int(max(1, getattr(args, "bc_batch_size", 128)))
+    bc_demos_path = getattr(args, "bc_demos_path", None)
+    enable_pcgrad = bool(getattr(args, "pcgrad", True))
+
+    if not bc_demos_path:
+        candidates: list[Path] = []
+        save_root = Path(getattr(args, "save_dir", "train/models"))
+        if stage_spec is not None:
+            candidates.append(save_root / f"{stage_spec.name}_demos.npz")
+        phase_name = getattr(args, "phase", None)
+        if phase_name:
+            candidates.append(save_root / f"{phase_name}_demos.npz")
+        model_name = str(getattr(args, "model_name", ""))
+        if model_name.startswith("llc_"):
+            candidates.append(save_root / f"{model_name[4:]}_demos.npz")
+        for candidate in candidates:
+            if candidate.exists():
+                bc_demos_path = str(candidate)
+                break
+
     if args.resume:
         print(f"[{args.model_name}] Resuming PPO from {args.resume}")
         try:
-            return PPO.load(
+            return AnchoredReplayPPO.load(
                 args.resume,
                 env=vec_env,
                 learning_rate=args.learning_rate,
@@ -1444,6 +1833,17 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
                 max_grad_norm=args.max_grad_norm,
                 seed=args.seed,
                 device=args.device,
+                replay_ratio=replay_ratio,
+                replay_capacity=replay_capacity,
+                replay_warmup_updates=replay_warmup_updates,
+                strict_replay_mix=strict_replay_mix,
+                normalize_advantage_per_source=normalize_adv_per_source,
+                anchor_kl_coef=anchor_kl_coef,
+                anchor_update_interval=anchor_update_interval,
+                bc_loss_coef=bc_loss_coef,
+                bc_batch_size=bc_batch_size,
+                bc_demos_path=bc_demos_path,
+                enable_pcgrad=enable_pcgrad,
             )
         except Exception as exc:
             raise RuntimeError(
@@ -1467,7 +1867,7 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     else:
         policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
 
-    return PPO(
+    return AnchoredReplayPPO(
         "MlpPolicy",
         vec_env,
         learning_rate=args.learning_rate,
@@ -1483,72 +1883,17 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
         policy_kwargs=policy_kwargs,
         verbose=1,
         device=args.device,
-    )
-
-
-def _build_sac(args, vec_env, stage_spec, FiLMClass):
-    """Build or resume a DiscreteSAC model with optional HER replay."""
-    from stable_baselines3 import HerReplayBuffer
-
-    from algo.discrete_sac import DiscreteSAC
-    from algo.discrete_sac_policy import DictToFlatExtractor, DiscreteSACPolicy
-
-    replay_buffer_class = None
-    replay_buffer_kwargs: dict[str, object] = {}
-    policy_kwargs: dict[str, object] = dict(net_arch=[256, 256])
-
-    if stage_spec is not None:
-        goal_feature_names = GOAL_STATE_SPEC_NAMES
-        if stage_spec.feature_names is not None:
-            goal_feature_names = list(stage_spec.feature_names)
-
-        replay_buffer_class = HerReplayBuffer
-        replay_buffer_kwargs = dict(
-            n_sampled_goal=int(getattr(args, "her_n_goals", 4)),
-            goal_selection_strategy="future",
-        )
-        policy_kwargs = dict(
-            features_extractor_class=DictToFlatExtractor,
-            features_extractor_kwargs=dict(
-                inner_extractor_class=FiLMClass,
-                inner_extractor_kwargs=dict(
-                    goal_feature_names=goal_feature_names,
-                    features_dim=256,
-                ),
-                mask=np.asarray(stage_spec.mask, dtype=np.float32),
-            ),
-            net_arch=[256, 256],
-        )
-
-    if args.resume:
-        print(f"[{args.model_name}] Resuming SAC from {args.resume}")
-        return DiscreteSAC.load(
-            args.resume,
-            env=vec_env,
-            learning_rate=args.learning_rate,
-            seed=args.seed,
-            device=args.device,
-        )
-
-    return DiscreteSAC(
-        DiscreteSACPolicy,
-        vec_env,
-        learning_rate=args.learning_rate,
-        buffer_size=int(getattr(args, "buffer_size", 100_000)),
-        learning_starts=int(getattr(args, "learning_starts", 1_000)),
-        batch_size=args.batch_size,
-        tau=float(getattr(args, "tau", 0.005)),
-        gamma=args.gamma,
-        train_freq=int(getattr(args, "train_freq", 1)),
-        gradient_steps=int(getattr(args, "gradient_steps", 1)),
-        ent_coef=getattr(args, "sac_ent_coef", "auto"),
-        max_grad_norm=args.max_grad_norm,
-        replay_buffer_class=replay_buffer_class,
-        replay_buffer_kwargs=replay_buffer_kwargs,
-        policy_kwargs=policy_kwargs,
-        seed=args.seed,
-        verbose=1,
-        device=args.device,
+        replay_ratio=replay_ratio,
+        replay_capacity=replay_capacity,
+        replay_warmup_updates=replay_warmup_updates,
+        strict_replay_mix=strict_replay_mix,
+        normalize_advantage_per_source=normalize_adv_per_source,
+        anchor_kl_coef=anchor_kl_coef,
+        anchor_update_interval=anchor_update_interval,
+        bc_loss_coef=bc_loss_coef,
+        bc_batch_size=bc_batch_size,
+        bc_demos_path=bc_demos_path,
+        enable_pcgrad=enable_pcgrad,
     )
 
 def make_base_env(max_episode_steps: int, terminate_on_stock_out: bool = False) -> BrawlDeepEnv:

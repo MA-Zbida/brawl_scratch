@@ -11,10 +11,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import CallbackList
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 
 from env import BrawlDeepEnv, EnvConfig
 from hierarchical.hsp_env import HSPEnv
+from train.llc_stage_common import PeriodicEvalCallback
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +39,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume", type=str, default=None)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--delay", type=float, default=3.0)
+    p.add_argument("--eval-every-steps", type=int, default=0, help="Run periodic evaluation every N timesteps (0 disables)")
+    p.add_argument("--eval-episodes", type=int, default=3, help="Episodes to run at each periodic evaluation")
+    p.add_argument("--eval-stochastic", action="store_true", help="Use stochastic policy actions during periodic evaluation")
     return p.parse_args()
 
 
@@ -112,9 +117,27 @@ def main() -> None:
 
     path = save_dir / f"{args.model_name}.zip"
 
+    callbacks = None
+    eval_every = int(getattr(args, "eval_every_steps", 0))
+    if eval_every > 0:
+        eval_cb = PeriodicEvalCallback(
+            make_eval_env=make_env,
+            eval_freq_steps=eval_every,
+            eval_episodes=int(getattr(args, "eval_episodes", 3)),
+            deterministic=not bool(getattr(args, "eval_stochastic", False)),
+            seed=int(args.seed),
+            save_dir=save_dir,
+            model_name=args.model_name,
+        )
+        callbacks = CallbackList([eval_cb])
+        print(
+            f"[HSP] Periodic eval enabled: every {eval_every} steps, "
+            f"{int(getattr(args, 'eval_episodes', 3))} episodes"
+        )
+
     interrupted = False
     try:
-        model.learn(total_timesteps=args.timesteps, progress_bar=True)
+        model.learn(total_timesteps=args.timesteps, progress_bar=True, callback=callbacks)
     except KeyboardInterrupt:
         interrupted = True
         print("\n[HSP] KeyboardInterrupt detected. Saving interrupted checkpoint...")

@@ -1,2 +1,4 @@
-from algo.discrete_sac import DiscreteSAC
-from algo.discrete_sac_policy import DiscreteSACPolicy, DictToFlatExtractor
+"""Algorithm package.
+
+This project now uses PPO-only training paths.
+"""

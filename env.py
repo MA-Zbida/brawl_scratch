@@ -466,8 +466,6 @@ class BrawlDeepEnv(gym.Env):
         self._raw_detections_fresh: bool = False
         self._step_time_sum = 0.0
         self._step_time_count = 0
-        self._action_repeat_remaining = 0
-        self._repeated_action = (0, 0, 0, 0)
         self._tap_latch_remaining = {"space": 0, "e": 0, "num4": 0, "num6": 0, "num5": 0}
         self._last_obs: Optional[np.ndarray] = None  # cached for None-frame fallback
         self._last_movement: int = 3     # last movement index (3 = idle)
@@ -534,7 +532,7 @@ class BrawlDeepEnv(gym.Env):
 
         return movement, jump, dodge, attack
 
-    def _apply_action(self, action: Sequence[int]) -> None:
+    def _apply_action(self, action: Sequence[int], *, emit_tap_actions: bool = True) -> None:
         movement, jump, dodge, attack = action
 
         movement_keys = set()
@@ -547,22 +545,23 @@ class BrawlDeepEnv(gym.Env):
 
         self.input_controller.set_pressed(movement_keys)
 
-        tap_keys = set()
-        if jump == 1:
-            tap_keys.add("space")
-        if dodge == 1:
-            tap_keys.add("e")
+        if emit_tap_actions:
+            tap_keys = set()
+            if jump == 1:
+                tap_keys.add("space")
+            if dodge == 1:
+                tap_keys.add("e")
 
-        if attack == 1:
-            tap_keys.add("num4")
-        elif attack == 2:
-            tap_keys.add("num6")
-        elif attack == 3:
-            tap_keys.add("num5")
+            if attack == 1:
+                tap_keys.add("num4")
+            elif attack == 2:
+                tap_keys.add("num6")
+            elif attack == 3:
+                tap_keys.add("num5")
 
-        latch_steps = max(1, int(self.config.tap_latch_steps))
-        for key in tap_keys:
-            self._tap_latch_remaining[key] = max(self._tap_latch_remaining.get(key, 0), latch_steps)
+            latch_steps = max(1, int(self.config.tap_latch_steps))
+            for key in tap_keys:
+                self._tap_latch_remaining[key] = max(self._tap_latch_remaining.get(key, 0), latch_steps)
 
         latched_tap_keys = set()
         for key in list(self._tap_latch_remaining.keys()):
@@ -578,6 +577,10 @@ class BrawlDeepEnv(gym.Env):
         return self._sanitize_action(action)
 
     def _sample_action_repeat_steps(self) -> int:
+        fixed_steps = int(getattr(self.config, "action_repeat_steps", 0))
+        if fixed_steps > 0:
+            return fixed_steps
+
         min_steps = max(1, int(getattr(self.config, "action_repeat_min_steps", 1)))
         max_steps = max(min_steps, int(getattr(self.config, "action_repeat_max_steps", min_steps)))
         if max_steps == min_steps:
@@ -776,8 +779,6 @@ class BrawlDeepEnv(gym.Env):
         self._raw_detections_fresh = False
         self._step_time_sum = 0.0
         self._step_time_count = 0
-        self._action_repeat_remaining = 0
-        self._repeated_action = (0, 0, 0, 0)
         self._tap_latch_remaining = {"space": 0, "e": 0, "num4": 0, "num6": 0, "num5": 0}
         self._last_movement = 3
         self._movement_hold_count = 0
@@ -860,8 +861,12 @@ class BrawlDeepEnv(gym.Env):
         truncated = False
         detections = []
 
-        for _ in range(repeat_steps):
+        for repeat_idx in range(repeat_steps):
             self._step_count += 1
+            first_repeat_frame = bool(repeat_idx == 0)
+            frame_jump = bool(action_jump and first_repeat_frame)
+            frame_dodge = bool(action_dodge and first_repeat_frame)
+            frame_pick_throw = bool(action_pick_throw and first_repeat_frame)
 
             inner_t0 = time.perf_counter()
 
@@ -897,7 +902,7 @@ class BrawlDeepEnv(gym.Env):
                 self._movement_hold_count = 0
 
             t0 = time.perf_counter()
-            self._apply_action(effective_action)
+            self._apply_action(effective_action, emit_tap_actions=first_repeat_frame)
             apply_action_dt = time.perf_counter() - t0
 
             t0 = time.perf_counter()
@@ -913,12 +918,12 @@ class BrawlDeepEnv(gym.Env):
                 raw_detections=self._last_raw_detections if self._raw_detections_fresh else None,
             )
             dist_to_weapon = self._distance_player_to_weapon()
-            self.memory.update_player_weapon_from_action(action_pick_throw=action_pick_throw, dist_to_weapon=dist_to_weapon)
+            self.memory.update_player_weapon_from_action(action_pick_throw=frame_pick_throw, dist_to_weapon=dist_to_weapon)
             self.memory.update_action(effective_action)
             memory_dt = time.perf_counter() - t0
 
             t0 = time.perf_counter()
-            self._update_game_logic(detections, action_jump=action_jump, action_dodge=action_dodge)
+            self._update_game_logic(detections, action_jump=frame_jump, action_dodge=frame_dodge)
 
             if not self.memory.player.exists or self.memory.player_respawn_timer > 0.0:
                 self.input_controller.set_pressed(set())

@@ -16,14 +16,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from env import BrawlDeepEnv, EnvConfig, NullInputController, PyDirectInputController
 from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv
-from wrappers.goal_env_wrapper import decode_action, encode_action
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Collect expert demos for BC (all curriculum phases)")
-    p.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Action encoding for saved dataset")
     p.add_argument("--phase", type=str, default="weapon_control", choices=list(PHASES))
     p.add_argument("--episodes", type=int, default=30)
+    p.add_argument(
+        "--max-collection-attempts",
+        type=int,
+        default=0,
+        help="Max attempted episodes to gather target accepted demos (0 = auto)",
+    )
     p.add_argument("--max-episode-steps", type=int, default=100)
     p.add_argument("--min-goal-duration", type=int, default=120)
     p.add_argument("--max-goal-duration", type=int, default=220)
@@ -38,6 +42,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-end-episode-on-first-hit", dest="end_episode_on_first_hit", action="store_false")
     p.set_defaults(end_episode_on_first_hit=None)
     p.add_argument("--hit-damage-threshold", type=float, default=1e-3)
+    p.add_argument(
+        "--enforce-recovery-sequence",
+        dest="enforce_recovery_sequence",
+        action="store_true",
+        default=True,
+        help="For locomotion_recovery, only keep episodes that complete offstage->recovery sequence",
+    )
+    p.add_argument(
+        "--no-enforce-recovery-sequence",
+        dest="enforce_recovery_sequence",
+        action="store_false",
+    )
     return p.parse_args()
 
 
@@ -220,6 +236,15 @@ def main() -> None:
     phase_lower = str(args.phase).strip().lower()
     is_damage = phase_lower in _DAMAGE_PHASES
     phase_requires_weapon = phase_lower in ("damage_static_weapon", "damage_dynamic")
+    enforce_recovery_sequence = bool(args.enforce_recovery_sequence and phase_lower == "locomotion_recovery")
+
+    target_episodes = max(1, int(args.episodes))
+    max_collection_attempts = int(args.max_collection_attempts)
+    if max_collection_attempts <= 0:
+        if enforce_recovery_sequence:
+            max_collection_attempts = max(target_episodes, target_episodes * 5)
+        else:
+            max_collection_attempts = target_episodes
 
     # Default: never end on first hit — BC episodes should mirror PPO episodes,
     # which continue after hits until goal progress / max steps.
@@ -260,14 +285,15 @@ def main() -> None:
 
     print("=" * 68)
     print(f"BC DEMO COLLECTION — {args.phase.upper()}")
-    print(f"Action encoding target: {'Discrete(64)' if args.algo == 'sac' else 'MultiDiscrete([4,2,2,4])'}")
-    print("Action source: keyboard -> MultiDiscrete([4,2,2,4]) (SAC mode only encodes this to Discrete(64) for saving)")
+    print("Action encoding target: MultiDiscrete([4,2,2,4])")
+    print("Action source: keyboard -> MultiDiscrete([4,2,2,4])")
     print("Input mode: manual only (env key injection disabled)")
     if active_attack_keys:
         print(f"Controls: A/D/S, Space, E, {'/'.join(active_attack_keys)}")
     else:
         print("Controls: A/D/S, Space, E (attacks disabled by phase)")
-    print(f"Episodes: {args.episodes} | Output: {out_path}")
+    print(f"Target episodes (accepted): {target_episodes} | Output: {out_path}")
+    print(f"Collection attempt budget: {max_collection_attempts}")
     eff_max_steps = int(args.max_episode_steps)
     if eff_max_steps == _DEFAULT_MAX_STEPS["default"] and is_damage:
         eff_max_steps = _DEFAULT_MAX_STEPS["damage"]
@@ -284,6 +310,8 @@ def main() -> None:
         print("Weapon drop disabled (phase requires weapon)")
     if end_episode_on_first_hit:
         print(f"Episode end action: stop on first hit (op_delta_damage >= {hit_damage_threshold:.4f})")
+    if enforce_recovery_sequence:
+        print("Recovery quality gate: ON (keep only offstage->onstage sequence-complete episodes)")
     print("Press Ctrl+C to stop and save partial data.")
     print("=" * 68)
     print(f"Starting in {args.delay:.1f}s...")
@@ -291,26 +319,49 @@ def main() -> None:
 
     obs_buf: list[np.ndarray] = []
     act_multi_buf: list[np.ndarray] = []
-    act_discrete_buf: list[int] = []
     done_buf: list[bool] = []
     goal_xy_buf: list[np.ndarray] = []
     goal_target_buf: list[np.ndarray] = []
     goal_mask_buf: list[np.ndarray] = []
+    goal_type_buf: list[str] = []
+    goal_type_index_buf: list[int] = []
     op_ko_buf: list[bool] = []
+    sequential_phase_buf: list[int] = []
+    sequential_step1_transition_buf: list[bool] = []
+    sequential_step1_completed_buf: list[bool] = []
+    sequential_terminal_success_buf: list[bool] = []
 
     step_total = 0
     episodes_collected = 0
+    episodes_attempted = 0
+    episodes_rejected_recovery = 0
     episodes_with_hit = 0
     episodes_ended_on_first_hit = 0
-    action_roundtrip_checked = False
 
     try:
-        for ep in range(1, int(args.episodes) + 1):
+        while episodes_collected < target_episodes and episodes_attempted < max_collection_attempts:
+            attempt_id = episodes_attempted + 1
             obs, info = env.reset()
             done = False
             ep_steps = 0
             ep_had_hit = False
             end_reason = "unknown"
+            ep_step1_transition_seen = False
+            ep_terminal_success_seen = False
+
+            ep_obs_buf: list[np.ndarray] = []
+            ep_act_multi_buf: list[np.ndarray] = []
+            ep_done_buf: list[bool] = []
+            ep_goal_xy_buf: list[np.ndarray] = []
+            ep_goal_target_buf: list[np.ndarray] = []
+            ep_goal_mask_buf: list[np.ndarray] = []
+            ep_goal_type_buf: list[str] = []
+            ep_goal_type_index_buf: list[int] = []
+            ep_op_ko_buf: list[bool] = []
+            ep_seq_phase_buf: list[int] = []
+            ep_seq_step1_transition_buf: list[bool] = []
+            ep_seq_step1_completed_buf: list[bool] = []
+            ep_seq_terminal_success_buf: list[bool] = []
 
             goal_target = np.asarray(info.get("goal_target", np.zeros(2, dtype=np.float32)), dtype=np.float32)
             goal_mask = np.asarray(info.get("goal_mask", np.zeros_like(goal_target)), dtype=np.float32)
@@ -320,36 +371,40 @@ def main() -> None:
             while not done:
                 action = read_action_from_keyboard(allowed_attack_values=allowed_attack_values)
                 action_seq = tuple(int(v) for v in action.tolist())
-                action_discrete = int(encode_action(np.asarray(action_seq, dtype=np.int64)))
 
-                # Safety check: ensure Discrete(64) labels are exactly the encoded
-                # form of keyboard MultiDiscrete actions.
-                if not action_roundtrip_checked:
-                    decoded = tuple(int(v) for v in decode_action(action_discrete).tolist())
-                    if decoded != action_seq:
-                        raise ValueError(
-                            f"Action encoding mismatch: multi={action_seq} -> discrete={action_discrete} -> decoded={decoded}"
-                        )
-                    action_roundtrip_checked = True
-
-                obs_buf.append(np.asarray(obs, dtype=np.float32).copy())
-                act_multi_buf.append(np.asarray(action_seq, dtype=np.int64).copy())
-                act_discrete_buf.append(action_discrete)
-                goal_xy_buf.append(np.asarray(goal_target[:2], dtype=np.float32).copy())
-                goal_target_buf.append(np.asarray(goal_target, dtype=np.float32).copy())
-                goal_mask_buf.append(np.asarray(goal_mask, dtype=np.float32).copy())
+                ep_obs_buf.append(np.asarray(obs, dtype=np.float32).copy())
+                ep_act_multi_buf.append(np.asarray(action_seq, dtype=np.int64).copy())
+                ep_goal_xy_buf.append(np.asarray(goal_target[:2], dtype=np.float32).copy())
+                ep_goal_target_buf.append(np.asarray(goal_target, dtype=np.float32).copy())
+                ep_goal_mask_buf.append(np.asarray(goal_mask, dtype=np.float32).copy())
+                ep_goal_type_buf.append(str(info.get("goal_type", "unknown")))
+                ep_goal_type_index_buf.append(int(info.get("goal_type_index", -1)))
 
                 next_obs, _reward, terminated, truncated, info = env.step(action_seq)
                 op_delta_damage = float(max(0.0, info.get("op_delta_damage", 0.0)))
                 op_ko_event = float(info.get("op_stock_lost_step", 0.0)) > 0.0
-                op_ko_buf.append(op_ko_event)
+                ep_op_ko_buf.append(op_ko_event)
                 hit_event = op_delta_damage >= hit_damage_threshold
                 if hit_event:
                     ep_had_hit = True
 
+                seq_phase = int(info.get("sequential_phase", 0))
+                seq_step1_transition = bool(float(info.get("sequential_step1_transition", 0.0)) > 0.5)
+                seq_step1_completed = bool(float(info.get("sequential_step1_completed", 0.0)) > 0.5)
+                seq_terminal_success = bool(
+                    float(info.get("terminal_success", 0.0)) > 0.5
+                    and seq_phase == 2
+                )
+                ep_seq_phase_buf.append(seq_phase)
+                ep_seq_step1_transition_buf.append(seq_step1_transition)
+                ep_seq_step1_completed_buf.append(seq_step1_completed)
+                ep_seq_terminal_success_buf.append(seq_terminal_success)
+                ep_step1_transition_seen = bool(ep_step1_transition_seen or seq_step1_transition)
+                ep_terminal_success_seen = bool(ep_terminal_success_seen or seq_terminal_success)
+
                 terminated_by_hit = bool(end_episode_on_first_hit and hit_event)
                 done = bool(terminated or truncated or terminated_by_hit)
-                done_buf.append(done)
+                ep_done_buf.append(done)
 
                 if terminated_by_hit:
                     end_reason = "first_hit"
@@ -374,37 +429,74 @@ def main() -> None:
                         op_dd = float(info.get("op_delta_damage", 0.0))
                         g_err = float(info.get("goal_error", 0.0))
                         print(
-                            f"steps={step_total} ep={ep}/{args.episodes} ep_steps={ep_steps} "
+                            f"steps={step_total} accepted={episodes_collected}/{target_episodes} "
+                            f"attempt={attempt_id}/{max_collection_attempts} ep_steps={ep_steps} "
                             f"op_delta_dmg={op_dd:.4f} goal_err={g_err:.3f}"
                         )
                     else:
                         print(
-                            f"steps={step_total} ep={ep}/{args.episodes} ep_steps={ep_steps} "
+                            f"steps={step_total} accepted={episodes_collected}/{target_episodes} "
+                            f"attempt={attempt_id}/{max_collection_attempts} ep_steps={ep_steps} "
                             f"goal_xy=({float(goal_target[0]):.3f}, {float(goal_target[1]):.3f})"
                         )
 
                 if ep_steps >= int(args.max_episode_steps):
-                    if not done and len(done_buf) > 0:
+                    if not done and len(ep_done_buf) > 0:
                         done = True
-                        done_buf[-1] = True
+                        ep_done_buf[-1] = True
                         end_reason = "collector_step_cap"
                     break
 
-            episodes_collected += 1
+            episodes_attempted += 1
             if ep_had_hit:
                 episodes_with_hit += 1
             if end_reason == "first_hit":
                 episodes_ended_on_first_hit += 1
 
+            accept_episode = True
+            if enforce_recovery_sequence:
+                accept_episode = bool(ep_step1_transition_seen and ep_terminal_success_seen)
+                if not accept_episode:
+                    episodes_rejected_recovery += 1
+
+            if accept_episode and len(ep_obs_buf) > 0:
+                obs_buf.extend(ep_obs_buf)
+                act_multi_buf.extend(ep_act_multi_buf)
+                done_buf.extend(ep_done_buf)
+                goal_xy_buf.extend(ep_goal_xy_buf)
+                goal_target_buf.extend(ep_goal_target_buf)
+                goal_mask_buf.extend(ep_goal_mask_buf)
+                goal_type_buf.extend(ep_goal_type_buf)
+                goal_type_index_buf.extend(ep_goal_type_index_buf)
+                op_ko_buf.extend(ep_op_ko_buf)
+                sequential_phase_buf.extend(ep_seq_phase_buf)
+                sequential_step1_transition_buf.extend(ep_seq_step1_transition_buf)
+                sequential_step1_completed_buf.extend(ep_seq_step1_completed_buf)
+                sequential_terminal_success_buf.extend(ep_seq_terminal_success_buf)
+                episodes_collected += 1
+
             print(
-                f"Episode {ep}/{args.episodes} collected steps={ep_steps} "
-                f"reason={end_reason} had_hit={int(ep_had_hit)}"
+                f"Attempt {attempt_id}/{max_collection_attempts} -> "
+                f"accepted={int(accept_episode)} "
+                f"accepted_total={episodes_collected}/{target_episodes} "
+                f"steps={ep_steps} reason={end_reason} had_hit={int(ep_had_hit)}"
+                + (
+                    f" seq(step1={int(ep_step1_transition_seen)}, step2={int(ep_terminal_success_seen)})"
+                    if enforce_recovery_sequence
+                    else ""
+                )
             )
             if force_drop:
                 dropped = _force_drop_weapon_num5_key(drop_controller=drop_controller)
                 if not dropped and not drop_warning_printed:
                     print("Force-drop warning: could not send NUM_5 synthetic key press.")
                     drop_warning_printed = True
+
+        if episodes_collected < target_episodes:
+            print(
+                f"Collection stopped with {episodes_collected}/{target_episodes} accepted episodes "
+                f"after {episodes_attempted}/{max_collection_attempts} attempts."
+            )
 
     except KeyboardInterrupt:
         print("\nInterrupted by user. Saving partial dataset...")
@@ -416,12 +508,20 @@ def main() -> None:
                 pass
         env.close()
 
-    if episodes_collected > 0 and end_episode_on_first_hit:
-        hit_ratio = float(episodes_with_hit) / float(max(1, episodes_collected))
-        first_hit_end_ratio = float(episodes_ended_on_first_hit) / float(max(1, episodes_collected))
+    if episodes_attempted > 0 and end_episode_on_first_hit:
+        hit_ratio = float(episodes_with_hit) / float(max(1, episodes_attempted))
+        first_hit_end_ratio = float(episodes_ended_on_first_hit) / float(max(1, episodes_attempted))
         print(
-            f"Hit summary: hit_episodes={episodes_with_hit}/{episodes_collected} ({hit_ratio:.2%}), "
-            f"ended_on_first_hit={episodes_ended_on_first_hit}/{episodes_collected} ({first_hit_end_ratio:.2%})"
+            f"Hit summary: hit_episodes={episodes_with_hit}/{episodes_attempted} ({hit_ratio:.2%}), "
+            f"ended_on_first_hit={episodes_ended_on_first_hit}/{episodes_attempted} ({first_hit_end_ratio:.2%})"
+        )
+
+    if enforce_recovery_sequence:
+        print(
+            "Recovery sequence summary: "
+            f"accepted={episodes_collected}/{target_episodes}, "
+            f"attempted={episodes_attempted}/{max_collection_attempts}, "
+            f"rejected={episodes_rejected_recovery}"
         )
 
     if len(obs_buf) == 0:
@@ -431,12 +531,17 @@ def main() -> None:
     lengths = {
         "obs": len(obs_buf),
         "actions_multi": len(act_multi_buf),
-        "actions_discrete": len(act_discrete_buf),
         "dones": len(done_buf),
         "goal_xy": len(goal_xy_buf),
         "goal_target": len(goal_target_buf),
         "goal_mask": len(goal_mask_buf),
+        "goal_type": len(goal_type_buf),
+        "goal_type_index": len(goal_type_index_buf),
         "op_ko_events": len(op_ko_buf),
+        "sequential_phase": len(sequential_phase_buf),
+        "sequential_step1_transition": len(sequential_step1_transition_buf),
+        "sequential_step1_completed": len(sequential_step1_completed_buf),
+        "sequential_terminal_success": len(sequential_terminal_success_buf),
     }
     aligned_n = min(lengths.values())
     if aligned_n <= 0:
@@ -446,43 +551,58 @@ def main() -> None:
         print(f"Buffer mismatch detected ({lengths}); trimming all arrays to {aligned_n} samples.")
         obs_buf = obs_buf[:aligned_n]
         act_multi_buf = act_multi_buf[:aligned_n]
-        act_discrete_buf = act_discrete_buf[:aligned_n]
         done_buf = done_buf[:aligned_n]
         goal_xy_buf = goal_xy_buf[:aligned_n]
         goal_target_buf = goal_target_buf[:aligned_n]
         goal_mask_buf = goal_mask_buf[:aligned_n]
+        goal_type_buf = goal_type_buf[:aligned_n]
+        goal_type_index_buf = goal_type_index_buf[:aligned_n]
         op_ko_buf = op_ko_buf[:aligned_n]
+        sequential_phase_buf = sequential_phase_buf[:aligned_n]
+        sequential_step1_transition_buf = sequential_step1_transition_buf[:aligned_n]
+        sequential_step1_completed_buf = sequential_step1_completed_buf[:aligned_n]
+        sequential_terminal_success_buf = sequential_terminal_success_buf[:aligned_n]
         if len(done_buf) > 0:
             done_buf[-1] = True
 
     obs_arr = np.stack(obs_buf).astype(np.float32)
     act_multi_arr = np.stack(act_multi_buf).astype(np.int64)
-    act_discrete_arr = np.asarray(act_discrete_buf, dtype=np.int64)
-    if str(args.algo).lower() == "sac":
-        act_arr = act_discrete_arr
-        action_encoding = "discrete64"
-    else:
-        act_arr = act_multi_arr
-        action_encoding = "multidiscrete"
+    act_arr = act_multi_arr
+    action_encoding = "multidiscrete"
     done_arr = np.asarray(done_buf, dtype=bool)
     goal_xy_arr = np.stack(goal_xy_buf).astype(np.float32)
     goal_target_arr = np.stack(goal_target_buf).astype(np.float32)
     goal_mask_arr = np.stack(goal_mask_buf).astype(np.float32)
+    goal_type_arr = np.asarray(goal_type_buf, dtype="<U32")
+    goal_type_index_arr = np.asarray(goal_type_index_buf, dtype=np.int64)
     op_ko_arr = np.asarray(op_ko_buf, dtype=bool)
+    sequential_phase_arr = np.asarray(sequential_phase_buf, dtype=np.int64)
+    sequential_step1_transition_arr = np.asarray(sequential_step1_transition_buf, dtype=bool)
+    sequential_step1_completed_arr = np.asarray(sequential_step1_completed_buf, dtype=bool)
+    sequential_terminal_success_arr = np.asarray(sequential_terminal_success_buf, dtype=bool)
 
     np.savez_compressed(
         str(out_path),
         obs=obs_arr,
         actions=act_arr,
         actions_multidiscrete=act_multi_arr,
-        actions_discrete=act_discrete_arr,
         action_encoding=np.asarray([action_encoding]),
-        algo=np.asarray([str(args.algo).lower()]),
         dones=done_arr,
         goal_xy=goal_xy_arr,
         goal_target=goal_target_arr,
         goal_mask=goal_mask_arr,
+        goal_type=goal_type_arr,
+        goal_type_index=goal_type_index_arr,
         op_ko_events=op_ko_arr,
+        sequential_phase=sequential_phase_arr,
+        sequential_step1_transition=sequential_step1_transition_arr,
+        sequential_step1_completed=sequential_step1_completed_arr,
+        sequential_terminal_success=sequential_terminal_success_arr,
+        recovery_sequence_enforced=np.asarray([1 if enforce_recovery_sequence else 0], dtype=np.int64),
+        episodes_target=np.asarray([target_episodes], dtype=np.int64),
+        episodes_attempted=np.asarray([episodes_attempted], dtype=np.int64),
+        episodes_collected=np.asarray([episodes_collected], dtype=np.int64),
+        episodes_rejected=np.asarray([episodes_rejected_recovery], dtype=np.int64),
         phase=np.asarray([args.phase]),
     )
 
@@ -491,7 +611,12 @@ def main() -> None:
     print(f"  obs    : {obs_arr.shape}")
     print(f"  actions(saved): {act_arr.shape} [{action_encoding}]")
     print(f"  actions_multidiscrete: {act_multi_arr.shape}")
-    print(f"  actions_discrete: {act_discrete_arr.shape}")
+    if enforce_recovery_sequence:
+        step1_count = int(sequential_step1_transition_arr.sum())
+        step2_term_count = int(sequential_terminal_success_arr.sum())
+        print("  recovery_seq: enforced=1")
+        print(f"  recovery_seq step1_transitions: {step1_count}")
+        print(f"  recovery_seq terminal_step2_success: {step2_term_count}")
 
 
 if __name__ == "__main__":

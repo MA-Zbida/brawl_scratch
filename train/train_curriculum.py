@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import gymnasium as gym
@@ -77,7 +78,6 @@ class GoalMouseTrackerWrapper(gym.Wrapper):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train PPO curriculum phase")
-    p.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Training algorithm")
     p.add_argument("--phase", type=str, required=True, choices=list(PHASES))
     p.add_argument("--timesteps", type=int, default=500_000)
     p.add_argument("--max-episode-steps", type=int, default=1200)
@@ -98,19 +98,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clip-range", type=float, default=0.15)
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--vf-coef", type=float, default=0.5)
-
-    p.add_argument("--buffer-size", type=int, default=100_000, help="SAC replay buffer size")
-    p.add_argument("--learning-starts", type=int, default=1_000, help="SAC warmup steps before learning")
-    p.add_argument("--tau", type=float, default=0.005, help="SAC target smoothing coefficient")
-    p.add_argument("--train-freq", type=int, default=1, help="SAC train frequency in env steps")
-    p.add_argument("--gradient-steps", type=int, default=1, help="SAC gradient updates per train call")
-    p.add_argument("--sac-ent-coef", type=str, default="auto", help="SAC entropy coefficient, e.g. auto or auto_0.1")
-    p.add_argument("--her-n-goals", type=int, default=4, help="HER sampled goals per transition for SAC")
+    p.add_argument("--replay-ratio", type=float, default=0.30, help="Fraction of PPO minibatch sampled from replay")
+    p.add_argument("--replay-capacity", type=int, default=262_144, help="Replay storage capacity in transitions")
+    p.add_argument("--replay-warmup-updates", type=int, default=1, help="Number of PPO updates before replay sampling")
+    p.add_argument("--strict-replay-mix", dest="strict_replay_mix", action="store_true", help="Enforce configured replay ratio when replay has enough samples")
+    p.add_argument("--no-strict-replay-mix", dest="strict_replay_mix", action="store_false")
+    p.add_argument("--normalize-advantage-per-source", dest="normalize_advantage_per_source", action="store_true", help="Normalize on-policy and replay advantages separately")
+    p.add_argument("--no-normalize-advantage-per-source", dest="normalize_advantage_per_source", action="store_false")
+    p.add_argument("--anchor-kl-coef", type=float, default=0.02, help="KL anchor loss coefficient")
+    p.add_argument("--anchor-update-interval", type=int, default=8, help="Anchor snapshot refresh period in PPO updates")
+    p.add_argument("--bc-loss-coef", type=float, default=0.05, help="Behavior cloning loss coefficient")
+    p.add_argument("--bc-batch-size", type=int, default=128, help="Behavior cloning mini-batch size")
+    p.add_argument("--bc-demos-path", type=str, default=None, help="Path to NPZ demonstrations used for BC anchor")
+    p.add_argument("--pcgrad", dest="pcgrad", action="store_true", help="Enable PCGrad between PPO and auxiliary losses")
+    p.add_argument("--no-pcgrad", dest="pcgrad", action="store_false")
 
     p.add_argument("--plot-every", type=int, default=2500)
     p.add_argument("--log-csv", action="store_true", help="Write step/episode CSV logs")
     p.add_argument("--diag-report-every", type=int, default=0, help="Diagnostic print period in steps (0 disables)")
     p.add_argument("--moving-avg", type=int, default=300)
+    p.add_argument("--eval-every-steps", type=int, default=0, help="Run periodic evaluation every N timesteps (0 disables)")
+    p.add_argument("--eval-episodes", type=int, default=3, help="Episodes to run at each periodic evaluation")
+    p.add_argument("--eval-stochastic", action="store_true", help="Use stochastic policy actions during periodic evaluation")
 
     p.add_argument("--death-penalty", type=float, default=1.0)
     p.add_argument("--no-terminate-on-death", action="store_true")
@@ -119,6 +128,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--yolo-blend-alpha", type=float, default=0.95, help="YOLO fusion weight in memory update [0,1]")
     p.add_argument("--tracker-max-missing", type=int, default=2, help="Tracker persistence in missed frames")
     p.add_argument("--tracker-smooth-alpha", type=float, default=0.85, help="Tracker smoothing alpha [0,1], higher = closer to YOLO")
+
+    p.set_defaults(strict_replay_mix=True, normalize_advantage_per_source=True, pcgrad=True)
 
     return p.parse_args()
 
@@ -151,11 +162,45 @@ def make_env(
     return env
 
 
+def make_eval_env(
+    max_episode_steps: int,
+    spec,
+    move_mouse_to_goal: bool = False,
+    yolo_every: int = 2,
+    yolo_blend_alpha: float = 0.95,
+    tracker_max_missing: int = 4,
+    tracker_smooth_alpha: float = 0.75,
+) -> gym.Env:
+    eval_spec = replace(
+        spec,
+        terminate_on_death=False,
+        terminate_on_goal_success=False,
+        terminate_on_hit_event=False,
+    )
+    config = EnvConfig(
+        terminate_on_stock_out=True,
+        max_episode_steps=max_episode_steps,
+        yolo_infer_every_n_steps=max(1, int(yolo_every)),
+        yolo_obs_blend_alpha=float(np.clip(yolo_blend_alpha, 0.0, 1.0)),
+        tracker_max_missing=max(1, int(tracker_max_missing)),
+        tracker_smooth_alpha=float(np.clip(tracker_smooth_alpha, 0.0, 1.0)),
+        action_repeat_steps=1,
+        action_repeat_min_steps=1,
+        action_repeat_max_steps=1,
+        tap_latch_steps=1,
+    )
+    base = BrawlDeepEnv(config=config)
+    env = StageGoalEnv(base, eval_spec)
+    if move_mouse_to_goal:
+        env = GoalMouseTrackerWrapper(env)
+    return env
+
+
 def main() -> None:
     args = parse_args()
 
     if not args.model_name:
-        args.model_name = f"llc_{args.phase}" if args.algo == "ppo" else f"llc_{args.phase}_sac"
+        args.model_name = f"llc_{args.phase}"
 
     spec = build_phase_spec(
         phase=args.phase,
@@ -163,7 +208,7 @@ def main() -> None:
         terminate_on_death=not args.no_terminate_on_death,
     )
 
-    if args.algo == "ppo" and args.phase.startswith("locomotion"):
+    if args.phase.startswith("locomotion"):
         if not _has_cli_flag("--learning-rate"):
             args.learning_rate = 3e-4
         if not _has_cli_flag("--n-steps"):
@@ -173,11 +218,25 @@ def main() -> None:
         if not _has_cli_flag("--ent-coef"):
             args.ent_coef = 0.03
 
+    if args.phase.startswith("locomotion"):
+        if not args.move_mouse_to_goal:
+            print("[train_curriculum] Locomotion phase detected: forcing mouse goal tracking ON.")
+        args.move_mouse_to_goal = True
+
     if args.move_mouse_to_goal:
         print("[train_curriculum] Mouse goal tracking enabled.")
 
-    if args.algo == "sac":
-        print("[train_curriculum] Using Discrete SAC with flattened 64-action space and replay buffer.")
+    eval_env_builder = None
+    if int(args.eval_every_steps) > 0:
+        eval_env_builder = lambda: make_eval_env(
+            args.max_episode_steps,
+            spec,
+            move_mouse_to_goal=args.move_mouse_to_goal,
+            yolo_every=args.yolo_every,
+            yolo_blend_alpha=args.yolo_blend_alpha,
+            tracker_max_missing=args.tracker_max_missing,
+            tracker_smooth_alpha=args.tracker_smooth_alpha,
+        )
 
     train_stage_model(
         args=args,
@@ -191,6 +250,7 @@ def main() -> None:
             tracker_smooth_alpha=args.tracker_smooth_alpha,
         ),
         stage_spec=spec,
+        make_eval_env=eval_env_builder,
     )
 
 

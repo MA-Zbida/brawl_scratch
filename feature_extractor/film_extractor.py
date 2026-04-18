@@ -30,6 +30,11 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from feature_extractor.memory.state_spec import StateSpec
 from train.llc_stage_common import FEATURE_SCALE
 
+FILM_GAMMA_MIN = 0.5
+FILM_GAMMA_MAX = 1.5
+FILM_BETA_MIN = -1.0
+FILM_BETA_MAX = 1.0
+
 # Per-feature normalisation bounds used to bring extracted state features and
 # the stored goal targets into the same [0, 1] (or [-1, 1] for signed) range.
 _FEAT_BOUNDS: dict[str, tuple[float, float]] = {
@@ -182,5 +187,7 @@ class StageGoalFiLMExtractor(BaseFeaturesExtractor):
 
         # FiLM modulation with residual.
         gamma, beta = self.film_generator(goal_latent).chunk(2, dim=1)
+        gamma = gamma.clamp(FILM_GAMMA_MIN, FILM_GAMMA_MAX)
+        beta = beta.clamp(FILM_BETA_MIN, FILM_BETA_MAX)
         h = gamma * phi_s + beta + phi_s                     # residual
         return self.post_film(h)                             # (B, features_dim)

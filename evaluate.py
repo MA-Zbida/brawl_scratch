@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import sys
 from pathlib import Path
 from typing import Any, Sequence, cast
@@ -14,25 +15,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from env import BrawlDeepEnv, EnvConfig
 from train.curriculum_config import PHASES, build_phase_spec
-from train.curriculum_goals import GOAL_DIM, GOAL_INDEX, clip_goal_target, default_goal_target
 from train.llc_stage_common import StageGoalEnv
-from feature_extractor.memory.state_spec import StateSpec
-from wrappers.goal_env_wrapper import FlattenMultiDiscreteWrapper, StageGoalDictEnv
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Evaluate a PPO model for N episodes")
-    p.add_argument("--algo", type=str, default="ppo", choices=["ppo", "sac"], help="Algorithm used by checkpoint")
+    p = argparse.ArgumentParser(description="Evaluate a curriculum phase policy over stock-out matches")
     p.add_argument("--model", type=str, required=True, help="Path to PPO .zip checkpoint")
+    p.add_argument("--phase", type=str, required=True, choices=list(PHASES), help="Curriculum phase to evaluate")
     p.add_argument("--episodes", type=int, default=10, help="Number of evaluation episodes")
-    p.add_argument("--phase", type=str, default=None, choices=list(PHASES), help="Use StageGoalEnv for this phase")
-    p.add_argument(
-        "--goal-mode",
-        type=str,
-        default="fixed",
-        choices=["fixed", "phase", "none"],
-        help="fixed: unarmed->weapon goal, armed->fight goal; phase: use StageGoalEnv; none: base env only",
-    )
     p.add_argument("--max-episode-steps", type=int, default=0, help="Hard cap (0 = no cap)")
     p.add_argument("--device", type=str, default="cpu")
     p.add_argument("--seed", type=int, default=42)
@@ -47,100 +37,56 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-class FixedWeaponFightGoalEnv(gym.Wrapper):
-    """Goal-conditioned obs wrapper with fixed hierarchical intent.
-
-    - Unarmed: goal is to acquire weapon
-    - Armed: goal is to fight/deal damage
-    """
+class GoalMouseTrackerWrapper(gym.Wrapper):
+    """Move mouse cursor to target_x,target_y whenever goal is sampled."""
 
     def __init__(self, env: gym.Env):
         super().__init__(env)
-        self.goal_dim = int(GOAL_DIM)
-        obs_shape = getattr(env.observation_space, "shape", None)
-        if obs_shape is None or len(obs_shape) == 0:
-            raise ValueError("Underlying env must expose a 1D observation space with known shape")
-        self._base_dim = int(obs_shape[0])
-        self._aug_dim = self._base_dim + (2 * self.goal_dim)
-        self.observation_space = gym.spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(self._aug_dim,),
-            dtype=np.float32,
-        )
-        self._obs_buf = np.zeros((self._aug_dim,), dtype=np.float32)
-        self._goal_target = np.zeros((self.goal_dim,), dtype=np.float32)
-        self._goal_mask = np.zeros((self.goal_dim,), dtype=np.float32)
+        self._user32 = None
+        try:
+            self._user32 = ctypes.windll.user32
+            try:
+                self._user32.SetProcessDPIAware()
+            except Exception:
+                pass
+        except Exception:
+            self._user32 = None
 
-    def _build_fixed_goal(self, obs: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
-        o = np.asarray(obs, dtype=np.float32)
-        target = default_goal_target()
-        mask = np.zeros((self.goal_dim,), dtype=np.float32)
+    def _screen_size(self) -> tuple[int, int]:
+        base = self.unwrapped
+        frame = getattr(base, "_last_frame", None)
+        if frame is not None and hasattr(frame, "shape") and len(frame.shape) >= 2:
+            h, w = int(frame.shape[0]), int(frame.shape[1])
+            if w > 0 and h > 0:
+                return w, h
+        if self._user32 is None:
+            return 1920, 1080
+        return int(self._user32.GetSystemMetrics(0)), int(self._user32.GetSystemMetrics(1))
 
-        has_weapon = float(np.clip(StateSpec.get(o, "player_has_weapon"), 0.0, 1.0)) > 0.5
+    def _set_cursor_to_goal(self, goal_target) -> None:
+        if self._user32 is None:
+            return
+        if goal_target is None:
+            return
+        goal_target = np.asarray(goal_target, dtype=np.float32).reshape(-1)
+        if goal_target.shape[0] < 2:
+            return
 
-        if not has_weapon:
-            # Weapon acquisition sub-goal.
-            target[GOAL_INDEX["player_has_weapon"]] = 1.0
-            target[GOAL_INDEX["weapon_dx"]] = 0.5
-            target[GOAL_INDEX["weapon_dy"]] = 0.5
-            target[GOAL_INDEX["player_is_offstage"]] = 0.0
+        w, h = self._screen_size()
+        x = int(np.clip(float(goal_target[0]), 0.0, 1.0) * max(1, w - 1))
+        y = int(np.clip(float(goal_target[1]), 0.0, 1.0) * max(1, h - 1))
+        self._user32.SetCursorPos(x, y)
 
-            mask[GOAL_INDEX["player_has_weapon"]] = 1.0
-            mask[GOAL_INDEX["weapon_dx"]] = 1.0
-            mask[GOAL_INDEX["weapon_dy"]] = 1.0
-            mask[GOAL_INDEX["player_is_offstage"]] = 0.4
-            mode = "weapon"
-        else:
-            # Damage/fight sub-goal.
-            curr_op_dmg = float(np.clip(StateSpec.get(o, "opponent_damage_pct"), 0.0, 1.0))
-
-            target[GOAL_INDEX["player_has_weapon"]] = 1.0
-            target[GOAL_INDEX["in_strike_range"]] = 1.0
-            target[GOAL_INDEX["rel_distance"]] = 0.03
-            target[GOAL_INDEX["facing_opponent"]] = 1.0
-            target[GOAL_INDEX["frame_advantage_estimate"]] = 0.7
-            target[GOAL_INDEX["opponent_damage_pct"]] = float(np.clip(curr_op_dmg + 0.12, 0.0, 1.0))
-            target[GOAL_INDEX["player_is_offstage"]] = 0.0
-
-            mask[GOAL_INDEX["player_has_weapon"]] = 0.4
-            mask[GOAL_INDEX["in_strike_range"]] = 1.0
-            mask[GOAL_INDEX["rel_distance"]] = 0.6
-            mask[GOAL_INDEX["facing_opponent"]] = 0.5
-            mask[GOAL_INDEX["frame_advantage_estimate"]] = 0.3
-            mask[GOAL_INDEX["opponent_damage_pct"]] = 1.0
-            mask[GOAL_INDEX["player_is_offstage"]] = 0.2
-            mode = "fight"
-
-        return clip_goal_target(target), np.clip(mask, 0.0, 1.0).astype(np.float32), mode
-
-    def _augment(self, obs: np.ndarray) -> np.ndarray:
-        np.copyto(self._obs_buf[: self._base_dim], np.asarray(obs, dtype=np.float32))
-        np.copyto(self._obs_buf[self._base_dim : self._base_dim + self.goal_dim], self._goal_target)
-        np.copyto(self._obs_buf[self._base_dim + self.goal_dim :], self._goal_mask)
-        return self._obs_buf
-
-    def reset(self, *, seed: int | None = None, options: dict | None = None):
+    def reset(self, *, seed=None, options=None):
         obs, info = self.env.reset(seed=seed, options=options)
-        self._goal_target, self._goal_mask, mode = self._build_fixed_goal(obs)
-        info = dict(info)
-        info["goal_target"] = self._goal_target.copy()
-        info["goal_mask"] = self._goal_mask.copy()
-        info["goal_mode"] = mode
-        info["goal_active"] = 1.0
-        info["stage_name"] = "fixed_weapon_fight"
-        return self._augment(obs), info
+        self._set_cursor_to_goal(info.get("goal_target"))
+        return obs, info
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        self._goal_target, self._goal_mask, mode = self._build_fixed_goal(obs)
-        info = dict(info)
-        info["goal_target"] = self._goal_target.copy()
-        info["goal_mask"] = self._goal_mask.copy()
-        info["goal_mode"] = mode
-        info["goal_active"] = 1.0
-        info["stage_name"] = "fixed_weapon_fight"
-        return self._augment(obs), reward, terminated, truncated, info
+        if bool(info.get("goal_new_sampled", False)):
+            self._set_cursor_to_goal(info.get("goal_target"))
+        return obs, reward, terminated, truncated, info
 
 
 def make_env(args: argparse.Namespace):
@@ -157,43 +103,20 @@ def make_env(args: argparse.Namespace):
         tap_latch_steps=1,
     )
     base_env = BrawlDeepEnv(config=config)
-    stage_spec = None
+    stage_spec = build_phase_spec(
+        phase=args.phase,
+        death_penalty=float(args.death_penalty),
+        terminate_on_death=False,
+    )
+    # During evaluation, terminate only when a stock-out happens (or max-steps if configured).
+    stage_spec.terminate_on_death = False
+    stage_spec.terminate_on_goal_success = False
+    stage_spec.terminate_on_hit_event = False
+    env: gym.Env = StageGoalEnv(base_env, stage_spec)
 
-    if args.goal_mode == "none":
-        env: gym.Env = base_env
-    elif args.goal_mode == "fixed":
-        env = FixedWeaponFightGoalEnv(base_env)
-    else:
-        if args.phase is None:
-            raise ValueError("--phase is required when --goal-mode=phase")
-
-        stage_spec = build_phase_spec(
-            phase=args.phase,
-            death_penalty=float(args.death_penalty),
-            terminate_on_death=False,
-        )
-        # During evaluation, terminate only when a stock-out happens (or max-steps if configured).
-        stage_spec.terminate_on_death = False
-        stage_spec.terminate_on_goal_success = False
-        stage_spec.terminate_on_hit_event = False
-        env = StageGoalEnv(base_env, stage_spec)
-
-    if args.algo == "sac":
-        env = FlattenMultiDiscreteWrapper(env)
-        if stage_spec is not None:
-            goal_dim = int(len(stage_spec.feature_names)) if stage_spec.feature_names is not None else int(
-                np.asarray(stage_spec.mask, dtype=np.float32).reshape(-1).shape[0]
-            )
-            env = StageGoalDictEnv(
-                env,
-                proximity_scale=float(stage_spec.proximity_scale),
-                success_threshold=float(stage_spec.success_threshold),
-                success_bonus=float(stage_spec.success_bonus),
-                mask=np.asarray(stage_spec.mask, dtype=np.float32),
-                goal_extractor=stage_spec.goal_extractor,
-                goal_dim=goal_dim,
-                use_l2_error=bool(stage_spec.use_l2_error),
-            )
+    if str(args.phase).startswith("locomotion"):
+        env = GoalMouseTrackerWrapper(env)
+        print("[evaluate] Locomotion phase detected: forcing mouse goal tracking ON.")
 
     return env
 
@@ -210,10 +133,7 @@ def _resolve_outcome(self_stocks: float, op_stocks: float, truncated: bool) -> s
     return "UNRESOLVED"
 
 
-def _to_env_action(action: Any, algo: str) -> Sequence[int] | int:
-    if algo == "sac":
-        return int(np.asarray(action, dtype=np.int64).reshape(-1)[0])
-
+def _to_env_action(action: Any) -> Sequence[int]:
     arr = np.asarray(action, dtype=np.int64).reshape(-1)
     if arr.shape[0] < 4:
         raise ValueError(f"Predicted action must have 4 components, got shape {arr.shape}")
@@ -229,19 +149,14 @@ def _get_base_env(env) -> BrawlDeepEnv:
 
 def main() -> None:
     args = parse_args()
+    args.phase = str(args.phase).strip().lower()
     model_path = Path(args.model)
     if not model_path.exists():
         raise FileNotFoundError(f"Model not found: {model_path}")
 
     env = make_env(args)
     deterministic = not bool(args.stochastic)
-
-    if args.algo == "sac":
-        from algo.discrete_sac import DiscreteSAC
-
-        model = DiscreteSAC.load(str(model_path), device=args.device)
-    else:
-        model = PPO.load(str(model_path), device=args.device)
+    model = PPO.load(str(model_path), device=args.device)
 
     rewards: list[float] = []
     lengths: list[int] = []
@@ -250,15 +165,15 @@ def main() -> None:
     op_stocks_list: list[float] = []
     op_dmg_totals: list[float] = []
     self_dmg_totals: list[float] = []
+    goal_error_means: list[float] = []
+    goal_success_ratios: list[float] = []
 
     print("=" * 84)
     print(f"Evaluating: {model_path}")
-    phase_view = args.phase if args.goal_mode == "phase" else "n/a"
     print(
-        f"Algo: {args.algo} | Episodes: {args.episodes} | Goal mode: {args.goal_mode} | "
-        f"Phase: {phase_view} | Deterministic: {deterministic}"
+        f"Episodes: {args.episodes} | Phase: {args.phase} | Deterministic: {deterministic}"
     )
-    print("Episode ends on stock-out of either side.")
+    print("Evaluation mode: phase-conditioned policy with stock-out match outcomes.")
     print("=" * 84)
 
     try:
@@ -271,17 +186,23 @@ def main() -> None:
             ep_len = 0
             ep_op_dmg = 0.0
             ep_self_dmg = 0.0
+            ep_goal_error_sum = 0.0
+            ep_goal_success_sum = 0.0
+            ep_goal_steps = 0
 
             while not (done or truncated):
                 action, _ = model.predict(obs, deterministic=deterministic)
                 if isinstance(action, np.ndarray) and action.ndim > 1:
                     action = action[0]
-                env_action = _to_env_action(action, args.algo)
+                env_action = _to_env_action(action)
                 obs, reward, done, truncated, info = cast(Any, env).step(env_action)
                 ep_reward += float(reward)
                 ep_len += 1
                 ep_op_dmg += float(info.get("op_delta_damage", 0.0))
                 ep_self_dmg += float(info.get("self_delta_damage", 0.0))
+                ep_goal_error_sum += float(info.get("goal_error", 0.0))
+                ep_goal_success_sum += float(info.get("goal_success", 0.0))
+                ep_goal_steps += 1
 
             base = _get_base_env(env)
             self_stocks = float(base.memory.self_stocks_left)
@@ -296,10 +217,16 @@ def main() -> None:
             op_dmg_totals.append(ep_op_dmg)
             self_dmg_totals.append(ep_self_dmg)
 
+            goal_err_mean = float(ep_goal_error_sum / max(1, ep_goal_steps))
+            goal_success_ratio = float(ep_goal_success_sum / max(1, ep_goal_steps))
+            goal_error_means.append(goal_err_mean)
+            goal_success_ratios.append(goal_success_ratio)
+
             print(
                 f"Ep {ep:02d} | {outcome:10s} | reward={ep_reward:+9.3f} | steps={ep_len:5d} | "
                 f"stocks(self/op)={self_stocks:.1f}/{op_stocks:.1f} | "
-                f"dmg(self/op)={ep_self_dmg:.3f}/{ep_op_dmg:.3f}"
+                f"dmg(self/op)={ep_self_dmg:.3f}/{ep_op_dmg:.3f} | "
+                f"goal_err={goal_err_mean:.4f} | goal_succ={goal_success_ratio:.3f}"
             )
     finally:
         env.close()
@@ -310,6 +237,8 @@ def main() -> None:
     op_stocks_np = np.asarray(op_stocks_list, dtype=np.float32)
     op_dmg_np = np.asarray(op_dmg_totals, dtype=np.float32)
     self_dmg_np = np.asarray(self_dmg_totals, dtype=np.float32)
+    goal_err_np = np.asarray(goal_error_means, dtype=np.float32)
+    goal_succ_np = np.asarray(goal_success_ratios, dtype=np.float32)
 
     wins = sum(1 for x in outcomes if x == "WIN")
     losses = sum(1 for x in outcomes if x == "LOSS")
@@ -327,6 +256,8 @@ def main() -> None:
     print(f"Avg stocks self/op : {float(self_stocks_np.mean()):.2f}/{float(op_stocks_np.mean()):.2f}")
     print(f"Avg dmg self/op    : {float(self_dmg_np.mean()):.3f}/{float(op_dmg_np.mean()):.3f}")
     print(f"Avg stock diff     : {float((self_stocks_np - op_stocks_np).mean()):+.3f}")
+    print(f"Avg goal error     : {float(goal_err_np.mean()):.4f}")
+    print(f"Avg goal success   : {float(goal_succ_np.mean()):.3f}")
 
 
 if __name__ == "__main__":

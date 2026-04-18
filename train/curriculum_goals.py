@@ -17,12 +17,38 @@ CURRICULUM_GOAL_FEATURES: list[str] = [
     "rel_distance",
     "facing_opponent",
     "frame_advantage_estimate",
-    "opponent_damage_pct",
     "player_is_offstage",
 ]
 
 GOAL_INDEX: Dict[str, int] = {name: i for i, name in enumerate(CURRICULUM_GOAL_FEATURES)}
 GOAL_DIM: int = len(CURRICULUM_GOAL_FEATURES)
+
+GOAL_TYPES: tuple[str, ...] = (
+    "recovery",
+    "approach",
+    "spacing",
+    "attack",
+    "weapon_acquisition",
+)
+GOAL_TYPE_INDEX: Dict[str, int] = {name: i for i, name in enumerate(GOAL_TYPES)}
+GOAL_TYPE_DIM: int = len(GOAL_TYPES)
+
+
+def normalize_goal_type(goal_type: str) -> str:
+    key = str(goal_type).strip().lower()
+    if key not in GOAL_TYPE_INDEX:
+        raise ValueError(f"Unknown goal type '{goal_type}'. Expected one of: {', '.join(GOAL_TYPES)}")
+    return key
+
+
+def goal_type_to_index(goal_type: str) -> int:
+    return int(GOAL_TYPE_INDEX[normalize_goal_type(goal_type)])
+
+
+def goal_type_onehot(goal_type: str) -> np.ndarray:
+    onehot = np.zeros((GOAL_TYPE_DIM,), dtype=np.float32)
+    onehot[goal_type_to_index(goal_type)] = 1.0
+    return onehot
 
 
 def _norm01(v: float, lo: float, hi: float) -> float:
@@ -45,7 +71,6 @@ def extract_curriculum_goal_features(obs: np.ndarray) -> np.ndarray:
             _norm01(StateSpec.get(obs, "rel_distance"), 0.0, 2.0),
             _norm01(StateSpec.get(obs, "facing_opponent"), -1.0, 1.0),
             _norm01(StateSpec.get(obs, "frame_advantage_estimate"), -1.0, 1.0),
-            float(np.clip(StateSpec.get(obs, "opponent_damage_pct"), 0.0, 1.0)),
             float(np.clip(StateSpec.get(obs, "player_is_offstage"), 0.0, 1.0)),
         ],
         dtype=np.float32,

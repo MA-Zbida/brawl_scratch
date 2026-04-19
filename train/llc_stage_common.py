@@ -346,12 +346,7 @@ class StageGoalEnv(gym.Wrapper):
                 f"Target sampler returned dim={self._goal_target.shape[0]}, expected {self.goal_dim}"
             )
         self._goal_active = True
-        if self.stage_spec.resample_goal_on_timer:
-            self._goal_steps_left = int(
-                np.random.randint(self.stage_spec.min_goal_duration, self.stage_spec.max_goal_duration + 1)
-            )
-        else:
-            self._goal_steps_left = -1
+        self._goal_steps_left = int(self.stage_spec.max_goal_duration)
 
     def _player_is_controllable(self, info: Optional[dict] = None) -> bool:
         """Returns whether the player can currently execute actions."""
@@ -511,6 +506,8 @@ class StageGoalEnv(gym.Wrapper):
                 self._prev_error = None
                 goal_new_sampled = True
             elif self.stage_spec.resample_goal_on_timer:
+                # Always decrement; resample when ceiling reached
+                self._goal_steps_left -= 1
                 if self._goal_steps_left <= 0:
                     if seq_enabled:
                         if self._seq_phase == 2 and self.stage_spec.sequential_failure_penalty > 0.0:
@@ -520,8 +517,6 @@ class StageGoalEnv(gym.Wrapper):
                         self._sample_goal(obs)
                     self._prev_error = None
                     goal_new_sampled = True
-                else:
-                    self._goal_steps_left -= 1
         elif self.stage_spec.sample_goal_only_when_player_exists:
             self._goal_active = False
             self._goal_steps_left = -1
@@ -762,6 +757,19 @@ class StageGoalEnv(gym.Wrapper):
                 agent_weapon_drop_penalty_applied = float(self.stage_spec.agent_weapon_drop_penalty)
 
         reward = float(np.clip(reward, -self.stage_spec.reward_clip, self.stage_spec.reward_clip))
+
+        # Goal resampling on success (when not terminating the episode)
+        if (self._goal_active and success
+                and not terminated_by_goal
+                and not goal_new_sampled
+                and self._episode_steps >= self.stage_spec.min_goal_duration):
+            if seq_enabled:
+                self._sample_goal_for_sequence_step(obs, step=1)
+            else:
+                self._sample_goal(obs)
+            self._prev_error = None
+            goal_new_sampled = True
+
         self._prev_error = curr_error
         self._prev_has_weapon = curr_has_weapon
         self._prev_in_range = float(np.clip(self._feature_value(curr_feats, "in_strike_range", 0.0), 0.0, 1.0))
@@ -1791,9 +1799,8 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     replay_ratio = float(np.clip(getattr(args, "replay_ratio", 0.30), 0.0, 0.95))
     replay_capacity = int(max(1, getattr(args, "replay_capacity", 262_144)))
     replay_warmup_updates = int(max(0, getattr(args, "replay_warmup_updates", 1)))
-    strict_replay_mix = bool(getattr(args, "strict_replay_mix", True))
-    normalize_adv_per_source = bool(getattr(args, "normalize_advantage_per_source", True))
     anchor_kl_coef = float(max(0.0, getattr(args, "anchor_kl_coef", 0.02)))
+    anchor_snapshot_count = int(max(1, getattr(args, "anchor_snapshot_count", 5)))
     anchor_update_interval = int(max(1, getattr(args, "anchor_update_interval", 8)))
     bc_loss_coef = float(max(0.0, getattr(args, "bc_loss_coef", 0.05)))
     bc_batch_size = int(max(1, getattr(args, "bc_batch_size", 128)))
@@ -1836,9 +1843,8 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
                 replay_ratio=replay_ratio,
                 replay_capacity=replay_capacity,
                 replay_warmup_updates=replay_warmup_updates,
-                strict_replay_mix=strict_replay_mix,
-                normalize_advantage_per_source=normalize_adv_per_source,
                 anchor_kl_coef=anchor_kl_coef,
+                anchor_snapshot_count=anchor_snapshot_count,
                 anchor_update_interval=anchor_update_interval,
                 bc_loss_coef=bc_loss_coef,
                 bc_batch_size=bc_batch_size,
@@ -1886,9 +1892,8 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
         replay_ratio=replay_ratio,
         replay_capacity=replay_capacity,
         replay_warmup_updates=replay_warmup_updates,
-        strict_replay_mix=strict_replay_mix,
-        normalize_advantage_per_source=normalize_adv_per_source,
         anchor_kl_coef=anchor_kl_coef,
+        anchor_snapshot_count=anchor_snapshot_count,
         anchor_update_interval=anchor_update_interval,
         bc_loss_coef=bc_loss_coef,
         bc_batch_size=bc_batch_size,

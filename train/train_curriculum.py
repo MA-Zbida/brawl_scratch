@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 from __future__ import annotations
 
-import argparse
 import ctypes
 import sys
 from dataclasses import replace
@@ -15,13 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from env import BrawlDeepEnv, EnvConfig
 from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv, train_stage_model
-
-
-def _has_cli_flag(flag: str) -> bool:
-    for token in sys.argv[1:]:
-        if token == flag or token.startswith(f"{flag}="):
-            return True
-    return False
+from train.train_config import parse_args, TrainConfig
 
 
 class GoalMouseTrackerWrapper(gym.Wrapper):
@@ -51,14 +44,11 @@ class GoalMouseTrackerWrapper(gym.Wrapper):
         return int(self._user32.GetSystemMetrics(0)), int(self._user32.GetSystemMetrics(1))
 
     def _set_cursor_to_goal(self, goal_target) -> None:
-        if self._user32 is None:
-            return
-        if goal_target is None:
+        if self._user32 is None or goal_target is None:
             return
         goal_target = np.asarray(goal_target, dtype=np.float32).reshape(-1)
         if goal_target.shape[0] < 2:
             return
-
         w, h = self._screen_size()
         x = int(np.clip(float(goal_target[0]), 0.0, 1.0) * max(1, w - 1))
         y = int(np.clip(float(goal_target[1]), 0.0, 1.0) * max(1, h - 1))
@@ -76,80 +66,14 @@ class GoalMouseTrackerWrapper(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train PPO curriculum phase")
-    p.add_argument("--phase", type=str, required=True, choices=list(PHASES))
-    p.add_argument("--timesteps", type=int, default=500_000)
-    p.add_argument("--max-episode-steps", type=int, default=1200)
-    p.add_argument("--save-dir", type=str, default="train/models")
-    p.add_argument("--model-name", type=str, default="")
-    p.add_argument("--resume", type=str, default=None)
-
-    p.add_argument("--learning-rate", type=float, default=3e-4)
-    p.add_argument("--batch-size", type=int, default=256)
-    p.add_argument("--gamma", type=float, default=0.99)
-    p.add_argument("--max-grad-norm", type=float, default=0.5)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--delay", type=float, default=3.0)
-    p.add_argument("--device", type=str, default="cpu")
-
-    p.add_argument("--n-steps", type=int, default=2048)
-    p.add_argument("--gae-lambda", type=float, default=0.95)
-    p.add_argument("--clip-range", type=float, default=0.15)
-    p.add_argument("--ent-coef", type=float, default=0.01)
-    p.add_argument("--vf-coef", type=float, default=0.5)
-    p.add_argument("--replay-ratio", type=float, default=0.30, help="Fraction of PPO minibatch sampled from replay")
-    p.add_argument("--replay-capacity", type=int, default=262_144, help="Replay storage capacity in transitions")
-    p.add_argument("--replay-warmup-updates", type=int, default=1, help="Number of PPO updates before replay sampling")
-    p.add_argument("--strict-replay-mix", dest="strict_replay_mix", action="store_true", help="Enforce configured replay ratio when replay has enough samples")
-    p.add_argument("--no-strict-replay-mix", dest="strict_replay_mix", action="store_false")
-    p.add_argument("--normalize-advantage-per-source", dest="normalize_advantage_per_source", action="store_true", help="Normalize on-policy and replay advantages separately")
-    p.add_argument("--no-normalize-advantage-per-source", dest="normalize_advantage_per_source", action="store_false")
-    p.add_argument("--anchor-kl-coef", type=float, default=0.02, help="KL anchor loss coefficient")
-    p.add_argument("--anchor-update-interval", type=int, default=8, help="Anchor snapshot refresh period in PPO updates")
-    p.add_argument("--bc-loss-coef", type=float, default=0.05, help="Behavior cloning loss coefficient")
-    p.add_argument("--bc-batch-size", type=int, default=128, help="Behavior cloning mini-batch size")
-    p.add_argument("--bc-demos-path", type=str, default=None, help="Path to NPZ demonstrations used for BC anchor")
-    p.add_argument("--pcgrad", dest="pcgrad", action="store_true", help="Enable PCGrad between PPO and auxiliary losses")
-    p.add_argument("--no-pcgrad", dest="pcgrad", action="store_false")
-
-    p.add_argument("--plot-every", type=int, default=2500)
-    p.add_argument("--log-csv", action="store_true", help="Write step/episode CSV logs")
-    p.add_argument("--diag-report-every", type=int, default=0, help="Diagnostic print period in steps (0 disables)")
-    p.add_argument("--moving-avg", type=int, default=300)
-    p.add_argument("--eval-every-steps", type=int, default=0, help="Run periodic evaluation every N timesteps (0 disables)")
-    p.add_argument("--eval-episodes", type=int, default=3, help="Episodes to run at each periodic evaluation")
-    p.add_argument("--eval-stochastic", action="store_true", help="Use stochastic policy actions during periodic evaluation")
-
-    p.add_argument("--death-penalty", type=float, default=1.0)
-    p.add_argument("--no-terminate-on-death", action="store_true")
-    p.add_argument("--move-mouse-to-goal", action="store_true", default=False)
-    p.add_argument("--yolo-every", type=int, default=2, help="Run YOLO every N env steps (1 = max YOLO authority)")
-    p.add_argument("--yolo-blend-alpha", type=float, default=0.95, help="YOLO fusion weight in memory update [0,1]")
-    p.add_argument("--tracker-max-missing", type=int, default=2, help="Tracker persistence in missed frames")
-    p.add_argument("--tracker-smooth-alpha", type=float, default=0.85, help="Tracker smoothing alpha [0,1], higher = closer to YOLO")
-
-    p.set_defaults(strict_replay_mix=True, normalize_advantage_per_source=True, pcgrad=True)
-
-    return p.parse_args()
-
-
-def make_env(
-    max_episode_steps: int,
-    spec,
-    move_mouse_to_goal: bool = False,
-    yolo_every: int = 2,
-    yolo_blend_alpha: float = 0.95,
-    tracker_max_missing: int = 4,
-    tracker_smooth_alpha: float = 0.75,
-) -> gym.Env:
+def _make_env(cfg: TrainConfig, spec) -> gym.Env:
     config = EnvConfig(
         terminate_on_stock_out=False,
-        max_episode_steps=max_episode_steps,
-        yolo_infer_every_n_steps=max(1, int(yolo_every)),
-        yolo_obs_blend_alpha=float(np.clip(yolo_blend_alpha, 0.0, 1.0)),
-        tracker_max_missing=max(1, int(tracker_max_missing)),
-        tracker_smooth_alpha=float(np.clip(tracker_smooth_alpha, 0.0, 1.0)),
+        max_episode_steps=cfg.max_episode_steps,
+        yolo_infer_every_n_steps=max(1, cfg.yolo_every),
+        yolo_obs_blend_alpha=float(np.clip(cfg.yolo_blend_alpha, 0.0, 1.0)),
+        tracker_max_missing=max(1, cfg.tracker_max_missing),
+        tracker_smooth_alpha=float(np.clip(cfg.tracker_smooth_alpha, 0.0, 1.0)),
         action_repeat_steps=1,
         action_repeat_min_steps=1,
         action_repeat_max_steps=1,
@@ -157,33 +81,24 @@ def make_env(
     )
     base = BrawlDeepEnv(config=config)
     env = StageGoalEnv(base, spec)
-    if move_mouse_to_goal:
+    if cfg.move_mouse_to_goal:
         env = GoalMouseTrackerWrapper(env)
     return env
 
 
-def make_eval_env(
-    max_episode_steps: int,
-    spec,
-    move_mouse_to_goal: bool = False,
-    yolo_every: int = 2,
-    yolo_blend_alpha: float = 0.95,
-    tracker_max_missing: int = 4,
-    tracker_smooth_alpha: float = 0.75,
-) -> gym.Env:
+def _make_eval_env(cfg: TrainConfig, spec) -> gym.Env:
     eval_spec = replace(
         spec,
         terminate_on_death=False,
-        terminate_on_goal_success=False,
         terminate_on_hit_event=False,
     )
     config = EnvConfig(
         terminate_on_stock_out=True,
-        max_episode_steps=max_episode_steps,
-        yolo_infer_every_n_steps=max(1, int(yolo_every)),
-        yolo_obs_blend_alpha=float(np.clip(yolo_blend_alpha, 0.0, 1.0)),
-        tracker_max_missing=max(1, int(tracker_max_missing)),
-        tracker_smooth_alpha=float(np.clip(tracker_smooth_alpha, 0.0, 1.0)),
+        max_episode_steps=cfg.max_episode_steps,
+        yolo_infer_every_n_steps=max(1, cfg.yolo_every),
+        yolo_obs_blend_alpha=float(np.clip(cfg.yolo_blend_alpha, 0.0, 1.0)),
+        tracker_max_missing=max(1, cfg.tracker_max_missing),
+        tracker_smooth_alpha=float(np.clip(cfg.tracker_smooth_alpha, 0.0, 1.0)),
         action_repeat_steps=1,
         action_repeat_min_steps=1,
         action_repeat_max_steps=1,
@@ -191,64 +106,30 @@ def make_eval_env(
     )
     base = BrawlDeepEnv(config=config)
     env = StageGoalEnv(base, eval_spec)
-    if move_mouse_to_goal:
+    if cfg.move_mouse_to_goal:
         env = GoalMouseTrackerWrapper(env)
     return env
 
 
 def main() -> None:
-    args = parse_args()
-
-    if not args.model_name:
-        args.model_name = f"llc_{args.phase}"
+    cfg = parse_args()
 
     spec = build_phase_spec(
-        phase=args.phase,
-        death_penalty=args.death_penalty,
-        terminate_on_death=not args.no_terminate_on_death,
+        phase=cfg.phase,
+        death_penalty=cfg.death_penalty,
+        terminate_on_death=cfg.terminate_on_death,
     )
 
-    if args.phase.startswith("locomotion"):
-        if not _has_cli_flag("--learning-rate"):
-            args.learning_rate = 3e-4
-        if not _has_cli_flag("--n-steps"):
-            args.n_steps = 1024
-        if not _has_cli_flag("--clip-range"):
-            args.clip_range = 0.2
-        if not _has_cli_flag("--ent-coef"):
-            args.ent_coef = 0.03
-
-    if args.phase.startswith("locomotion"):
-        if not args.move_mouse_to_goal:
-            print("[train_curriculum] Locomotion phase detected: forcing mouse goal tracking ON.")
-        args.move_mouse_to_goal = True
-
-    if args.move_mouse_to_goal:
+    if cfg.move_mouse_to_goal:
         print("[train_curriculum] Mouse goal tracking enabled.")
 
     eval_env_builder = None
-    if int(args.eval_every_steps) > 0:
-        eval_env_builder = lambda: make_eval_env(
-            args.max_episode_steps,
-            spec,
-            move_mouse_to_goal=args.move_mouse_to_goal,
-            yolo_every=args.yolo_every,
-            yolo_blend_alpha=args.yolo_blend_alpha,
-            tracker_max_missing=args.tracker_max_missing,
-            tracker_smooth_alpha=args.tracker_smooth_alpha,
-        )
+    if cfg.eval_every_steps > 0:
+        eval_env_builder = lambda: _make_eval_env(cfg, spec)
 
     train_stage_model(
-        args=args,
-        make_env=lambda: make_env(
-            args.max_episode_steps,
-            spec,
-            move_mouse_to_goal=args.move_mouse_to_goal,
-            yolo_every=args.yolo_every,
-            yolo_blend_alpha=args.yolo_blend_alpha,
-            tracker_max_missing=args.tracker_max_missing,
-            tracker_smooth_alpha=args.tracker_smooth_alpha,
-        ),
+        args=cfg,
+        make_env=lambda: _make_env(cfg, spec),
         stage_spec=spec,
         make_eval_env=eval_env_builder,
     )

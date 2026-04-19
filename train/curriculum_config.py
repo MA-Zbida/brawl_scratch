@@ -324,8 +324,6 @@ def build_phase_spec(
             reset_perturb_steps=0,
             step_penalty=0.1,
             terminate_on_death=bool(terminate_on_death),
-            terminate_on_goal_success=True,
-            resample_goal_on_timer=False,
         )
 
     if phase == "locomotion_airborne":
@@ -354,8 +352,6 @@ def build_phase_spec(
             reset_perturb_steps=0,
             step_penalty=0.1,
             terminate_on_death=bool(terminate_on_death),
-            terminate_on_goal_success=True,
-            resample_goal_on_timer=False,
         )
 
     if phase == "locomotion_recovery":
@@ -390,8 +386,6 @@ def build_phase_spec(
             reset_perturb_steps=0,
             step_penalty=0.1,
             terminate_on_death=bool(terminate_on_death),
-            terminate_on_goal_success=True,
-            resample_goal_on_timer=False,
         )
 
     if phase == "weapon_control":
@@ -436,8 +430,6 @@ def build_phase_spec(
             force_drop_weapon_on_timeout=True,
             drop_weapon_key="num5",
             terminate_on_death=bool(terminate_on_death),
-            terminate_on_goal_success=False,
-            resample_goal_on_timer=False,
         )
 
     if phase == "damage_static_fist":
@@ -485,10 +477,8 @@ def build_phase_spec(
             step_penalty=0.002,
             reward_from_goal_progress=True,
             terminate_on_death=bool(terminate_on_death),
-            terminate_on_goal_success=True,
             terminate_on_hit_event=False,
             require_attack_for_success=True,
-            resample_goal_on_timer=True,
             resample_goal_on_opponent_stock_loss=False,
             opponent_ko_bonus=0.0,
         )
@@ -542,8 +532,6 @@ def build_phase_spec(
             step_penalty=0.003,
             reward_from_goal_progress=True,
             terminate_on_death=bool(terminate_on_death),
-            terminate_on_goal_success=True,
-            resample_goal_on_timer=False,
             resample_goal_on_opponent_stock_loss=True,
             opponent_ko_bonus=8.0,
         )
@@ -598,8 +586,6 @@ def build_phase_spec(
             step_penalty=0.003,
             reward_from_goal_progress=True,
             terminate_on_death=bool(terminate_on_death),
-            terminate_on_goal_success=True,
-            resample_goal_on_timer=False,
             resample_goal_on_opponent_stock_loss=True,
             opponent_ko_bonus=12.0,
         )

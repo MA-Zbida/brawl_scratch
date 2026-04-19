@@ -1,5 +1,17 @@
+"""AnchoredReplayPPO — PPO with replay anchoring, snapshot pool, BC, and PCGrad.
+
+Paper §2 — Training Modifications:
+  - 70 % on-policy PPO, 30 % replay (replay is KL + BC only, no PPO grad)
+  - Policy snapshot pool (last K snapshots, sampled randomly for KL)
+  - Prioritized replay (|advantage|-weighted)
+  - PCGrad between core PPO loss and auxiliary KL + BC loss
+  - FiLM regularisation is enforced at the extractor level, not here
+"""
+
 from __future__ import annotations
 
+import random
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -7,11 +19,14 @@ from typing import Any, Optional
 import numpy as np
 import torch as th
 import torch.nn.functional as F
-from torch.distributions import Distribution as TorchDistribution
 from gymnasium import spaces
 from stable_baselines3 import PPO
 from stable_baselines3.common.utils import explained_variance
 
+
+# ---------------------------------------------------------------------------
+#  Data containers
+# ---------------------------------------------------------------------------
 
 @dataclass
 class _PPOSamples:
@@ -23,81 +38,111 @@ class _PPOSamples:
     returns: th.Tensor
 
 
+# ---------------------------------------------------------------------------
+#  Replay store with priority-weighted sampling  (paper §2.2 / §2.9)
+# ---------------------------------------------------------------------------
+
 class _TensorReplayStore:
-    def __init__(self, capacity: int) -> None:
+    """Ring-buffer for past rollout transitions.  Sampling is weighted by
+    max(advantage, 0) + ε so that successful transitions are replayed more
+    often (paper §2.9 — replay prioritisation).
+    """
+
+    def __init__(self, capacity: int, priority_alpha: float = 0.6) -> None:
         self.capacity = int(max(1, capacity))
+        self.alpha = float(max(0.0, priority_alpha))
         self.observations: Optional[th.Tensor] = None
         self.actions: Optional[th.Tensor] = None
         self.old_values: Optional[th.Tensor] = None
         self.old_log_prob: Optional[th.Tensor] = None
         self.advantages: Optional[th.Tensor] = None
         self.returns: Optional[th.Tensor] = None
+        self.priorities: Optional[th.Tensor] = None
 
     @property
     def size(self) -> int:
-        if self.observations is None:
-            return 0
-        return int(self.observations.shape[0])
+        return 0 if self.observations is None else int(self.observations.shape[0])
 
     @staticmethod
-    def _flatten_time_env(array: np.ndarray, n_envs: int) -> np.ndarray:
-        if array.ndim < 2:
-            return array.reshape(-1)
-        if int(array.shape[1]) == int(n_envs):
-            return array.reshape((-1,) + array.shape[2:])
-        return array.reshape((array.shape[0],) + array.shape[1:])
+    def _flatten(arr: np.ndarray, n_envs: int) -> np.ndarray:
+        if arr.ndim >= 2 and int(arr.shape[1]) == n_envs:
+            return arr.reshape((-1,) + arr.shape[2:])
+        if arr.ndim >= 2:
+            return arr.reshape((arr.shape[0],) + arr.shape[1:])
+        return arr.reshape(-1)
 
-    def _append(self, key: str, value: th.Tensor) -> None:
-        existing = getattr(self, key)
-        value_cpu = value.detach().cpu()
-        if existing is None:
-            setattr(self, key, value_cpu)
-            return
-        setattr(self, key, th.cat((existing, value_cpu), dim=0))
+    def _cat(self, key: str, new_cpu: th.Tensor) -> None:
+        old = getattr(self, key)
+        setattr(self, key, new_cpu if old is None else th.cat((old, new_cpu)))
 
     def _trim(self) -> None:
         extra = self.size - self.capacity
         if extra <= 0:
             return
-        for key in (
-            "observations",
-            "actions",
-            "old_values",
-            "old_log_prob",
-            "advantages",
-            "returns",
-        ):
-            value = getattr(self, key)
-            if value is not None:
-                setattr(self, key, value[extra:])
+        for key in ("observations", "actions", "old_values",
+                     "old_log_prob", "advantages", "returns", "priorities"):
+            v = getattr(self, key)
+            if v is not None:
+                setattr(self, key, v[extra:])
 
-    def add_from_rollout_buffer(self, rollout_buffer: Any) -> None:
-        obs_raw = getattr(rollout_buffer, "observations", None)
+    def add_from_rollout_buffer(self, rb: Any) -> None:
+        obs_raw = getattr(rb, "observations", None)
         if obs_raw is None or isinstance(obs_raw, dict):
             return
+        n_envs = int(getattr(rb, "n_envs", 1))
 
-        actions_raw = getattr(rollout_buffer, "actions", None)
-        values_raw = getattr(rollout_buffer, "values", None)
-        log_probs_raw = getattr(rollout_buffer, "log_probs", None)
-        advantages_raw = getattr(rollout_buffer, "advantages", None)
-        returns_raw = getattr(rollout_buffer, "returns", None)
+        obs = self._flatten(np.asarray(obs_raw), n_envs)
+        actions = self._flatten(np.asarray(rb.actions), n_envs)
+        values = self._flatten(np.asarray(rb.values), n_envs).reshape(-1)
+        log_probs = self._flatten(np.asarray(rb.log_probs), n_envs).reshape(-1)
+        advantages = self._flatten(np.asarray(rb.advantages), n_envs).reshape(-1)
+        returns = self._flatten(np.asarray(rb.returns), n_envs).reshape(-1)
 
-        if any(v is None for v in (actions_raw, values_raw, log_probs_raw, advantages_raw, returns_raw)):
+        n = min(obs.shape[0], actions.shape[0], values.shape[0],
+                log_probs.shape[0], advantages.shape[0], returns.shape[0])
+        if n <= 0:
             return
 
-        n_envs = int(getattr(rollout_buffer, "n_envs", 1))
+        # Priority = max(advantage, 0) + ε  → prefer good transitions
+        pri = np.maximum(advantages[:n], 0.0).astype(np.float32) + 1e-6
 
-        obs_np = np.asarray(obs_raw)
-        actions_np = np.asarray(actions_raw)
-        values_np = np.asarray(values_raw)
-        log_probs_np = np.asarray(log_probs_raw)
-        advantages_np = np.asarray(advantages_raw)
-        returns_np = np.asarray(returns_raw)
+        self._cat("observations", th.as_tensor(obs[:n].copy(), dtype=th.float32))
+        self._cat("actions", th.as_tensor(actions[:n].copy()))
+        self._cat("old_values", th.as_tensor(values[:n].copy(), dtype=th.float32))
+        self._cat("old_log_prob", th.as_tensor(log_probs[:n].copy(), dtype=th.float32))
+        self._cat("advantages", th.as_tensor(advantages[:n].copy(), dtype=th.float32))
+        self._cat("returns", th.as_tensor(returns[:n].copy(), dtype=th.float32))
+        self._cat("priorities", th.as_tensor(pri.copy(), dtype=th.float32))
+        self._trim()
 
-        obs_flat = self._flatten_time_env(obs_np, n_envs)
-        actions_flat = self._flatten_time_env(actions_np, n_envs)
-        values_flat = self._flatten_time_env(values_np, n_envs).reshape(-1)
-        log_probs_flat = self._flatten_time_env(log_probs_np, n_envs).reshape(-1)
+    def sample(self, batch_size: int, device: th.device,
+               allow_oversample: bool = False) -> Optional[_PPOSamples]:
+        if self.size <= 0:
+            return None
+        take = max(1, batch_size) if allow_oversample else max(1, min(batch_size, self.size))
+
+        if self.priorities is not None and self.alpha > 0:
+            probs = self.priorities ** self.alpha
+            probs = probs / probs.sum()
+            indices = th.multinomial(probs, take, replacement=(take > self.size))
+        else:
+            indices = th.randint(0, self.size, (take,))
+
+        assert self.observations is not None
+        assert self.actions is not None
+        assert self.old_values is not None
+        assert self.old_log_prob is not None
+        assert self.advantages is not None
+        assert self.returns is not None
+
+        return _PPOSamples(
+            observations=self.observations[indices].to(device),
+            actions=self.actions[indices].to(device),
+            old_values=self.old_values[indices].to(device),
+            old_log_prob=self.old_log_prob[indices].to(device),
+            advantages=self.advantages[indices].to(device),
+            returns=self.returns[indices].to(device),
+        )
         advantages_flat = self._flatten_time_env(advantages_np, n_envs).reshape(-1)
         returns_flat = self._flatten_time_env(returns_np, n_envs).reshape(-1)
 

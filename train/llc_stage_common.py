@@ -108,6 +108,7 @@ class StageSpec:
     idle_action_index: int = 3
     reward_from_goal_progress: bool = False
     player_has_weapon_bonus: float = 0.0
+    weapon_pickup_bonus: float = 0.0
     conditional_weapon_guidance_when_unarmed: bool = False
     unarmed_weapon_dx_weight: float = 0.0
     unarmed_weapon_dy_weight: float = 0.0
@@ -122,7 +123,7 @@ class StageSpec:
     terminate_on_goal_success: bool = False
     terminate_on_hit_event: bool = False
     hit_event_damage_threshold: float = 1e-6
-    resample_goal_on_timer: bool = True
+    resample_goal_on_timer: bool = False
     resample_goal_on_opponent_stock_loss: bool = False
     opponent_ko_bonus: float = 0.0
     sample_goal_only_when_player_exists: bool = True
@@ -183,6 +184,7 @@ class StageGoalEnv(gym.Wrapper):
         self._goal_target = np.zeros((self.goal_dim,), dtype=np.float32)
         self._goal_steps_left = 0
         self._goal_active = False
+        self._step_count = 0
         self._awaiting_respawn_after_death = False
         self._prev_error: float | None = None
         self._prev_has_weapon: Optional[bool] = None
@@ -346,7 +348,15 @@ class StageGoalEnv(gym.Wrapper):
                 f"Target sampler returned dim={self._goal_target.shape[0]}, expected {self.goal_dim}"
             )
         self._goal_active = True
-        self._goal_steps_left = int(self.stage_spec.max_goal_duration)
+        self._goal_steps_left = -1
+
+    def _activate_goal(self, obs: np.ndarray, feats: np.ndarray, *, sequence_step: Optional[int] = None) -> None:
+        if sequence_step is None:
+            self._sample_goal(obs)
+        else:
+            self._sample_goal_for_sequence_step(obs, step=sequence_step)
+        self._maybe_update_player_xy_goal(obs)
+        self._active_mask = self._effective_mask_for_step(feats)
 
     def _player_is_controllable(self, info: Optional[dict] = None) -> bool:
         """Returns whether the player can currently execute actions."""
@@ -414,8 +424,18 @@ class StageGoalEnv(gym.Wrapper):
             obs, info = self.env.reset(seed=seed, options=options)
         else:
             obs, info = self._perturb_reset()
+
+        # Guarantee agent starts weaponless regardless of force-drop timing.
+        _unwrapped = self.unwrapped
+        _mem = getattr(_unwrapped, "memory", None)
+        if _mem is not None:
+            _player = getattr(_mem, "player", None)
+            if _player is not None:
+                _player.weapon_state = 0.0
+
         obs = np.asarray(obs, dtype=np.float32)
         init_feats = self._extract(obs)
+        self._step_count = 0
         self._seq_phase = 1
         self._seq_step1_completed = False
         if self.stage_spec.sample_goal_only_when_player_exists and not self._player_is_controllable(info):
@@ -425,11 +445,9 @@ class StageGoalEnv(gym.Wrapper):
             self._active_mask = self.mask.copy()
         else:
             if self._sequential_enabled():
-                self._sample_goal_for_sequence_step(obs, step=1)
+                self._activate_goal(obs, init_feats, sequence_step=1)
             else:
-                self._sample_goal(obs)
-            self._maybe_update_player_xy_goal(obs)
-            self._active_mask = self._effective_mask_for_step(init_feats)
+                self._activate_goal(obs, init_feats)
         self._prev_has_weapon = self._feature_value(init_feats, "player_has_weapon", 0.0) > 0.5
         self._prev_in_range = float(np.clip(self._feature_value(init_feats, "in_strike_range", 0.0), 0.0, 1.0))
         self._combo_chain_hits = 0
@@ -470,6 +488,7 @@ class StageGoalEnv(gym.Wrapper):
 
         obs, _, terminated, truncated, info = self.env.step(action_arr)
         obs = np.asarray(obs, dtype=np.float32)
+        self._step_count += 1
         player_controllable = self._player_is_controllable(info)
         if player_controllable:
             self._awaiting_respawn_after_death = False
@@ -488,43 +507,21 @@ class StageGoalEnv(gym.Wrapper):
         seq_failure_penalty = 0.0
 
         goal_new_sampled = False
+        goal_resampled_after_reward = False
+        resample_due_to_stock_loss = False
+        resample_due_to_timer = False
+        resample_goal_after_reward = False
+        resample_goal_sequence_step: Optional[int] = None
+        curr_feats = self._extract(obs)  # compute once; reused for reward, resampling, and HER buffer
         if player_controllable:
             if not self._goal_active:
                 if seq_enabled:
-                    self._sample_goal_for_sequence_step(obs, step=1)
+                    self._activate_goal(obs, curr_feats, sequence_step=1)
                 else:
-                    self._sample_goal(obs)
-                self._prev_error = None
+                    self._activate_goal(obs, curr_feats)
                 goal_new_sampled = True
-            elif self.stage_spec.resample_goal_on_opponent_stock_loss and op_stock_lost > 0.0:
-                # Opponent was KO'd — damage reset to 0, so the current goal
-                # target is stale.  Resample relative to the new (reset) state.
-                if seq_enabled:
-                    self._sample_goal_for_sequence_step(obs, step=self._seq_phase)
-                else:
-                    self._sample_goal(obs)
-                self._prev_error = None
-                goal_new_sampled = True
-            elif self.stage_spec.resample_goal_on_timer:
-                # Always decrement; resample when ceiling reached
-                self._goal_steps_left -= 1
-                if self._goal_steps_left <= 0:
-                    if seq_enabled:
-                        if self._seq_phase == 2 and self.stage_spec.sequential_failure_penalty > 0.0:
-                            seq_failure_penalty = float(self.stage_spec.sequential_failure_penalty)
-                        self._sample_goal_for_sequence_step(obs, step=1)
-                    else:
-                        self._sample_goal(obs)
-                    self._prev_error = None
-                    goal_new_sampled = True
-        elif self.stage_spec.sample_goal_only_when_player_exists:
-            self._goal_active = False
-            self._goal_steps_left = -1
-            if seq_enabled:
-                self._seq_phase = 1
-                self._seq_step1_completed = False
-
-        curr_feats = self._extract(obs)  # compute once; reused for error and HER buffer
+        # When player is not controllable (YOLO miss / respawning), keep the
+        # existing goal active.  The goal is NEVER resampled mid-episode.
         curr_has_weapon = self._feature_value(curr_feats, "player_has_weapon", 0.0) > 0.5
         op_delta_damage = float(max(0.0, info.get("op_delta_damage", 0.0)))
         self_delta_damage = float(max(0.0, info.get("self_delta_damage", 0.0)))
@@ -540,7 +537,7 @@ class StageGoalEnv(gym.Wrapper):
         attack_commit_bonus_applied = 0.0
         no_attack_in_range_penalty_applied = 0.0
         combo_chain_bonus = 0.0
-        if self._goal_active:
+        if self._goal_active and player_controllable:
             self._maybe_update_player_xy_goal(obs)
             self._active_mask = self._effective_mask_for_step(curr_feats)
             curr_error = self._goal_error_from_feats(curr_feats, self._goal_target, mask=self._active_mask)
@@ -562,6 +559,10 @@ class StageGoalEnv(gym.Wrapper):
 
             if self.stage_spec.player_has_weapon_bonus > 0.0 and self._feature_value(curr_feats, "player_has_weapon", 0.0) > 0.5:
                 reward += self.stage_spec.player_has_weapon_bonus
+
+            # One-time bonus when agent picks up a weapon this step.
+            if self.stage_spec.weapon_pickup_bonus > 0.0 and curr_has_weapon and not self._prev_has_weapon:
+                reward += self.stage_spec.weapon_pickup_bonus
 
             # Explicit combat shaping (phase-configurable): chase, orient, connect, and trade favorably.
             rel_distance = float(np.clip(self._feature_value(curr_feats, "rel_distance", 1.0), 0.0, 1.0))
@@ -658,9 +659,9 @@ class StageGoalEnv(gym.Wrapper):
                         if self.stage_spec.sequential_step1_bonus > 0.0:
                             reward += float(self.stage_spec.sequential_step1_bonus)
                         self._seq_step1_completed = True
-                        self._sample_goal_for_sequence_step(obs, step=2)
-                        self._prev_error = None
-                        goal_new_sampled = True
+                        if not (terminated or truncated):
+                            resample_goal_after_reward = True
+                            resample_goal_sequence_step = 2
                         seq_step1_transition = True
 
                     # Step-1 is never terminal success for the episode.
@@ -673,14 +674,6 @@ class StageGoalEnv(gym.Wrapper):
 
             if success:
                 reward += self.stage_spec.success_bonus
-
-            if seq_enabled and success and not self.stage_spec.terminate_on_goal_success:
-                # When not terminating on success (e.g., evaluation), immediately
-                # restart the sequence from step-1 for continuous rollouts.
-                self._sample_goal_for_sequence_step(obs, step=1)
-                self._prev_error = None
-                goal_new_sampled = True
-                self._seq_step1_completed = False
         else:
             self._active_mask = self.mask.copy()
             curr_error = 0.0
@@ -699,10 +692,9 @@ class StageGoalEnv(gym.Wrapper):
             jumps_used = 1.0 - jumps_norm
             reward -= self.stage_spec.jump_usage_penalty_scale * jumps_used
 
-        terminated_by_goal = False
-        if self._goal_active and self.stage_spec.terminate_on_goal_success and success:
-            terminated = True
-            terminated_by_goal = True
+        # Episode ends when goal is reached.
+        if self._goal_active and success:
+            truncated = True
 
         terminated_by_hit_event = False
         if self.stage_spec.terminate_on_hit_event and op_delta_damage >= float(self.stage_spec.hit_event_damage_threshold):
@@ -758,19 +750,22 @@ class StageGoalEnv(gym.Wrapper):
 
         reward = float(np.clip(reward, -self.stage_spec.reward_clip, self.stage_spec.reward_clip))
 
-        # Goal resampling on success (when not terminating the episode)
-        if (self._goal_active and success
-                and not terminated_by_goal
-                and not goal_new_sampled
-                and self._episode_steps >= self.stage_spec.min_goal_duration):
-            if seq_enabled:
-                self._sample_goal_for_sequence_step(obs, step=1)
+        if resample_goal_after_reward:
+            if resample_goal_sequence_step is None:
+                self._activate_goal(obs, curr_feats)
             else:
-                self._sample_goal(obs)
-            self._prev_error = None
+                self._activate_goal(obs, curr_feats, sequence_step=resample_goal_sequence_step)
             goal_new_sampled = True
+            goal_resampled_after_reward = True
 
-        self._prev_error = curr_error
+        if not self._goal_active:
+            self._prev_error = None
+        elif not player_controllable:
+            pass  # Preserve prev_error so progress resumes correctly when player returns
+        elif goal_resampled_after_reward:
+            self._prev_error = self._goal_error_from_feats(curr_feats, self._goal_target, mask=self._active_mask)
+        else:
+            self._prev_error = curr_error
         self._prev_has_weapon = curr_has_weapon
         self._prev_in_range = float(np.clip(self._feature_value(curr_feats, "in_strike_range", 0.0), 0.0, 1.0))
 
@@ -793,7 +788,7 @@ class StageGoalEnv(gym.Wrapper):
         info["self_stock_lost_step_effective"] = effective_self_stock_lost
         info["death_event"] = float(1.0 if effective_self_stock_lost > 0.0 else 0.0)
         info["duplicate_death_suppressed"] = float(1.0 if raw_self_stock_lost > 0.0 and effective_self_stock_lost <= 0.0 else 0.0)
-        info["terminal_success"] = float(1.0 if terminated_by_goal else 0.0)
+        info["terminal_success"] = float(1.0 if (self._goal_active and success) else 0.0)
         info["terminal_hit_event"] = float(1.0 if terminated_by_hit_event else 0.0)
         info["forced_weapon_drop"] = forced_weapon_drop
         info["agent_weapon_drop_event"] = agent_weapon_drop_event
@@ -1800,7 +1795,6 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     replay_capacity = int(max(1, getattr(args, "replay_capacity", 262_144)))
     replay_warmup_updates = int(max(0, getattr(args, "replay_warmup_updates", 1)))
     anchor_kl_coef = float(max(0.0, getattr(args, "anchor_kl_coef", 0.02)))
-    anchor_snapshot_count = int(max(1, getattr(args, "anchor_snapshot_count", 5)))
     anchor_update_interval = int(max(1, getattr(args, "anchor_update_interval", 8)))
     bc_loss_coef = float(max(0.0, getattr(args, "bc_loss_coef", 0.05)))
     bc_batch_size = int(max(1, getattr(args, "bc_batch_size", 128)))
@@ -1844,7 +1838,6 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
                 replay_capacity=replay_capacity,
                 replay_warmup_updates=replay_warmup_updates,
                 anchor_kl_coef=anchor_kl_coef,
-                anchor_snapshot_count=anchor_snapshot_count,
                 anchor_update_interval=anchor_update_interval,
                 bc_loss_coef=bc_loss_coef,
                 bc_batch_size=bc_batch_size,
@@ -1893,7 +1886,6 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
         replay_capacity=replay_capacity,
         replay_warmup_updates=replay_warmup_updates,
         anchor_kl_coef=anchor_kl_coef,
-        anchor_snapshot_count=anchor_snapshot_count,
         anchor_update_interval=anchor_update_interval,
         bc_loss_coef=bc_loss_coef,
         bc_batch_size=bc_batch_size,

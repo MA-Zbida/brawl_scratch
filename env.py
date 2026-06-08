@@ -14,7 +14,6 @@ from config import UI_REGIONS
 from feature_extractor.memory.structured_memory import Memory
 from feature_extractor.memory.state_spec import StateSpec
 from feature_extractor.yolo.extract import Extract
-from feature_extractor.yolo.tracker import SortLikeTracker
 from reward.extract_rgb import get_rgb
 from reward.rgb_to_dmg import get_dmg
 from reward.stock import get_stock
@@ -389,17 +388,13 @@ class EnvConfig:
     vy_ground_threshold: float = 0.01
     terminate_on_stock_out: bool = True
     ui_regions: Optional[dict] = field(default_factory=lambda: dict(UI_REGIONS))
-    yolo_infer_every_n_steps: int = 3
+    yolo_infer_every_n_steps: int = 1
     yolo_max_det: int = 5
     yolo_conf: float = 0.25
     yolo_verbose: bool = False
     yolo_infer_width: int = 640
     yolo_infer_height: int = 360
     yolo_obs_blend_alpha: float = 0.95
-    use_tracker_layer: bool = True
-    tracker_max_missing: int = 5
-    tracker_iou_threshold: float = 0.1
-    tracker_smooth_alpha: float = 0.75
     temporal_stack_size: int = 1  # 1 = single frame (LSTM handles time)
     temporal_offsets: tuple[int, ...] = (0,)  # only t-0; LSTM does the rest
     profile_step_timing: bool = False
@@ -450,20 +445,10 @@ class BrawlDeepEnv(gym.Env):
         else:
             self.stocks_health_provider = None
 
-        self._tracker: Optional[SortLikeTracker] = None
-        if self.config.use_tracker_layer:
-            self._tracker = SortLikeTracker(
-                max_missing=self.config.tracker_max_missing,
-                iou_threshold=self.config.tracker_iou_threshold,
-                smooth_alpha=self.config.tracker_smooth_alpha,
-            )
-
         self.memory = Memory(yolo_blend_alpha=self.config.yolo_obs_blend_alpha)
         self._last_step_time = time.perf_counter()
         self._step_count = 0
-        self._last_raw_detections: list = []
         self._last_detections: list = []
-        self._raw_detections_fresh: bool = False
         self._step_time_sum = 0.0
         self._step_time_count = 0
         self._tap_latch_remaining = {"space": 0, "e": 0, "num4": 0, "num6": 0, "num5": 0}
@@ -590,23 +575,7 @@ class BrawlDeepEnv(gym.Env):
     def _get_detections(self, frame, *, force_infer: bool = False) -> list:
         if frame is None:
             return []
-
-        infer_interval = max(1, int(self.config.yolo_infer_every_n_steps))
-        should_infer = force_infer or self._step_count == 0 or (self._step_count % infer_interval == 0)
-        self._raw_detections_fresh = bool(should_infer)
-
-        if should_infer:
-            self._last_raw_detections = self.extractor.predict(frame)
-
-        if self._tracker is not None:
-            if should_infer:
-                tracker_input = self._last_raw_detections
-            else:
-                tracker_input = []
-            self._last_detections = self._tracker.update(tracker_input)
-        elif should_infer:
-            self._last_detections = list(self._last_raw_detections)
-
+        self._last_detections = self.extractor.predict(frame)
         return self._last_detections
 
     def _get_obs(self) -> np.ndarray:
@@ -774,17 +743,13 @@ class BrawlDeepEnv(gym.Env):
             reset_reward_fn()
         self._last_step_time = time.perf_counter()
         self._step_count = 0
-        self._last_raw_detections = []
         self._last_detections = []
-        self._raw_detections_fresh = False
         self._step_time_sum = 0.0
         self._step_time_count = 0
         self._tap_latch_remaining = {"space": 0, "e": 0, "num4": 0, "num6": 0, "num5": 0}
         self._last_movement = 3
         self._movement_hold_count = 0
         self._state_history.clear()
-        if self._tracker is not None:
-            self._tracker.reset()
         self._last_frame = self.frame_provider.get_frame()
         detections = self._get_detections(self._last_frame, force_infer=True)
 
@@ -794,7 +759,6 @@ class BrawlDeepEnv(gym.Env):
         self.memory.update_from_detections(
             detections,
             dt=reset_dt,
-            raw_detections=self._last_raw_detections if self._raw_detections_fresh else None,
         )
         self._last_step_time = now
 
@@ -915,7 +879,6 @@ class BrawlDeepEnv(gym.Env):
             self.memory.update_from_detections(
                 detections,
                 dt=dt_for_dets,
-                raw_detections=self._last_raw_detections if self._raw_detections_fresh else None,
             )
             dist_to_weapon = self._distance_player_to_weapon()
             self.memory.update_player_weapon_from_action(action_pick_throw=frame_pick_throw, dist_to_weapon=dist_to_weapon)

@@ -51,16 +51,12 @@ class LLCEnv(gym.Wrapper):
         super().__init__(env)
         self.goal_sampler = goal_sampler or GoalSampler()
 
-        self.min_goal_duration = int(min_goal_duration)
-        self.max_goal_duration = int(max_goal_duration)
         self.progress_scale = float(progress_scale)
         self.progress_clip_min = float(progress_clip_min)
         self.progress_clip_max = float(progress_clip_max)
         self.success_threshold = float(success_threshold)
         self.success_bonus = float(success_bonus)
         self.reward_clip = float(reward_clip)
-        self.terminate_on_goal_success = bool(terminate_on_goal_success)
-        self.resample_goal_on_timer = bool(resample_goal_on_timer)
 
         obs_shape = env.observation_space.shape
         assert obs_shape is not None, "Base env must define observation shape"
@@ -77,7 +73,6 @@ class LLCEnv(gym.Wrapper):
         self._aug_obs_buffer = np.zeros((self._aug_dim,), dtype=np.float32)
         self._goal = np.zeros((GOAL_DIM,), dtype=np.float32)
         self._goal_lane = "unknown"
-        self._goal_steps_left = 0
         self._goal_uid = 0
         self._prev_goal_error: float | None = None
 
@@ -97,15 +92,6 @@ class LLCEnv(gym.Wrapper):
         obs, _, terminated, truncated, info = self.env.step(action)
         obs = np.asarray(obs, dtype=np.float32)
 
-        sampled_new_goal = False
-        if self.resample_goal_on_timer:
-            if self._goal_steps_left <= 0:
-                self._sample_new_goal(obs)
-                sampled_new_goal = True
-                self._prev_goal_error = None
-            else:
-                self._goal_steps_left -= 1
-
         prev_error = self._prev_goal_error
         curr_error = self.goal_error(obs, self._goal)
         progress = 0.0 if prev_error is None else (prev_error - curr_error)
@@ -120,40 +106,28 @@ class LLCEnv(gym.Wrapper):
         reward = float(np.clip(reward, -self.reward_clip, self.reward_clip))
         self._prev_goal_error = curr_error
 
-        if self.terminate_on_goal_success and success:
-            terminated = True
+        # Episode ends when: (1) goal reached, (2) max episode steps exceeded.
+        if success:
+            truncated = True
 
         info["goal"] = self._goal.copy()
         info["goal_lane"] = self._goal_lane
         info["goal_uid"] = int(self._goal_uid)
-        info["goal_new_sampled"] = bool(sampled_new_goal)
         info["goal_error"] = float(curr_error)
         info["goal_progress"] = float(progress)
         info["goal_success"] = float(1.0 if success else 0.0)
-        info["goal_steps_left"] = int(self._goal_steps_left)
         info["llc_reward"] = float(reward)
 
         return self._augment(obs), reward, terminated, truncated, info
 
     def set_goal(self, goal: np.ndarray, duration: Optional[int] = None) -> None:
         self._goal = clip_goal(np.asarray(goal, dtype=np.float32))
-        if duration is None:
-            if self.resample_goal_on_timer:
-                self._goal_steps_left = int(np.random.randint(self.min_goal_duration, self.max_goal_duration + 1))
-            else:
-                self._goal_steps_left = -1
-        else:
-            self._goal_steps_left = max(1, int(duration))
         self._prev_goal_error = None
         self._goal_uid += 1
 
     def _sample_new_goal(self, obs: np.ndarray) -> None:
         self._goal = self.goal_sampler.sample(obs)
         self._goal_lane = str(getattr(self.goal_sampler, "last_lane", "unknown"))
-        if self.resample_goal_on_timer:
-            self._goal_steps_left = int(np.random.randint(self.min_goal_duration, self.max_goal_duration + 1))
-        else:
-            self._goal_steps_left = -1
         self._goal_uid += 1
 
     def _augment(self, obs: np.ndarray) -> np.ndarray:

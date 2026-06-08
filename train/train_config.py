@@ -16,9 +16,9 @@ class TrainConfig:
     """All training hyperparameters in one place."""
 
     # Core
-    phase: str = "locomotion_grounded"
+    phase: str = "recovery_mastery"
     timesteps: int = 500_000
-    max_episode_steps: int = 1200
+    max_episode_steps: int = 200
     save_dir: str = "train/models"
     model_name: str = ""
     resume: Optional[str] = None
@@ -42,7 +42,6 @@ class TrainConfig:
     replay_capacity: int = 262_144
     replay_warmup_updates: int = 1
     anchor_kl_coef: float = 0.02
-    anchor_snapshot_count: int = 5
     anchor_update_interval: int = 8
     bc_loss_coef: float = 0.05
     bc_batch_size: int = 128
@@ -61,41 +60,46 @@ class TrainConfig:
     death_penalty: float = 1.0
     terminate_on_death: bool = True
     move_mouse_to_goal: bool = False
-    yolo_every: int = 2
+    yolo_every: int = 1
     yolo_blend_alpha: float = 0.95
-    tracker_max_missing: int = 2
-    tracker_smooth_alpha: float = 0.85
 
 
 # Phase-specific overrides applied on top of defaults.
 _PHASE_DEFAULTS: dict[str, dict] = {
-    "locomotion_grounded": {
+    "recovery_mastery": {
+        "learning_rate": 3e-4,
+        "n_steps": 1024,
+        "clip_range": 0.2,
+        "ent_coef": 0.05,
+        "move_mouse_to_goal": False,
+    },
+    "movement_fluency": {
         "learning_rate": 3e-4,
         "n_steps": 1024,
         "clip_range": 0.2,
         "ent_coef": 0.03,
         "move_mouse_to_goal": True,
     },
-    "locomotion_airborne": {
+    "weapon_acquisition": {
         "learning_rate": 3e-4,
-        "n_steps": 1024,
-        "clip_range": 0.2,
-        "ent_coef": 0.03,
-        "move_mouse_to_goal": True,
+        "n_steps": 2048,
+        "clip_range": 0.15,
+        "ent_coef": 0.01,
+        "move_mouse_to_goal": False,
     },
-    "locomotion_recovery": {
+    "spacing_neutral": {
         "learning_rate": 3e-4,
-        "n_steps": 1024,
-        "clip_range": 0.2,
-        "ent_coef": 0.03,
-        "move_mouse_to_goal": True,
+        "n_steps": 2048,
+        "clip_range": 0.15,
+        "ent_coef": 0.02,
+        "move_mouse_to_goal": False,
     },
-    "locomotion": {
-        "learning_rate": 3e-4,
-        "n_steps": 1024,
-        "clip_range": 0.2,
-        "ent_coef": 0.03,
-        "move_mouse_to_goal": True,
+    "combat_execution": {
+        "learning_rate": 2e-4,
+        "n_steps": 2048,
+        "clip_range": 0.15,
+        "ent_coef": 0.01,
+        "move_mouse_to_goal": False,
     },
 }
 
@@ -136,6 +140,8 @@ def parse_args() -> TrainConfig:
     p.add_argument("--eval-episodes", type=int)
     p.add_argument("--death-penalty", type=float)
     p.add_argument("--no-terminate-on-death", action="store_true")
+    p.add_argument("--move-mouse-to-goal", action="store_true", default=None)
+    p.add_argument("--no-move-mouse-to-goal", dest="move_mouse_to_goal", action="store_false")
 
     args = p.parse_args()
     kw = {k: v for k, v in vars(args).items()

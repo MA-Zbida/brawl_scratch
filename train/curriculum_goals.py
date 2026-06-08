@@ -7,17 +7,24 @@ import numpy as np
 from feature_extractor.memory.state_spec import StateSpec
 
 
+# ── Goal feature set (11 dims, one family per stage) ───────────────────────────
 CURRICULUM_GOAL_FEATURES: list[str] = [
-    "player_x",
-    "player_y",
-    "player_has_weapon",
-    "weapon_dx",
-    "weapon_dy",
-    "in_strike_range",
-    "rel_distance",
-    "facing_opponent",
-    "frame_advantage_estimate",
-    "player_is_offstage",
+    # Stage 1 – Recovery
+    "signed_dx_to_ledge",       # 0  signed dx to nearest ledge, normalised [-1,1]→[0,1]
+    "dy_to_ledge",              # 1  dy to nearest ledge, normalised [-1,1]→[0,1]
+    # Stage 2 – Movement
+    "player_x",                 # 2  absolute x position [0,1]
+    "player_y",                 # 3  absolute y position [0,1]
+    # Stage 3 – Weapon
+    "player_has_weapon",        # 4  holding weapon {0,1}
+    "weapon_dx",                # 5  signed dx to weapon, normalised [-1,1]→[0,1]
+    "weapon_dy",                # 6  signed dy to weapon, normalised [-1,1]→[0,1]
+    # Stage 4 – Spacing
+    "rel_distance",             # 7  distance to opponent, normalised [0,2]→[0,1]
+    "rel_dy",                   # 8  signed vertical offset to opponent, normalised [-1,1]→[0,1]
+    # Stage 5 – Combat
+    "in_strike_range",          # 9  in punish range {0,1}
+    "frame_advantage_estimate", # 10 frame advantage, normalised [-1,1]→[0,1]
 ]
 
 GOAL_INDEX: Dict[str, int] = {name: i for i, name in enumerate(CURRICULUM_GOAL_FEATURES)}
@@ -25,10 +32,10 @@ GOAL_DIM: int = len(CURRICULUM_GOAL_FEATURES)
 
 GOAL_TYPES: tuple[str, ...] = (
     "recovery",
-    "approach",
-    "spacing",
-    "attack",
+    "movement",
     "weapon_acquisition",
+    "spacing",
+    "combat",
 )
 GOAL_TYPE_INDEX: Dict[str, int] = {name: i for i, name in enumerate(GOAL_TYPES)}
 GOAL_TYPE_DIM: int = len(GOAL_TYPES)
@@ -62,28 +69,30 @@ def extract_curriculum_goal_features(obs: np.ndarray) -> np.ndarray:
     obs = np.asarray(obs, dtype=np.float32)
     return np.array(
         [
-            float(np.clip(StateSpec.get(obs, "player_x"), 0.0, 1.0)),
-            float(np.clip(StateSpec.get(obs, "player_y"), 0.0, 1.0)),
-            float(np.clip(StateSpec.get(obs, "player_has_weapon"), 0.0, 1.0)),
-            _norm01(StateSpec.get(obs, "weapon_dx"), -1.0, 1.0),
-            _norm01(StateSpec.get(obs, "weapon_dy"), -1.0, 1.0),
-            float(np.clip(StateSpec.get(obs, "in_strike_range"), 0.0, 1.0)),
-            _norm01(StateSpec.get(obs, "rel_distance"), 0.0, 2.0),
-            _norm01(StateSpec.get(obs, "facing_opponent"), -1.0, 1.0),
-            _norm01(StateSpec.get(obs, "frame_advantage_estimate"), -1.0, 1.0),
-            float(np.clip(StateSpec.get(obs, "player_is_offstage"), 0.0, 1.0)),
+            # Stage 1 – Recovery geometry
+            _norm01(StateSpec.get(obs, "signed_dx_to_ledge"), -1.0, 1.0),      # 0
+            _norm01(StateSpec.get(obs, "dy_to_ledge"), -1.0, 1.0),             # 1
+            # Stage 2 – Movement positioning
+            float(np.clip(StateSpec.get(obs, "player_x"), 0.0, 1.0)),          # 2
+            float(np.clip(StateSpec.get(obs, "player_y"), 0.0, 1.0)),          # 3
+            # Stage 3 – Weapon acquisition
+            float(np.clip(StateSpec.get(obs, "player_has_weapon"), 0.0, 1.0)), # 4
+            _norm01(StateSpec.get(obs, "weapon_dx"), -1.0, 1.0),               # 5
+            _norm01(StateSpec.get(obs, "weapon_dy"), -1.0, 1.0),               # 6
+            # Stage 4 – Spacing geometry
+            _norm01(StateSpec.get(obs, "rel_distance"), 0.0, 2.0),             # 7
+            _norm01(StateSpec.get(obs, "rel_dy"), -1.0, 1.0),                  # 8
+            # Stage 5 – Combat execution
+            float(np.clip(StateSpec.get(obs, "in_strike_range"), 0.0, 1.0)),   # 9
+            _norm01(StateSpec.get(obs, "frame_advantage_estimate"), -1.0, 1.0), # 10
         ],
         dtype=np.float32,
     )
 
 
 def default_goal_target() -> np.ndarray:
-    target = np.zeros((GOAL_DIM,), dtype=np.float32)
-    target[GOAL_INDEX["weapon_dx"]] = 0.5
-    target[GOAL_INDEX["weapon_dy"]] = 0.5
-    target[GOAL_INDEX["facing_opponent"]] = 0.5
-    target[GOAL_INDEX["frame_advantage_estimate"]] = 0.5
-    return target
+    """All dimensions at 0.5 — the normalised midpoint / neutral position for every family."""
+    return np.full((GOAL_DIM,), 0.5, dtype=np.float32)
 
 
 def clip_goal_target(target: np.ndarray) -> np.ndarray:

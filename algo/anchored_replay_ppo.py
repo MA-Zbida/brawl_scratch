@@ -143,68 +143,6 @@ class _TensorReplayStore:
             advantages=self.advantages[indices].to(device),
             returns=self.returns[indices].to(device),
         )
-        advantages_flat = self._flatten_time_env(advantages_np, n_envs).reshape(-1)
-        returns_flat = self._flatten_time_env(returns_np, n_envs).reshape(-1)
-
-        lengths = [
-            int(obs_flat.shape[0]),
-            int(actions_flat.shape[0]),
-            int(values_flat.shape[0]),
-            int(log_probs_flat.shape[0]),
-            int(advantages_flat.shape[0]),
-            int(returns_flat.shape[0]),
-        ]
-        n = int(min(lengths))
-        if n <= 0:
-            return
-
-        obs_flat = obs_flat[:n]
-        actions_flat = actions_flat[:n]
-        values_flat = values_flat[:n]
-        log_probs_flat = log_probs_flat[:n]
-        advantages_flat = advantages_flat[:n]
-        returns_flat = returns_flat[:n]
-
-        obs_tensor = th.as_tensor(np.array(obs_flat, copy=True), dtype=th.float32)
-        actions_tensor = th.as_tensor(np.array(actions_flat, copy=True))
-        values_tensor = th.as_tensor(np.array(values_flat, copy=True), dtype=th.float32)
-        log_probs_tensor = th.as_tensor(np.array(log_probs_flat, copy=True), dtype=th.float32)
-        advantages_tensor = th.as_tensor(np.array(advantages_flat, copy=True), dtype=th.float32)
-        returns_tensor = th.as_tensor(np.array(returns_flat, copy=True), dtype=th.float32)
-
-        self._append("observations", obs_tensor)
-        self._append("actions", actions_tensor)
-        self._append("old_values", values_tensor)
-        self._append("old_log_prob", log_probs_tensor)
-        self._append("advantages", advantages_tensor)
-        self._append("returns", returns_tensor)
-        self._trim()
-
-    def sample(self, batch_size: int, device: th.device, allow_oversample: bool = False) -> Optional[_PPOSamples]:
-        if self.size <= 0:
-            return None
-
-        if allow_oversample:
-            take = int(max(1, batch_size))
-        else:
-            take = int(max(1, min(batch_size, self.size)))
-        indices = th.randint(0, self.size, (take,), device=th.device("cpu"))
-
-        assert self.observations is not None
-        assert self.actions is not None
-        assert self.old_values is not None
-        assert self.old_log_prob is not None
-        assert self.advantages is not None
-        assert self.returns is not None
-
-        return _PPOSamples(
-            observations=self.observations[indices].to(device),
-            actions=self.actions[indices].to(device),
-            old_values=self.old_values[indices].to(device),
-            old_log_prob=self.old_log_prob[indices].to(device),
-            advantages=self.advantages[indices].to(device),
-            returns=self.returns[indices].to(device),
-        )
 
 
 class _BehaviorCloneStore:
@@ -476,8 +414,8 @@ class AnchoredReplayPPO(PPO):
         if anchor_base is None or current_base is None:
             return th.zeros((), device=th.device("cpu"), dtype=th.float32)
 
-        anchor_distribution_t = anchor_base if isinstance(anchor_base, TorchDistribution) else None
-        current_distribution_t = current_base if isinstance(current_base, TorchDistribution) else None
+        anchor_distribution_t = anchor_base if isinstance(anchor_base, th.distributions.Distribution) else None
+        current_distribution_t = current_base if isinstance(current_base, th.distributions.Distribution) else None
         if anchor_distribution_t is None or current_distribution_t is None:
             return th.zeros((), device=th.device("cpu"), dtype=th.float32)
 

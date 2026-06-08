@@ -29,8 +29,8 @@ def parse_args() -> argparse.Namespace:
         help="Max attempted episodes to gather target accepted demos (0 = auto)",
     )
     p.add_argument("--max-episode-steps", type=int, default=100)
-    p.add_argument("--min-goal-duration", type=int, default=120)
-    p.add_argument("--max-goal-duration", type=int, default=220)
+    p.add_argument("--min-goal-duration", type=int, default=120, help="Only used by legacy timer-resampled phases")
+    p.add_argument("--max-goal-duration", type=int, default=220, help="Only used by legacy timer-resampled phases")
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--output", type=str, default="")
     p.add_argument("--move-mouse-to-goal", action="store_true", default=True)
@@ -106,17 +106,9 @@ def _build_env(args: argparse.Namespace) -> StageGoalEnv:
 
     is_damage = args.phase in _DAMAGE_PHASES
 
-    # For damage phases the PPO spec has resample_goal_on_timer=False, but
-    # for BC collection we NEED fresh goals so the human always has a target.
-    # Override to timer-based resampling with the CLI durations.
-    if is_damage and not spec.resample_goal_on_timer:
-        spec = replace(
-            spec,
-            resample_goal_on_timer=True,
-            min_goal_duration=max(1, int(args.min_goal_duration)),
-            max_goal_duration=max(int(args.min_goal_duration), int(args.max_goal_duration)),
-        )
-    elif spec.resample_goal_on_timer:
+    # Keep BC collection aligned with PPO: current curriculum phases resample on
+    # success or episode reset, but legacy timer-driven phases can still opt in.
+    if spec.resample_goal_on_timer:
         spec = replace(
             spec,
             min_goal_duration=max(1, int(args.min_goal_duration)),
@@ -244,7 +236,8 @@ def main() -> None:
         if enforce_recovery_sequence:
             max_collection_attempts = max(target_episodes, target_episodes * 5)
         else:
-            max_collection_attempts = target_episodes
+            # Only success episodes are accepted; budget for some max-step timeouts.
+            max_collection_attempts = max(target_episodes, target_episodes * 3)
 
     # Default: never end on first hit — BC episodes should mirror PPO episodes,
     # which continue after hits until goal progress / max steps.
@@ -298,8 +291,10 @@ def main() -> None:
     if eff_max_steps == _DEFAULT_MAX_STEPS["default"] and is_damage:
         eff_max_steps = _DEFAULT_MAX_STEPS["damage"]
     print(f"Max episode steps: {eff_max_steps}")
-    if is_damage:
-        print(f"Damage phase: goal resampling every {spec.min_goal_duration}-{spec.max_goal_duration} steps")
+    if spec.resample_goal_on_timer:
+        print(f"Goal resampling: every {spec.min_goal_duration}-{spec.max_goal_duration} steps")
+    else:
+        print("Goal resampling: on success; otherwise a new goal comes with the next episode reset")
     if mouse_guidance_enabled:
         print("Mouse guidance: enabled (cursor moves to target_x,target_y)")
     elif args.move_mouse_to_goal:
@@ -453,9 +448,9 @@ def main() -> None:
             if end_reason == "first_hit":
                 episodes_ended_on_first_hit += 1
 
-            accept_episode = True
+            accept_episode = bool(float(info.get("goal_success", 0.0)) > 0.5)
             if enforce_recovery_sequence:
-                accept_episode = bool(ep_step1_transition_seen and ep_terminal_success_seen)
+                accept_episode = bool(accept_episode and ep_step1_transition_seen and ep_terminal_success_seen)
                 if not accept_episode:
                     episodes_rejected_recovery += 1
 

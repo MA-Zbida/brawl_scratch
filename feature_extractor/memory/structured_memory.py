@@ -97,6 +97,7 @@ class Memory:
         self.rel_distance: float = 1.0
         self.weapon_dx: float = 0.0
         self.weapon_dy: float = 0.0
+        self.weapon_visible_this_frame: bool = False
 
         self.player_time_since_hit: float = 2.0
         self.opponent_time_since_hit: float = 2.0
@@ -127,6 +128,8 @@ class Memory:
 
         self.player_respawn_timer: float = 0.0
         self.opponent_respawn_timer: float = 0.0
+        self._pending_player_weapon_pick_frames: int = 0
+        self._pending_player_weapon_pick_missing_frames: int = 0
 
         self._prev_action = np.zeros(4, dtype=np.float32)
 
@@ -218,20 +221,17 @@ class Memory:
         self,
         detections: List[dict],
         dt: float = 1.0 / 41.0,
-        raw_detections: Optional[List[dict]] = None,
     ) -> None:
-        tracked_detections = list(detections or [])
-        yolo_detections = list(raw_detections if raw_detections is not None else tracked_detections)
+        # YOLO is the sole detection source; tracker layer removed.
+        yolo_detections = list(detections or [])
 
         player_yolo = self._select_detection(yolo_detections, ["agent"], self.player)
-        player_track = self._select_detection(tracked_detections, ["agent"], self.player)
         opponent_yolo = self._select_detection(yolo_detections, ["op", "op1", "op2"], self.opponent)
-        opponent_track = self._select_detection(tracked_detections, ["op", "op1", "op2"], self.opponent)
 
-        self._update_fighter(self.player, player_yolo, player_track, dt=dt, y_offset=self.player.height)
-        self._update_fighter(self.opponent, opponent_yolo, opponent_track, dt=dt)
+        self._update_fighter(self.player, player_yolo, player_yolo, dt=dt, y_offset=self.player.height)
+        self._update_fighter(self.opponent, opponent_yolo, opponent_yolo, dt=dt)
 
-        opponent_det = opponent_yolo if opponent_yolo is not None else opponent_track
+        opponent_det = opponent_yolo
         if opponent_det is not None:
             op_name = str(opponent_det.get("class_name", "op"))
             if op_name == "op1":
@@ -242,41 +242,18 @@ class Memory:
                 self.opponent.weapon_state = 0.0
 
         yolo_weapon_candidates = [d for d in yolo_detections if d.get("class_name") == "weapons"]
-        tracker_weapon_candidates = [d for d in tracked_detections if d.get("class_name") == "weapons"]
+        self.weapon_visible_this_frame = bool(yolo_weapon_candidates)
 
         yolo_weapon = None
-        tracker_weapon = None
         if yolo_weapon_candidates:
             yolo_weapon = min(
                 yolo_weapon_candidates,
                 key=lambda d: euclidian(bbox_center(d), (self.player.x, self.player.y)),
             )
-        if tracker_weapon_candidates:
-            tracker_weapon = min(
-                tracker_weapon_candidates,
-                key=lambda d: euclidian(bbox_center(d), (self.player.x, self.player.y)),
-            )
 
-        if yolo_weapon is not None or tracker_weapon is not None:
-            if yolo_weapon is not None:
-                wx_yolo, wy_yolo = self._clamp_position(*bbox_center(yolo_weapon))
-            else:
-                wx_yolo, wy_yolo = 0.0, 0.0
-            if tracker_weapon is not None:
-                wx_track, wy_track = self._clamp_position(*bbox_center(tracker_weapon))
-            else:
-                wx_track, wy_track = 0.0, 0.0
-
-            if yolo_weapon is not None and tracker_weapon is not None:
-                alpha = self._alpha_blend
-                wx = (alpha * wx_yolo) + ((1.0 - alpha) * wx_track)
-                wy = (alpha * wy_yolo) + ((1.0 - alpha) * wy_track)
-            elif yolo_weapon is not None:
-                wx, wy = wx_yolo, wy_yolo
-            else:
-                wx, wy = wx_track, wy_track
-
-            self.weapon.x, self.weapon.y = self._clamp_position(wx, wy)
+        if yolo_weapon is not None:
+            wx, wy = self._clamp_position(*bbox_center(yolo_weapon))
+            self.weapon.x, self.weapon.y = wx, wy
             self.weapon.exists = True
             self.weapon.missing_frames = 0
         else:
@@ -292,17 +269,31 @@ class Memory:
         self.update_on_ground()
 
     def update_player_weapon_from_action(self, action_pick_throw: bool, dist_to_weapon: float) -> None:
+        if self._pending_player_weapon_pick_frames > 0:
+            self._pending_player_weapon_pick_frames -= 1
+            if self.weapon_visible_this_frame:
+                self._pending_player_weapon_pick_missing_frames = 0
+            else:
+                self._pending_player_weapon_pick_missing_frames += 1
+                if self._pending_player_weapon_pick_missing_frames >= 2:
+                    self.player.weapon_state = 1.0
+                    self.weapon.exists = False
+                    self.weapon.missing_frames = self.physics.max_weapon_missing_frames + 1
+                    self._pending_player_weapon_pick_frames = 0
+                    self._pending_player_weapon_pick_missing_frames = 0
+
         if not action_pick_throw:
             return
 
         if self.player.weapon_state > 0.0:
             self.player.weapon_state = 0.0
+            self._pending_player_weapon_pick_frames = 0
+            self._pending_player_weapon_pick_missing_frames = 0
             return
 
-        if dist_to_weapon <= self.physics.max_dist_threshold and self.weapon.exists:
-            self.player.weapon_state = 1.0
-            self.weapon.exists = False
-            self.weapon.missing_frames = self.physics.max_weapon_missing_frames + 1
+        if dist_to_weapon <= self.physics.max_dist_threshold and self.weapon_visible_this_frame:
+            self._pending_player_weapon_pick_frames = max(self._pending_player_weapon_pick_frames, 5)
+            self._pending_player_weapon_pick_missing_frames = 0
 
     def update_on_ground(self, vy_threshold: float | None = None) -> None:
         _ = vy_threshold
@@ -495,6 +486,8 @@ class Memory:
             self.player_respawn_timer = self.physics.respawn_duration
             self.player.exists = False
             self.player.weapon_state = 0.0
+            self._pending_player_weapon_pick_frames = 0
+            self._pending_player_weapon_pick_missing_frames = 0
             self.player.jumps_left = 3
         else:
             self.self_total_damage_taken_before_stock_loss += self.self_delta_damage

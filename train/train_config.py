@@ -11,6 +11,16 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+PHASE_CHOICES: tuple[str, ...] = (
+    "recovery_mastery",
+    "movement_fluency",
+    "weapon_acquisition",
+    "spacing_neutral",
+    "combat_execution",
+    "all_skills_llc",
+)
+
+
 @dataclass
 class TrainConfig:
     """All training hyperparameters in one place."""
@@ -37,12 +47,15 @@ class TrainConfig:
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
 
-    # Replay & Anchoring (paper §2)
+    # Replay and anchoring (paper section 2)
     replay_ratio: float = 0.30
     replay_capacity: int = 262_144
     replay_warmup_updates: int = 1
+    strict_replay_mix: bool = True
+    normalize_advantage_per_source: bool = True
     anchor_kl_coef: float = 0.02
     anchor_update_interval: int = 8
+    anchor_pool_size: int = 4
     bc_loss_coef: float = 0.05
     bc_batch_size: int = 128
     bc_demos_path: Optional[str] = None
@@ -55,6 +68,11 @@ class TrainConfig:
     moving_avg: int = 300
     eval_every_steps: int = 0
     eval_episodes: int = 3
+    eval_stochastic: bool = False
+    eval_phases: str = ""
+    eval_include_previous: bool = False
+    amnesia_threshold: float = 0.15
+    retention_scores_path: str = ""
 
     # Environment
     death_penalty: float = 1.0
@@ -101,6 +119,17 @@ _PHASE_DEFAULTS: dict[str, dict] = {
         "ent_coef": 0.01,
         "move_mouse_to_goal": False,
     },
+    "all_skills_llc": {
+        "learning_rate": 2e-4,
+        "n_steps": 2048,
+        "clip_range": 0.12,
+        "ent_coef": 0.02,
+        "replay_ratio": 0.40,
+        "anchor_kl_coef": 0.04,
+        "bc_loss_coef": 0.08,
+        "eval_include_previous": True,
+        "move_mouse_to_goal": False,
+    },
 }
 
 
@@ -118,11 +147,9 @@ def make_config(phase: str, **overrides) -> TrainConfig:
 
 
 def parse_args() -> TrainConfig:
-    """Minimal CLI — only what you'd actually change between runs."""
-    from train.curriculum_config import PHASES
-
+    """Minimal CLI: only what you'd actually change between runs."""
     p = argparse.ArgumentParser(description="Train LLC curriculum phase")
-    p.add_argument("--phase", required=True, choices=list(PHASES))
+    p.add_argument("--phase", required=True, choices=list(PHASE_CHOICES))
     p.add_argument("--timesteps", type=int)
     p.add_argument("--resume", type=str)
     p.add_argument("--device", type=str)
@@ -134,10 +161,43 @@ def parse_args() -> TrainConfig:
     p.add_argument("--batch-size", type=int)
     p.add_argument("--n-steps", type=int)
     p.add_argument("--max-episode-steps", type=int)
+    p.add_argument("--gamma", type=float)
+    p.add_argument("--gae-lambda", type=float)
+    p.add_argument("--clip-range", type=float)
+    p.add_argument("--ent-coef", type=float)
+    p.add_argument("--vf-coef", type=float)
+    p.add_argument("--max-grad-norm", type=float)
+    p.add_argument("--replay-ratio", type=float)
+    p.add_argument("--replay-capacity", type=int)
+    p.add_argument("--replay-warmup-updates", type=int)
+    p.add_argument("--strict-replay-mix", dest="strict_replay_mix", action="store_true", default=None)
+    p.add_argument("--no-strict-replay-mix", dest="strict_replay_mix", action="store_false")
+    p.add_argument("--normalize-advantage-per-source", dest="normalize_advantage_per_source", action="store_true", default=None)
+    p.add_argument("--no-normalize-advantage-per-source", dest="normalize_advantage_per_source", action="store_false")
+    p.add_argument("--anchor-kl-coef", type=float)
+    p.add_argument("--anchor-update-interval", type=int)
+    p.add_argument("--anchor-pool-size", type=int)
+    p.add_argument("--bc-loss-coef", type=float)
+    p.add_argument("--bc-batch-size", type=int)
+    p.add_argument(
+        "--bc-demos-path",
+        type=str,
+        help="One or more NPZ demo files. Separate multiple paths with semicolons or commas.",
+    )
+    p.add_argument("--pcgrad", dest="pcgrad", action="store_true", default=None)
+    p.add_argument("--no-pcgrad", dest="pcgrad", action="store_false")
     p.add_argument("--plot-every", type=int)
     p.add_argument("--log-csv", action="store_true", default=None)
+    p.add_argument("--diag-report-every", type=int)
+    p.add_argument("--moving-avg", type=int)
     p.add_argument("--eval-every-steps", type=int)
     p.add_argument("--eval-episodes", type=int)
+    p.add_argument("--eval-stochastic", action="store_true", default=None)
+    p.add_argument("--eval-phases", type=str)
+    p.add_argument("--eval-include-previous", action="store_true", default=None)
+    p.add_argument("--no-eval-include-previous", dest="eval_include_previous", action="store_false")
+    p.add_argument("--amnesia-threshold", type=float)
+    p.add_argument("--retention-scores-path", type=str)
     p.add_argument("--death-penalty", type=float)
     p.add_argument("--no-terminate-on-death", action="store_true")
     p.add_argument("--move-mouse-to-goal", action="store_true", default=None)

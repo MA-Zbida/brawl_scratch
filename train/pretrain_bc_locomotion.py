@@ -24,7 +24,7 @@ from train.llc_stage_common import StageGoalEnv
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Behavioral cloning pretraining for curriculum PPO (all phases)")
-    p.add_argument("--phase", type=str, default="locomotion", choices=[*list(PHASES), "auto"])
+    p.add_argument("--phase", type=str, default="recovery_mastery", choices=[*list(PHASES), "auto"])
     p.add_argument("--demos", type=str, default="")
     p.add_argument(
         "--resume",
@@ -75,7 +75,7 @@ def _resolve_paths(args: argparse.Namespace) -> tuple[str, str]:
     output = args.output.strip() if args.output else ""
     phase_for_default_paths = str(args.phase).strip().lower()
     if phase_for_default_paths == "auto":
-        phase_for_default_paths = "locomotion"
+        phase_for_default_paths = "recovery_mastery"
 
     if not demos:
         demos = f"train/models/{phase_for_default_paths}_demos.npz"
@@ -203,7 +203,7 @@ def _load_dataset(path: str, expected_phase: str) -> tuple[np.ndarray, np.ndarra
 
     expected = str(expected_phase).strip().lower()
     if expected == "auto":
-        resolved_phase = file_phase if file_phase else "locomotion"
+        resolved_phase = file_phase if file_phase else "recovery_mastery"
     else:
         resolved_phase = str(expected_phase)
 

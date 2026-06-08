@@ -43,26 +43,44 @@ class GoalMouseTrackerWrapper(gym.Wrapper):
             return 1920, 1080
         return int(self._user32.GetSystemMetrics(0)), int(self._user32.GetSystemMetrics(1))
 
-    def _set_cursor_to_goal(self, goal_target) -> None:
-        if self._user32 is None or goal_target is None:
-            return
+    def _goal_xy_from_info(self, info) -> np.ndarray | None:
+        goal_target = None if info is None else info.get("goal_target")
+        if goal_target is None:
+            return None
         goal_target = np.asarray(goal_target, dtype=np.float32).reshape(-1)
         if goal_target.shape[0] < 2:
+            return None
+        names = list(info.get("stage_feature_names", [])) if isinstance(info, dict) else []
+        mask = np.asarray(info.get("goal_mask", np.zeros_like(goal_target)), dtype=np.float32).reshape(-1) if isinstance(info, dict) else np.zeros_like(goal_target)
+        if "player_x" in names and "player_y" in names:
+            x_idx = names.index("player_x")
+            y_idx = names.index("player_y")
+            if x_idx < goal_target.shape[0] and y_idx < goal_target.shape[0]:
+                if x_idx >= mask.shape[0] or y_idx >= mask.shape[0] or mask[x_idx] > 0.0 or mask[y_idx] > 0.0:
+                    return np.asarray([goal_target[x_idx], goal_target[y_idx]], dtype=np.float32)
+                return None
+        return goal_target[:2].astype(np.float32)
+
+    def _set_cursor_to_goal(self, info) -> None:
+        if self._user32 is None:
+            return
+        goal_xy = self._goal_xy_from_info(info)
+        if goal_xy is None:
             return
         w, h = self._screen_size()
-        x = int(np.clip(float(goal_target[0]), 0.0, 1.0) * max(1, w - 1))
-        y = int(np.clip(float(goal_target[1]), 0.0, 1.0) * max(1, h - 1))
+        x = int(np.clip(float(goal_xy[0]), 0.0, 1.0) * max(1, w - 1))
+        y = int(np.clip(float(goal_xy[1]), 0.0, 1.0) * max(1, h - 1))
         self._user32.SetCursorPos(x, y)
 
     def reset(self, *, seed=None, options=None):
         obs, info = self.env.reset(seed=seed, options=options)
-        self._set_cursor_to_goal(info.get("goal_target"))
+        self._set_cursor_to_goal(info)
         return obs, info
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
         if bool(info.get("goal_new_sampled", False)):
-            self._set_cursor_to_goal(info.get("goal_target"))
+            self._set_cursor_to_goal(info)
         return obs, reward, terminated, truncated, info
 
 
@@ -120,14 +138,24 @@ def main() -> None:
         print("[train_curriculum] Mouse goal tracking enabled.")
 
     eval_env_builder = None
+    eval_env_builder_for_phase = None
     if cfg.eval_every_steps > 0:
         eval_env_builder = lambda: _make_eval_env(cfg, spec)
+        eval_env_builder_for_phase = lambda phase: _make_eval_env(
+            cfg,
+            build_phase_spec(
+                phase=phase,
+                death_penalty=cfg.death_penalty,
+                terminate_on_death=cfg.terminate_on_death,
+            ),
+        )
 
     train_stage_model(
         args=cfg,
         make_env=lambda: _make_env(cfg, spec),
         stage_spec=spec,
         make_eval_env=eval_env_builder,
+        make_eval_env_for_phase=eval_env_builder_for_phase,
     )
 
 

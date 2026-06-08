@@ -20,7 +20,7 @@ from train.llc_stage_common import StageGoalEnv
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Collect expert demos for BC (all curriculum phases)")
-    p.add_argument("--phase", type=str, default="weapon_control", choices=list(PHASES))
+    p.add_argument("--phase", type=str, default="recovery_mastery", choices=list(PHASES))
     p.add_argument("--episodes", type=int, default=30)
     p.add_argument(
         "--max-collection-attempts",
@@ -46,8 +46,8 @@ def parse_args() -> argparse.Namespace:
         "--enforce-recovery-sequence",
         dest="enforce_recovery_sequence",
         action="store_true",
-        default=True,
-        help="For locomotion_recovery, only keep episodes that complete offstage->recovery sequence",
+        default=False,
+        help="Only keep episodes that complete a configured sequential recovery objective",
     )
     p.add_argument(
         "--no-enforce-recovery-sequence",
@@ -85,13 +85,13 @@ def read_action_from_keyboard(allowed_attack_values: set[int]) -> np.ndarray:
     return np.array([movement, jump, dodge, attack], dtype=np.int64)
 
 
-_DAMAGE_PHASES = frozenset({"damage_static_fist", "damage_static_weapon", "damage_dynamic", "damage_static"})
+_COMBAT_PHASES = frozenset({"combat_execution", "all_skills_llc"})
 
 _DEFAULT_MAX_STEPS = {
     # Locomotion / weapon: short episodes suffice.
     "default": 100,
-    # Damage phases need much longer episodes to match PPO training (1200).
-    "damage": 600,
+    # Combat phases need longer episodes to produce enough hit opportunities.
+    "combat": 600,
 }
 
 
@@ -104,7 +104,7 @@ def _build_env(args: argparse.Namespace) -> StageGoalEnv:
     # Demo collection should never inject random reset actions.
     spec = replace(spec, reset_perturb_steps=0)
 
-    is_damage = args.phase in _DAMAGE_PHASES
+    is_combat = args.phase in _COMBAT_PHASES
 
     # Keep BC collection aligned with PPO: current curriculum phases resample on
     # success or episode reset, but legacy timer-driven phases can still opt in.
@@ -117,8 +117,8 @@ def _build_env(args: argparse.Namespace) -> StageGoalEnv:
 
     # Auto-pick max_episode_steps when the user didn't explicitly set it.
     max_ep_steps = int(args.max_episode_steps)
-    if max_ep_steps == _DEFAULT_MAX_STEPS["default"] and is_damage:
-        max_ep_steps = _DEFAULT_MAX_STEPS["damage"]
+    if max_ep_steps == _DEFAULT_MAX_STEPS["default"] and is_combat:
+        max_ep_steps = _DEFAULT_MAX_STEPS["combat"]
 
     config = EnvConfig(
         terminate_on_stock_out=False,
@@ -147,9 +147,28 @@ def _screen_size_from_env(env: StageGoalEnv) -> tuple[int, int]:
     return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
 
 
-def _set_mouse_to_goal(env: StageGoalEnv, goal_target: np.ndarray) -> None:
+def _set_mouse_to_goal(env: StageGoalEnv, goal_target: np.ndarray, goal_mask: np.ndarray | None = None) -> None:
     if goal_target is None or goal_target.shape[0] < 2:
         return
+
+    goal_xy = np.asarray(goal_target[:2], dtype=np.float32)
+    feature_names = list(env.stage_spec.feature_names or [])
+    if "player_x" in feature_names and "player_y" in feature_names:
+        x_idx = feature_names.index("player_x")
+        y_idx = feature_names.index("player_y")
+        mask = (
+            np.asarray(goal_mask, dtype=np.float32).reshape(-1)
+            if goal_mask is not None
+            else np.asarray(env.stage_spec.mask, dtype=np.float32).reshape(-1)
+        )
+        if (
+            x_idx < goal_target.shape[0]
+            and y_idx < goal_target.shape[0]
+            and (x_idx >= mask.shape[0] or y_idx >= mask.shape[0] or mask[x_idx] > 0.0 or mask[y_idx] > 0.0)
+        ):
+            goal_xy = np.asarray([goal_target[x_idx], goal_target[y_idx]], dtype=np.float32)
+        else:
+            return
 
     user32 = ctypes.windll.user32
     try:
@@ -158,9 +177,33 @@ def _set_mouse_to_goal(env: StageGoalEnv, goal_target: np.ndarray) -> None:
         pass
 
     w, h = _screen_size_from_env(env)
-    x = int(np.clip(float(goal_target[0]), 0.0, 1.0) * max(1, w - 1))
-    y = int(np.clip(float(goal_target[1]), 0.0, 1.0) * max(1, h - 1))
+    x = int(np.clip(float(goal_xy[0]), 0.0, 1.0) * max(1, w - 1))
+    y = int(np.clip(float(goal_xy[1]), 0.0, 1.0) * max(1, h - 1))
     user32.SetCursorPos(x, y)
+
+
+def _describe_goal(env: StageGoalEnv, goal_target: np.ndarray, goal_mask: np.ndarray | None = None) -> str:
+    target = np.asarray(goal_target, dtype=np.float32).reshape(-1)
+    mask = (
+        np.asarray(goal_mask, dtype=np.float32).reshape(-1)
+        if goal_mask is not None
+        else np.asarray(env.stage_spec.mask, dtype=np.float32).reshape(-1)
+    )
+    names = list(env.stage_spec.feature_names or [])
+    active: list[str] = []
+    for idx, value in enumerate(target.tolist()):
+        weight = float(mask[idx]) if idx < mask.shape[0] else 0.0
+        if weight <= 0.0:
+            continue
+        name = names[idx] if idx < len(names) else f"g{idx}"
+        active.append(f"{name}={float(value):.3f}")
+        if len(active) >= 4:
+            break
+    if active:
+        return "goal(" + ", ".join(active) + ")"
+    if target.shape[0] >= 2:
+        return f"goal0/1=({float(target[0]):.3f}, {float(target[1]):.3f})"
+    return "goal(n/a)"
 
 
 def _force_drop_weapon_num5_key(drop_controller: PyDirectInputController | None = None) -> bool:
@@ -226,9 +269,9 @@ def main() -> None:
     out_path = _resolve_output_path(args)
     hit_damage_threshold = float(max(0.0, args.hit_damage_threshold))
     phase_lower = str(args.phase).strip().lower()
-    is_damage = phase_lower in _DAMAGE_PHASES
-    phase_requires_weapon = phase_lower in ("damage_static_weapon", "damage_dynamic")
-    enforce_recovery_sequence = bool(args.enforce_recovery_sequence and phase_lower == "locomotion_recovery")
+    is_damage = phase_lower in _COMBAT_PHASES
+    phase_requires_weapon = False
+    enforce_recovery_sequence = bool(args.enforce_recovery_sequence and phase_lower == "recovery_mastery")
 
     target_episodes = max(1, int(args.episodes))
     max_collection_attempts = int(args.max_collection_attempts)
@@ -239,7 +282,7 @@ def main() -> None:
             # Only success episodes are accepted; budget for some max-step timeouts.
             max_collection_attempts = max(target_episodes, target_episodes * 3)
 
-    # Default: never end on first hit — BC episodes should mirror PPO episodes,
+    # Default: never end on first hit; BC episodes should mirror PPO episodes,
     # which continue after hits until goal progress / max steps.
     if args.end_episode_on_first_hit is None:
         end_episode_on_first_hit = False
@@ -277,7 +320,7 @@ def main() -> None:
     active_attack_keys = [attack_keys_map[v] for v in sorted(allowed_attack_values) if v in attack_keys_map]
 
     print("=" * 68)
-    print(f"BC DEMO COLLECTION — {args.phase.upper()}")
+    print(f"BC DEMO COLLECTION - {args.phase.upper()}")
     print("Action encoding target: MultiDiscrete([4,2,2,4])")
     print("Action source: keyboard -> MultiDiscrete([4,2,2,4])")
     print("Input mode: manual only (env key injection disabled)")
@@ -289,7 +332,7 @@ def main() -> None:
     print(f"Collection attempt budget: {max_collection_attempts}")
     eff_max_steps = int(args.max_episode_steps)
     if eff_max_steps == _DEFAULT_MAX_STEPS["default"] and is_damage:
-        eff_max_steps = _DEFAULT_MAX_STEPS["damage"]
+        eff_max_steps = _DEFAULT_MAX_STEPS["combat"]
     print(f"Max episode steps: {eff_max_steps}")
     if spec.resample_goal_on_timer:
         print(f"Goal resampling: every {spec.min_goal_duration}-{spec.max_goal_duration} steps")
@@ -361,7 +404,7 @@ def main() -> None:
             goal_target = np.asarray(info.get("goal_target", np.zeros(2, dtype=np.float32)), dtype=np.float32)
             goal_mask = np.asarray(info.get("goal_mask", np.zeros_like(goal_target)), dtype=np.float32)
             if mouse_guidance_enabled:
-                _set_mouse_to_goal(env, goal_target)
+                _set_mouse_to_goal(env, goal_target, goal_mask)
 
             while not done:
                 action = read_action_from_keyboard(allowed_attack_values=allowed_attack_values)
@@ -412,7 +455,7 @@ def main() -> None:
                     goal_target = np.asarray(info.get("goal_target", goal_target), dtype=np.float32)
                     goal_mask = np.asarray(info.get("goal_mask", goal_mask), dtype=np.float32)
                     if mouse_guidance_enabled:
-                        _set_mouse_to_goal(env, goal_target)
+                        _set_mouse_to_goal(env, goal_target, goal_mask)
 
                 obs = next_obs
                 ep_steps += 1
@@ -432,7 +475,7 @@ def main() -> None:
                         print(
                             f"steps={step_total} accepted={episodes_collected}/{target_episodes} "
                             f"attempt={attempt_id}/{max_collection_attempts} ep_steps={ep_steps} "
-                            f"goal_xy=({float(goal_target[0]):.3f}, {float(goal_target[1]):.3f})"
+                            f"{_describe_goal(env, goal_target, goal_mask)}"
                         )
 
                 if ep_steps >= int(args.max_episode_steps):

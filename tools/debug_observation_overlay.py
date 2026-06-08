@@ -9,8 +9,8 @@ This script does not control your character. You play manually in-game; the scri
 only reads keyboard state so action-dependent observation features stay consistent.
 
 Usage:
-    python tools/debug_observation_overlay.py --phase damage_static_fist
-    python tools/debug_observation_overlay.py --phase damage_dynamic --show --max-steps 4000
+    python tools/debug_observation_overlay.py --phase movement_fluency --show --max-steps 1000
+    python tools/debug_observation_overlay.py --phase combat_execution --show --max-steps 4000
 """
 
 from __future__ import annotations

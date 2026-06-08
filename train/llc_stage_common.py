@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,10 +18,20 @@ from env import BrawlDeepEnv, EnvConfig
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goals import GOAL_FEATURE_NAMES, GOAL_STATE_SPEC_NAMES, GOAL_TARGET_DIM, extract_goal_features
 from train.curriculum_goals import GOAL_TYPE_INDEX, goal_type_onehot, normalize_goal_type
+from train.retention import (
+    load_best_scores,
+    parse_phase_list,
+    previous_phases,
+    retention_and_amnesia,
+    save_best_scores,
+    skill_score_for_phase,
+    update_best_scores,
+)
 
 
 ActionAdapter = Callable[[np.ndarray], np.ndarray]
 TargetSampler = Callable[[np.ndarray], np.ndarray]
+GoalFamilySampler = Callable[[np.ndarray], tuple[np.ndarray, np.ndarray, str]]
 GoalExtractor = Callable[[np.ndarray], np.ndarray]
 
 
@@ -59,6 +70,7 @@ class StageSpec:
     mask: np.ndarray          # goal_dim, values in [0, 1]
     target_sampler: TargetSampler  # must return a goal_dim array in [0, 1]
     goal_type: str = "spacing"
+    goal_family_sampler: Optional[GoalFamilySampler] = None
     feature_names: Optional[list[str]] = None  # logging + goal feature order
     goal_extractor: Optional[GoalExtractor] = None
     min_goal_duration: int = 100
@@ -148,9 +160,10 @@ class StageGoalEnv(gym.Wrapper):
         self.stage_spec = spec
         self.action_adapter = action_adapter
         self.goal_extractor = spec.goal_extractor
-        self.goal_type = normalize_goal_type(spec.goal_type)
+        self.goal_type = "spacing"
         self.goal_type_index = int(GOAL_TYPE_INDEX[self.goal_type])
         self._goal_type_onehot = goal_type_onehot(self.goal_type)
+        self._set_goal_type(spec.goal_type)
 
         if spec.feature_names is not None:
             self.goal_dim = int(len(spec.feature_names))
@@ -162,6 +175,7 @@ class StageGoalEnv(gym.Wrapper):
 
         self.mask = np.asarray(spec.mask, dtype=np.float32).reshape(self.goal_dim)
         self.mask = np.clip(self.mask, 0.0, 1.0)
+        self._sampled_mask = self.mask.copy()
         self._active_mask = self.mask.copy()
         self._feature_index = {name: idx for idx, name in enumerate(self.feature_names)}
 
@@ -199,6 +213,11 @@ class StageGoalEnv(gym.Wrapper):
             if not allowed:
                 allowed = {0}
             self._allowed_attack_actions = allowed
+
+    def _set_goal_type(self, goal_type: str) -> None:
+        self.goal_type = normalize_goal_type(goal_type)
+        self.goal_type_index = int(GOAL_TYPE_INDEX[self.goal_type])
+        self._goal_type_onehot = goal_type_onehot(self.goal_type)
 
     def _sequential_enabled(self) -> bool:
         return bool(self.stage_spec.sequential_goal_enabled and self.stage_spec.sequential_target_sampler is not None)
@@ -241,7 +260,7 @@ class StageGoalEnv(gym.Wrapper):
         return float(feats[idx])
 
     def _effective_mask_for_step(self, feats: np.ndarray) -> np.ndarray:
-        mask = self.mask.copy()
+        mask = self._sampled_mask.copy()
         if not self.stage_spec.conditional_weapon_guidance_when_unarmed:
             return mask
 
@@ -278,7 +297,7 @@ class StageGoalEnv(gym.Wrapper):
         except Exception:
             return
 
-        # Weapon-control locomotion retargeting: move toward weapon while unarmed.
+        # Weapon-acquisition retargeting: move toward weapon while unarmed.
         if self.stage_spec.player_xy_to_weapon_goal_when_unarmed:
             try:
                 has_weapon = float(np.clip(StateSpec.get(o, "player_has_weapon"), 0.0, 1.0)) > 0.5
@@ -296,7 +315,7 @@ class StageGoalEnv(gym.Wrapper):
             except Exception:
                 pass
 
-        # Damage-control locomotion retargeting: move toward opponent position.
+        # Combat retargeting: move toward opponent position.
         if self.stage_spec.player_xy_to_opponent_goal:
             try:
                 in_range = float(np.clip(StateSpec.get(o, "in_strike_range"), 0.0, 1.0)) > 0.5
@@ -341,8 +360,16 @@ class StageGoalEnv(gym.Wrapper):
         return int(key_to_action.get(str(key or "").strip().lower(), 0))
 
     def _sample_goal(self, obs: np.ndarray, sampler: Optional[TargetSampler] = None) -> None:
-        sampler_fn = self.stage_spec.target_sampler if sampler is None else sampler
-        self._goal_target = np.asarray(sampler_fn(obs), dtype=np.float32).reshape(-1)
+        if sampler is None and self.stage_spec.goal_family_sampler is not None:
+            target, mask, goal_type = self.stage_spec.goal_family_sampler(obs)
+            self._goal_target = np.asarray(target, dtype=np.float32).reshape(-1)
+            self._sampled_mask = np.clip(np.asarray(mask, dtype=np.float32).reshape(self.goal_dim), 0.0, 1.0)
+            self._set_goal_type(goal_type)
+        else:
+            sampler_fn = self.stage_spec.target_sampler if sampler is None else sampler
+            self._goal_target = np.asarray(sampler_fn(obs), dtype=np.float32).reshape(-1)
+            self._sampled_mask = self.mask.copy()
+            self._set_goal_type(self.stage_spec.goal_type)
         if self._goal_target.shape[0] != self.goal_dim:
             raise ValueError(
                 f"Target sampler returned dim={self._goal_target.shape[0]}, expected {self.goal_dim}"
@@ -783,7 +810,15 @@ class StageGoalEnv(gym.Wrapper):
         info["stage_feature_names"] = list(self.feature_names)
         info["goal_new_sampled"] = goal_new_sampled
         info["goal_active"] = float(1.0 if self._goal_active else 0.0)
-        info["raw_goal_feats"] = curr_feats  # already computed above — no second call
+        info["raw_goal_feats"] = curr_feats  # already computed above - no second call
+        info["active_goal_feature_errors"] = (
+            np.abs(curr_feats - self._goal_target) * self._active_mask
+        ).astype(np.float32)
+        info["stage_action"] = action_arr.astype(np.int64).copy()
+        info["stage_action_movement"] = int(action_arr[0]) if action_arr.shape[0] > 0 else 3
+        info["stage_action_jump"] = int(action_arr[1]) if action_arr.shape[0] > 1 else 0
+        info["stage_action_dodge"] = int(action_arr[2]) if action_arr.shape[0] > 2 else 0
+        info["stage_action_attack"] = int(action_arr[3]) if action_arr.shape[0] > 3 else 0
         info["self_stock_lost_step_raw"] = raw_self_stock_lost
         info["self_stock_lost_step_effective"] = effective_self_stock_lost
         info["death_event"] = float(1.0 if effective_self_stock_lost > 0.0 else 0.0)
@@ -848,8 +883,9 @@ class StageDashboardCallback(BaseCallback):
         self.episode_csv = self.save_dir / f"{self.model_name}_episodes.csv"
         self.plot_path = self.save_dir / f"{self.model_name}_dashboard.png"
 
-        # On-policy HER buffers — accumulated each rollout, cleared in _on_rollout_end.
+        # On-policy HER buffers; accumulated each rollout, cleared in _on_rollout_end.
         self._her_raw_feats: list[np.ndarray] = []  # achieved goal feats per step (stage goal_dim)
+        self._her_masks: list[np.ndarray] = []      # active mask per step (dynamic in all_skills_llc)
         self._her_new_goal: list[bool] = []          # True when goal was (re)sampled
         self._her_done: list[bool] = []              # True when episode ended at this step
         self._her_orig_rewards: list[float] = []     # original LLC reward for 50% blend
@@ -864,6 +900,9 @@ class StageDashboardCallback(BaseCallback):
         self._step_count = 0
         self.stage_name: str = "unknown"
         self.stage_features: list[str] = []
+        self.step_idle: list[float] = []
+        self.step_whiff: list[float] = []
+        self.step_hit: list[float] = []
 
         self.ep_return: list[float] = []
         self.ep_length: list[int] = []
@@ -872,6 +911,12 @@ class StageDashboardCallback(BaseCallback):
         self.ep_success: list[float] = []
         self.ep_op_delta_sum: list[float] = []
         self.ep_self_delta_sum: list[float] = []
+        self.ep_time_to_success: list[int] = []
+        self.ep_damage_trade: list[float] = []
+        self.ep_action_entropy: list[float] = []
+        self.ep_idle_rate: list[float] = []
+        self.ep_whiff_rate: list[float] = []
+        self.ep_attack_precision: list[float] = []
 
         self._cur_ep_reward = 0.0
         self._cur_ep_len = 0
@@ -880,6 +925,12 @@ class StageDashboardCallback(BaseCallback):
         self._cur_ep_had_success = False
         self._cur_ep_op_delta_sum = 0.0
         self._cur_ep_self_delta_sum = 0.0
+        self._cur_ep_time_to_success: Optional[int] = None
+        self._cur_ep_action_counts = np.zeros((4, 4), dtype=np.int64)
+        self._cur_ep_idle_steps = 0
+        self._cur_ep_attack_steps = 0
+        self._cur_ep_hit_steps = 0
+        self._cur_ep_whiff_steps = 0
 
         self._step_writer: Optional[csv.DictWriter] = None
         self._episode_writer: Optional[csv.DictWriter] = None
@@ -907,6 +958,24 @@ class StageDashboardCallback(BaseCallback):
                 "goal_success",
                 "op_delta_damage",
                 "self_delta_damage",
+                "damage_trade",
+                "movement",
+                "jump",
+                "dodge",
+                "attack",
+                "idle",
+                "hit",
+                "whiff",
+                "death_event",
+                "weapon_drop_event",
+                "active_feature_errors",
+                "raw_goal_feats",
+                "goal_target",
+                "goal_mask",
+                "combat_bonus_hit_event",
+                "combat_bonus_damage_dealt",
+                "combat_penalty_attack_whiff",
+                "combat_penalty_self_damage",
                 "stage_name",
                 "goal_type",
                 "goal_type_index",
@@ -925,6 +994,12 @@ class StageDashboardCallback(BaseCallback):
                 "episode_success",
                 "op_delta_damage_sum",
                 "self_delta_damage_sum",
+                "damage_trade",
+                "time_to_success",
+                "action_entropy",
+                "idle_rate",
+                "whiff_rate",
+                "attack_precision",
             ],
         )
         self._episode_writer.writeheader()
@@ -949,6 +1024,38 @@ class StageDashboardCallback(BaseCallback):
         if denom <= 1e-8:
             return 0.0
         return float(np.dot(x, y) / denom)
+
+    @staticmethod
+    def _json_array(value: Any, precision: int = 4) -> str:
+        arr = np.asarray(value, dtype=np.float32).reshape(-1)
+        rounded = [round(float(v), precision) for v in arr.tolist()]
+        return json.dumps(rounded, separators=(",", ":"))
+
+    @staticmethod
+    def _action_entropy(counts: np.ndarray) -> float:
+        flat = np.asarray(counts, dtype=np.float64).reshape(-1)
+        total = float(flat.sum())
+        if total <= 0.0:
+            return 0.0
+        probs = flat / total
+        probs = probs[probs > 0.0]
+        denom = np.log(max(2, flat.size))
+        return float(-np.sum(probs * np.log(probs)) / denom)
+
+    def _reset_episode_accumulators(self) -> None:
+        self._cur_ep_reward = 0.0
+        self._cur_ep_len = 0
+        self._cur_ep_goal_error_sum = 0.0
+        self._cur_ep_success_sum = 0.0
+        self._cur_ep_had_success = False
+        self._cur_ep_op_delta_sum = 0.0
+        self._cur_ep_self_delta_sum = 0.0
+        self._cur_ep_time_to_success = None
+        self._cur_ep_action_counts.fill(0)
+        self._cur_ep_idle_steps = 0
+        self._cur_ep_attack_steps = 0
+        self._cur_ep_hit_steps = 0
+        self._cur_ep_whiff_steps = 0
 
     def _plot_dashboard(self) -> None:
         if not self.enable_plot:
@@ -1090,6 +1197,17 @@ class StageDashboardCallback(BaseCallback):
             goal_success = float(info.get("goal_success", 0.0))
             op_delta = float(info.get("op_delta_damage", 0.0))
             self_delta = float(info.get("self_delta_damage", 0.0))
+            damage_trade = float(op_delta - self_delta)
+            stage_action = np.asarray(info.get("stage_action", [3, 0, 0, 0]), dtype=np.int64).reshape(-1)
+            movement = int(stage_action[0]) if stage_action.shape[0] > 0 else 3
+            jump = int(stage_action[1]) if stage_action.shape[0] > 1 else 0
+            dodge = int(stage_action[2]) if stage_action.shape[0] > 2 else 0
+            attack = int(stage_action[3]) if stage_action.shape[0] > 3 else 0
+            idle = 1.0 if movement == 3 and jump == 0 and dodge == 0 and attack == 0 else 0.0
+            hit = 1.0 if op_delta > 1e-6 else 0.0
+            whiff = 1.0 if attack != 0 and hit <= 0.0 else 0.0
+            death_event = float(info.get("death_event", 0.0))
+            weapon_drop_event = float(info.get("agent_weapon_drop_event", 0.0))
 
             self.stage_name = str(info.get("stage_name", self.stage_name))
             stage_features = info.get("stage_feature_names")
@@ -1106,6 +1224,9 @@ class StageDashboardCallback(BaseCallback):
                 self.step_goal_success.append(goal_success)
                 self.step_op_delta.append(op_delta)
                 self.step_self_delta.append(self_delta)
+                self.step_idle.append(idle)
+                self.step_hit.append(hit)
+                self.step_whiff.append(whiff)
 
             if self._step_writer is not None:
                 self._step_writer.writerow(
@@ -1117,6 +1238,24 @@ class StageDashboardCallback(BaseCallback):
                         "goal_success": goal_success,
                         "op_delta_damage": op_delta,
                         "self_delta_damage": self_delta,
+                        "damage_trade": damage_trade,
+                        "movement": movement,
+                        "jump": jump,
+                        "dodge": dodge,
+                        "attack": attack,
+                        "idle": idle,
+                        "hit": hit,
+                        "whiff": whiff,
+                        "death_event": death_event,
+                        "weapon_drop_event": weapon_drop_event,
+                        "active_feature_errors": self._json_array(info.get("active_goal_feature_errors", [])),
+                        "raw_goal_feats": self._json_array(info.get("raw_goal_feats", [])),
+                        "goal_target": self._json_array(info.get("goal_target", [])),
+                        "goal_mask": self._json_array(info.get("goal_mask", [])),
+                        "combat_bonus_hit_event": float(info.get("combat_bonus_hit_event", 0.0)),
+                        "combat_bonus_damage_dealt": float(info.get("combat_bonus_damage_dealt", 0.0)),
+                        "combat_penalty_attack_whiff": float(info.get("combat_penalty_attack_whiff", 0.0)),
+                        "combat_penalty_self_damage": float(info.get("combat_penalty_self_damage", 0.0)),
                         "stage_name": self.stage_name,
                         "goal_type": str(info.get("goal_type", "unknown")),
                         "goal_type_index": int(info.get("goal_type_index", -1)),
@@ -1129,8 +1268,18 @@ class StageDashboardCallback(BaseCallback):
             self._cur_ep_success_sum += goal_success
             if goal_success > 0.5 or float(info.get("terminal_success", 0.0)) > 0.5:
                 self._cur_ep_had_success = True
+                if self._cur_ep_time_to_success is None:
+                    self._cur_ep_time_to_success = self._cur_ep_len
             self._cur_ep_op_delta_sum += op_delta
             self._cur_ep_self_delta_sum += self_delta
+            self._cur_ep_action_counts[0, int(np.clip(movement, 0, 3))] += 1
+            self._cur_ep_action_counts[1, int(np.clip(jump, 0, 3))] += 1
+            self._cur_ep_action_counts[2, int(np.clip(dodge, 0, 3))] += 1
+            self._cur_ep_action_counts[3, int(np.clip(attack, 0, 3))] += 1
+            self._cur_ep_idle_steps += int(idle > 0.5)
+            self._cur_ep_attack_steps += int(attack != 0)
+            self._cur_ep_hit_steps += int(hit > 0.5)
+            self._cur_ep_whiff_steps += int(whiff > 0.5)
 
             done = bool(dones[i]) if i < len(dones) else False
 
@@ -1140,6 +1289,12 @@ class StageDashboardCallback(BaseCallback):
                 np.asarray(_raw_feats, dtype=np.float32).copy()
                 if _raw_feats is not None
                 else np.zeros(int(len(self.stage_spec.mask)) if self.stage_spec is not None else GOAL_TARGET_DIM, dtype=np.float32)
+            )
+            _goal_mask = info.get("goal_mask")
+            self._her_masks.append(
+                np.asarray(_goal_mask, dtype=np.float32).copy()
+                if _goal_mask is not None
+                else np.asarray(self.stage_spec.mask if self.stage_spec is not None else np.ones(GOAL_TARGET_DIM), dtype=np.float32)
             )
             self._her_new_goal.append(bool(info.get("goal_new_sampled", False)))
             self._her_done.append(done)
@@ -1153,6 +1308,12 @@ class StageDashboardCallback(BaseCallback):
                 # Keep the historical step-wise metric but ensure terminal success
                 # is counted as full success at episode level.
                 success_ratio = max(self._cur_ep_success_sum / float(ep_len), episode_success)
+                damage_trade_sum = float(self._cur_ep_op_delta_sum - self._cur_ep_self_delta_sum)
+                time_to_success = int(self._cur_ep_time_to_success or 0)
+                action_entropy = self._action_entropy(self._cur_ep_action_counts)
+                idle_rate = float(self._cur_ep_idle_steps / float(ep_len))
+                whiff_rate = float(self._cur_ep_whiff_steps / float(max(1, self._cur_ep_attack_steps)))
+                attack_precision = float(self._cur_ep_hit_steps / float(max(1, self._cur_ep_attack_steps)))
 
                 self.ep_return.append(float(self._cur_ep_reward))
                 self.ep_length.append(int(self._cur_ep_len))
@@ -1161,6 +1322,12 @@ class StageDashboardCallback(BaseCallback):
                 self.ep_success.append(float(episode_success))
                 self.ep_op_delta_sum.append(float(self._cur_ep_op_delta_sum))
                 self.ep_self_delta_sum.append(float(self._cur_ep_self_delta_sum))
+                self.ep_time_to_success.append(time_to_success)
+                self.ep_damage_trade.append(damage_trade_sum)
+                self.ep_action_entropy.append(action_entropy)
+                self.ep_idle_rate.append(idle_rate)
+                self.ep_whiff_rate.append(whiff_rate)
+                self.ep_attack_precision.append(attack_precision)
 
                 if self._episode_writer is not None:
                     self._episode_writer.writerow(
@@ -1173,16 +1340,16 @@ class StageDashboardCallback(BaseCallback):
                             "episode_success": episode_success,
                             "op_delta_damage_sum": self._cur_ep_op_delta_sum,
                             "self_delta_damage_sum": self._cur_ep_self_delta_sum,
+                            "damage_trade": damage_trade_sum,
+                            "time_to_success": time_to_success,
+                            "action_entropy": action_entropy,
+                            "idle_rate": idle_rate,
+                            "whiff_rate": whiff_rate,
+                            "attack_precision": attack_precision,
                         }
                     )
 
-                self._cur_ep_reward = 0.0
-                self._cur_ep_len = 0
-                self._cur_ep_goal_error_sum = 0.0
-                self._cur_ep_success_sum = 0.0
-                self._cur_ep_had_success = False
-                self._cur_ep_op_delta_sum = 0.0
-                self._cur_ep_self_delta_sum = 0.0
+                self._reset_episode_accumulators()
 
                 if self.enable_plot and ep_idx % self.plot_every_episodes == 0:
                     self._plot_dashboard()
@@ -1204,6 +1371,7 @@ class StageDashboardCallback(BaseCallback):
         n = len(self._her_raw_feats)
         if spec is None or n == 0:
             self._her_raw_feats.clear()
+            self._her_masks.clear()
             self._her_new_goal.clear()
             self._her_done.clear()
             self._her_orig_rewards.clear()
@@ -1212,9 +1380,12 @@ class StageDashboardCallback(BaseCallback):
         model_obj = cast(Any, self.model)
         buffer = getattr(model_obj, "rollout_buffer", None)
         if buffer is None:
+            self._her_raw_feats.clear()
+            self._her_masks.clear()
+            self._her_new_goal.clear()
+            self._her_done.clear()
+            self._her_orig_rewards.clear()
             return
-
-        mask = np.asarray(spec.mask, dtype=np.float32)
 
         # Walk steps to identify goal-epoch boundaries.
         # A new epoch starts when: t==0, previous step was done, or goal was resampled.
@@ -1222,13 +1393,14 @@ class StageDashboardCallback(BaseCallback):
         for t in range(n):
             is_new_epoch = (t == 0) or self._her_done[t - 1] or self._her_new_goal[t]
             if is_new_epoch and t > epoch_start:
-                self._her_relabel_epoch(buffer, spec, mask, epoch_start, t)
+                self._her_relabel_epoch(buffer, spec, epoch_start, t)
                 epoch_start = t
         # Final epoch
         if epoch_start < n:
-            self._her_relabel_epoch(buffer, spec, mask, epoch_start, n)
+            self._her_relabel_epoch(buffer, spec, epoch_start, n)
 
         self._her_raw_feats.clear()
+        self._her_masks.clear()
         self._her_new_goal.clear()
         self._her_done.clear()
         self._her_orig_rewards.clear()
@@ -1237,7 +1409,6 @@ class StageDashboardCallback(BaseCallback):
         self,
         buffer,
         spec: StageSpec,
-        mask: np.ndarray,
         t_start: int,
         t_end: int,
     ) -> None:
@@ -1255,6 +1426,7 @@ class StageDashboardCallback(BaseCallback):
         prev_her_error: Optional[float] = None
         for t in range(t_start, t_end):
             feats = self._her_raw_feats[t]
+            mask = np.asarray(self._her_masks[t], dtype=np.float32)
             curr_her_error = float(np.sum(mask * np.abs(feats - achieved)))
 
             her_progress = 0.0 if prev_her_error is None else (prev_her_error - curr_her_error)
@@ -1344,9 +1516,9 @@ class DiagnosticCallback(BaseCallback):
 
             print(
                 f"[Diag @{self.num_timesteps}] "
-                f"reward: {r.mean():.4f}±{r.std():.4f} "
+                f"reward: {r.mean():.4f}+/-{r.std():.4f} "
                 f"[{r.min():.3f}, {r.max():.3f}] | "
-                f"error: {e.mean():.4f}±{e.std():.4f} | "
+                f"error: {e.mean():.4f}+/-{e.std():.4f} | "
                 f"success: {s.mean():.3f} | "
                 f"{act_str} | {norm_str}"
             )
@@ -1390,20 +1562,30 @@ class PeriodicEvalCallback(BaseCallback):
         seed: int = 42,
         save_dir: Optional[Path] = None,
         model_name: str = "model",
+        current_phase: str = "",
+        eval_phases: Optional[Sequence[str]] = None,
+        make_eval_env_for_phase: Optional[Callable[[str], gym.Env]] = None,
+        amnesia_threshold: float = 0.15,
+        retention_scores_path: Optional[Path] = None,
         verbose: int = 0,
     ):
         super().__init__(verbose)
         self.make_eval_env = make_eval_env
+        self.make_eval_env_for_phase = make_eval_env_for_phase
         self.eval_freq_steps = max(1, int(eval_freq_steps))
         self.eval_episodes = max(1, int(eval_episodes))
         self.deterministic = bool(deterministic)
         self.seed = int(seed)
         self.save_dir = save_dir
         self.model_name = str(model_name)
+        self.current_phase = str(current_phase or model_name).strip().lower()
+        self.eval_phases = list(eval_phases or [self.current_phase])
+        self.amnesia_threshold = float(max(0.0, amnesia_threshold))
 
         self._next_eval_step = self.eval_freq_steps
         self._eval_index = 0
         self._eval_env: Optional[gym.Env] = None
+        self._eval_envs: dict[str, gym.Env] = {}
 
         self.best_mean_reward = float("-inf")
         self.best_model_path = (
@@ -1419,6 +1601,13 @@ class PeriodicEvalCallback(BaseCallback):
         )
         self._eval_fh = None
         self._eval_writer: Optional[csv.DictWriter] = None
+        if retention_scores_path is not None:
+            self.retention_path = Path(retention_scores_path)
+        elif self.save_dir is not None:
+            self.retention_path = self.save_dir / "llc_retention_best.json"
+        else:
+            self.retention_path = None
+        self._best_scores: dict[str, float] = {}
 
     @staticmethod
     def _resolve_outcome(self_stocks: float, op_stocks: float, truncated: bool) -> str:
@@ -1458,9 +1647,22 @@ class PeriodicEvalCallback(BaseCallback):
         return base if isinstance(base, BrawlDeepEnv) else None
 
     def _on_training_start(self) -> None:
-        self._eval_env = self.make_eval_env()
+        self._eval_envs = {}
+        for phase in self.eval_phases:
+            phase_key = str(phase).strip().lower()
+            if not phase_key:
+                continue
+            if self.make_eval_env_for_phase is not None:
+                self._eval_envs[phase_key] = self.make_eval_env_for_phase(phase_key)
+            else:
+                self._eval_envs[phase_key] = self.make_eval_env()
+        if not self._eval_envs:
+            self._eval_envs[self.current_phase] = self.make_eval_env()
+        self._eval_env = self._eval_envs.get(self.current_phase) or next(iter(self._eval_envs.values()))
         if self.save_dir is not None:
             self.save_dir.mkdir(parents=True, exist_ok=True)
+        if self.retention_path is not None:
+            self._best_scores = load_best_scores(self.retention_path)
 
         if self.eval_csv_path is None:
             return
@@ -1471,10 +1673,25 @@ class PeriodicEvalCallback(BaseCallback):
             fieldnames=[
                 "eval_index",
                 "train_steps",
+                "phase",
                 "episodes",
                 "mean_reward",
                 "std_reward",
                 "mean_steps",
+                "mean_goal_error",
+                "mean_goal_success",
+                "episode_success_rate",
+                "hit_rate",
+                "whiff_rate",
+                "idle_rate",
+                "attack_precision",
+                "weapon_pickup_rate",
+                "mean_damage_trade",
+                "skill_score",
+                "best_skill_score",
+                "retention",
+                "amnesia",
+                "amnesia_gate_pass",
                 "mean_op_damage",
                 "mean_self_damage",
                 "mean_self_stocks",
@@ -1488,17 +1705,21 @@ class PeriodicEvalCallback(BaseCallback):
         )
         self._eval_writer.writeheader()
 
-    def _run_eval(self) -> dict[str, float | int]:
-        if self._eval_env is None:
-            raise RuntimeError("PeriodicEvalCallback evaluation env is not initialized")
-
-        env = self._eval_env
+    def _run_eval(self, phase: str, env: gym.Env) -> dict[str, float | int | str]:
         rewards: list[float] = []
         lengths: list[int] = []
         self_stocks_list: list[float] = []
         op_stocks_list: list[float] = []
         op_dmg_totals: list[float] = []
         self_dmg_totals: list[float] = []
+        goal_error_means: list[float] = []
+        goal_success_means: list[float] = []
+        episode_successes: list[float] = []
+        hit_rates: list[float] = []
+        whiff_rates: list[float] = []
+        idle_rates: list[float] = []
+        attack_precisions: list[float] = []
+        weapon_pickups: list[float] = []
         outcomes: list[str] = []
 
         for ep in range(self.eval_episodes):
@@ -1510,6 +1731,15 @@ class PeriodicEvalCallback(BaseCallback):
             ep_len = 0
             ep_op_dmg = 0.0
             ep_self_dmg = 0.0
+            ep_goal_error_sum = 0.0
+            ep_goal_success_sum = 0.0
+            ep_had_success = False
+            ep_attack_steps = 0
+            ep_hit_steps = 0
+            ep_whiff_steps = 0
+            ep_idle_steps = 0
+            ep_weapon_pickup = False
+            prev_has_weapon = False
 
             while not (terminated or truncated):
                 action, _ = self.model.predict(obs, deterministic=self.deterministic)
@@ -1517,8 +1747,32 @@ class PeriodicEvalCallback(BaseCallback):
                 obs, reward, terminated, truncated, info = env.step(env_action)
                 ep_reward += float(reward)
                 ep_len += 1
-                ep_op_dmg += float(info.get("op_delta_damage", 0.0))
-                ep_self_dmg += float(info.get("self_delta_damage", 0.0))
+                op_delta = float(info.get("op_delta_damage", 0.0))
+                self_delta = float(info.get("self_delta_damage", 0.0))
+                ep_op_dmg += op_delta
+                ep_self_dmg += self_delta
+                ep_goal_error_sum += float(info.get("goal_error", 0.0))
+                goal_success = float(info.get("goal_success", 0.0))
+                ep_goal_success_sum += goal_success
+                ep_had_success = bool(ep_had_success or goal_success > 0.5 or float(info.get("terminal_success", 0.0)) > 0.5)
+
+                stage_action = np.asarray(info.get("stage_action", env_action), dtype=np.int64).reshape(-1)
+                movement = int(stage_action[0]) if stage_action.shape[0] > 0 else 3
+                jump = int(stage_action[1]) if stage_action.shape[0] > 1 else 0
+                dodge = int(stage_action[2]) if stage_action.shape[0] > 2 else 0
+                attack = int(stage_action[3]) if stage_action.shape[0] > 3 else 0
+                ep_idle_steps += int(movement == 3 and jump == 0 and dodge == 0 and attack == 0)
+                ep_attack_steps += int(attack != 0)
+                ep_hit_steps += int(op_delta > 1e-6)
+                ep_whiff_steps += int(attack != 0 and op_delta <= 1e-6)
+
+                raw_feats = np.asarray(info.get("raw_goal_feats", []), dtype=np.float32).reshape(-1)
+                feature_names = list(info.get("stage_feature_names", []))
+                if "player_has_weapon" in feature_names:
+                    idx = feature_names.index("player_has_weapon")
+                    has_weapon = bool(idx < raw_feats.shape[0] and raw_feats[idx] > 0.5)
+                    ep_weapon_pickup = bool(ep_weapon_pickup or (has_weapon and not prev_has_weapon))
+                    prev_has_weapon = has_weapon
 
             base = self._extract_base_env(env)
             if base is not None:
@@ -1536,6 +1790,14 @@ class PeriodicEvalCallback(BaseCallback):
             op_stocks_list.append(op_stocks)
             op_dmg_totals.append(ep_op_dmg)
             self_dmg_totals.append(ep_self_dmg)
+            goal_error_means.append(float(ep_goal_error_sum / max(1, ep_len)))
+            goal_success_means.append(float(ep_goal_success_sum / max(1, ep_len)))
+            episode_successes.append(1.0 if ep_had_success else 0.0)
+            hit_rates.append(float(ep_hit_steps / max(1, ep_len)))
+            whiff_rates.append(float(ep_whiff_steps / max(1, ep_attack_steps)))
+            idle_rates.append(float(ep_idle_steps / max(1, ep_len)))
+            attack_precisions.append(float(ep_hit_steps / max(1, ep_attack_steps)))
+            weapon_pickups.append(1.0 if ep_weapon_pickup else 0.0)
             outcomes.append(outcome)
 
         rewards_np = np.asarray(rewards, dtype=np.float32)
@@ -1544,18 +1806,37 @@ class PeriodicEvalCallback(BaseCallback):
         op_stocks_np = np.asarray(op_stocks_list, dtype=np.float32)
         op_dmg_np = np.asarray(op_dmg_totals, dtype=np.float32)
         self_dmg_np = np.asarray(self_dmg_totals, dtype=np.float32)
+        goal_err_np = np.asarray(goal_error_means, dtype=np.float32)
+        goal_succ_np = np.asarray(goal_success_means, dtype=np.float32)
+        ep_success_np = np.asarray(episode_successes, dtype=np.float32)
+        hit_np = np.asarray(hit_rates, dtype=np.float32)
+        whiff_np = np.asarray(whiff_rates, dtype=np.float32)
+        idle_np = np.asarray(idle_rates, dtype=np.float32)
+        precision_np = np.asarray(attack_precisions, dtype=np.float32)
+        weapon_np = np.asarray(weapon_pickups, dtype=np.float32)
 
         wins = int(sum(1 for x in outcomes if x == "WIN"))
         losses = int(sum(1 for x in outcomes if x == "LOSS"))
         draws = int(sum(1 for x in outcomes if x == "DRAW"))
         truncs = int(sum(1 for x in outcomes if x == "TRUNC"))
         win_rate = float(wins / max(1, len(outcomes)))
+        damage_trade_np = op_dmg_np - self_dmg_np
 
         return {
+            "phase": str(phase),
             "episodes": int(len(outcomes)),
             "mean_reward": float(rewards_np.mean()),
             "std_reward": float(rewards_np.std()),
             "mean_steps": float(lengths_np.mean()),
+            "mean_goal_error": float(goal_err_np.mean()),
+            "mean_goal_success": float(goal_succ_np.mean()),
+            "episode_success_rate": float(ep_success_np.mean()),
+            "hit_rate": float(hit_np.mean()),
+            "whiff_rate": float(whiff_np.mean()),
+            "idle_rate": float(idle_np.mean()),
+            "attack_precision": float(precision_np.mean()),
+            "weapon_pickup_rate": float(weapon_np.mean()),
+            "mean_damage_trade": float(damage_trade_np.mean()),
             "mean_op_damage": float(op_dmg_np.mean()),
             "mean_self_damage": float(self_dmg_np.mean()),
             "mean_self_stocks": float(self_stocks_np.mean()),
@@ -1568,68 +1849,106 @@ class PeriodicEvalCallback(BaseCallback):
         }
 
     def _log_eval_summary(self, summary: dict[str, float | int]) -> None:
-        self.logger.record("eval/mean_reward", float(summary["mean_reward"]))
-        self.logger.record("eval/std_reward", float(summary["std_reward"]))
-        self.logger.record("eval/mean_ep_length", float(summary["mean_steps"]))
-        self.logger.record("eval/win_rate", float(summary["win_rate"]))
-        self.logger.record("eval/mean_op_damage", float(summary["mean_op_damage"]))
-        self.logger.record("eval/mean_self_damage", float(summary["mean_self_damage"]))
+        phase = str(summary.get("phase", "phase"))
+        prefix = f"eval/{phase}"
+        self.logger.record(f"{prefix}/mean_reward", float(summary["mean_reward"]))
+        self.logger.record(f"{prefix}/std_reward", float(summary["std_reward"]))
+        self.logger.record(f"{prefix}/mean_ep_length", float(summary["mean_steps"]))
+        self.logger.record(f"{prefix}/win_rate", float(summary["win_rate"]))
+        self.logger.record(f"{prefix}/episode_success_rate", float(summary.get("episode_success_rate", 0.0)))
+        self.logger.record(f"{prefix}/skill_score", float(summary.get("skill_score", 0.0)))
+        self.logger.record(f"{prefix}/amnesia", float(summary.get("amnesia", 0.0)))
+        self.logger.record(f"{prefix}/mean_op_damage", float(summary["mean_op_damage"]))
+        self.logger.record(f"{prefix}/mean_self_damage", float(summary["mean_self_damage"]))
 
     def _on_step(self) -> bool:
         while self.num_timesteps >= self._next_eval_step:
             self._eval_index += 1
-            summary = self._run_eval()
-            self._log_eval_summary(summary)
+            current_scores: dict[str, float] = {}
 
-            mean_reward = float(summary["mean_reward"])
-            improved = mean_reward > self.best_mean_reward
-            if improved:
-                self.best_mean_reward = mean_reward
-                if self.best_model_path is not None:
-                    self.model.save(str(self.best_model_path))
+            for phase, env in self._eval_envs.items():
+                summary = self._run_eval(phase, env)
+                score = skill_score_for_phase(phase, summary)
+                best_ref = max(float(self._best_scores.get(phase, 0.0)), score)
+                retention, amnesia = retention_and_amnesia(score, best_ref)
+                gate_pass = float(amnesia <= self.amnesia_threshold)
+                summary["skill_score"] = float(score)
+                summary["best_skill_score"] = float(best_ref)
+                summary["retention"] = float(retention)
+                summary["amnesia"] = float(amnesia)
+                summary["amnesia_gate_pass"] = gate_pass
+                current_scores[phase] = float(score)
 
-            if self._eval_writer is not None:
-                self._eval_writer.writerow(
-                    {
-                        "eval_index": self._eval_index,
-                        "train_steps": int(self.num_timesteps),
-                        "episodes": int(summary["episodes"]),
-                        "mean_reward": float(summary["mean_reward"]),
-                        "std_reward": float(summary["std_reward"]),
-                        "mean_steps": float(summary["mean_steps"]),
-                        "mean_op_damage": float(summary["mean_op_damage"]),
-                        "mean_self_damage": float(summary["mean_self_damage"]),
-                        "mean_self_stocks": float(summary["mean_self_stocks"]),
-                        "mean_op_stocks": float(summary["mean_op_stocks"]),
-                        "wins": int(summary["wins"]),
-                        "losses": int(summary["losses"]),
-                        "draws": int(summary["draws"]),
-                        "truncs": int(summary["truncs"]),
-                        "win_rate": float(summary["win_rate"]),
-                    }
+                self._log_eval_summary(summary)
+
+                mean_reward = float(summary["mean_reward"])
+                improved = bool(phase == self.current_phase and mean_reward > self.best_mean_reward)
+                if improved:
+                    self.best_mean_reward = mean_reward
+                    if self.best_model_path is not None:
+                        self.model.save(str(self.best_model_path))
+
+                if self._eval_writer is not None:
+                    self._eval_writer.writerow(
+                        {
+                            "eval_index": self._eval_index,
+                            "train_steps": int(self.num_timesteps),
+                            "phase": phase,
+                            "episodes": int(summary["episodes"]),
+                            "mean_reward": float(summary["mean_reward"]),
+                            "std_reward": float(summary["std_reward"]),
+                            "mean_steps": float(summary["mean_steps"]),
+                            "mean_goal_error": float(summary["mean_goal_error"]),
+                            "mean_goal_success": float(summary["mean_goal_success"]),
+                            "episode_success_rate": float(summary["episode_success_rate"]),
+                            "hit_rate": float(summary["hit_rate"]),
+                            "whiff_rate": float(summary["whiff_rate"]),
+                            "idle_rate": float(summary["idle_rate"]),
+                            "attack_precision": float(summary["attack_precision"]),
+                            "weapon_pickup_rate": float(summary["weapon_pickup_rate"]),
+                            "mean_damage_trade": float(summary["mean_damage_trade"]),
+                            "skill_score": float(summary["skill_score"]),
+                            "best_skill_score": float(summary["best_skill_score"]),
+                            "retention": float(summary["retention"]),
+                            "amnesia": float(summary["amnesia"]),
+                            "amnesia_gate_pass": int(gate_pass > 0.5),
+                            "mean_op_damage": float(summary["mean_op_damage"]),
+                            "mean_self_damage": float(summary["mean_self_damage"]),
+                            "mean_self_stocks": float(summary["mean_self_stocks"]),
+                            "mean_op_stocks": float(summary["mean_op_stocks"]),
+                            "wins": int(summary["wins"]),
+                            "losses": int(summary["losses"]),
+                            "draws": int(summary["draws"]),
+                            "truncs": int(summary["truncs"]),
+                            "win_rate": float(summary["win_rate"]),
+                        }
+                    )
+
+                gate = "PASS" if gate_pass > 0.5 else "AMNESIA"
+                print(
+                    f"[Eval @{self.num_timesteps} {phase}] "
+                    f"score={float(score):.3f} retain={retention:.3f} amnesia={amnesia:.3f} {gate} | "
+                    f"succ={float(summary['episode_success_rate']):.3f} | "
+                    f"win={float(summary['win_rate']):.3f} | "
+                    f"reward={float(summary['mean_reward']):+.3f}+/-{float(summary['std_reward']):.3f} | "
+                    f"dmg(self/op)={float(summary['mean_self_damage']):.3f}/{float(summary['mean_op_damage']):.3f}"
+                    + (" | best" if improved else "")
                 )
-                if self._eval_fh is not None:
-                    self._eval_fh.flush()
 
-            print(
-                f"[Eval @{self.num_timesteps}] "
-                f"ep={int(summary['episodes'])} | "
-                f"W/L/D/T={int(summary['wins'])}/{int(summary['losses'])}/{int(summary['draws'])}/{int(summary['truncs'])} | "
-                f"win={float(summary['win_rate']):.3f} | "
-                f"reward={float(summary['mean_reward']):+.3f}±{float(summary['std_reward']):.3f} | "
-                f"len={float(summary['mean_steps']):.1f} | "
-                f"dmg(self/op)={float(summary['mean_self_damage']):.3f}/{float(summary['mean_op_damage']):.3f}"
-                + (" | best" if improved else "")
-            )
+            self._best_scores = update_best_scores(self._best_scores, current_scores)
+            if self.retention_path is not None:
+                save_best_scores(self.retention_path, self._best_scores)
+            if self._eval_fh is not None:
+                self._eval_fh.flush()
 
             self._next_eval_step += self.eval_freq_steps
 
         return True
 
     def _on_training_end(self) -> None:
-        if self._eval_env is not None:
+        for env in self._eval_envs.values():
             try:
-                self._eval_env.close()
+                env.close()
             except Exception:
                 pass
         if self._eval_fh is not None:
@@ -1683,9 +2002,14 @@ def parse_train_args(default_name: str, default_steps: int) -> argparse.Namespac
     p.add_argument("--no-normalize-advantage-per-source", dest="normalize_advantage_per_source", action="store_false")
     p.add_argument("--anchor-kl-coef", type=float, default=0.02, help="KL anchor loss coefficient")
     p.add_argument("--anchor-update-interval", type=int, default=8, help="Anchor snapshot refresh period in PPO updates")
+    p.add_argument("--anchor-pool-size", type=int, default=4, help="Number of anchor policy snapshots to keep")
     p.add_argument("--bc-loss-coef", type=float, default=0.05, help="Behavior cloning loss coefficient")
     p.add_argument("--bc-batch-size", type=int, default=128, help="BC mini-batch size")
-    p.add_argument("--bc-demos-path", type=str, default=None, help="Path to NPZ demonstrations used for BC anchor")
+    p.add_argument("--bc-demos-path", type=str, default=None, help="One or more NPZ demo paths separated by semicolon/comma")
+    p.add_argument("--eval-phases", type=str, default="", help="'all' or comma/semicolon phase list for retention eval")
+    p.add_argument("--eval-include-previous", action="store_true", help="Evaluate all curriculum phases up to the current phase")
+    p.add_argument("--amnesia-threshold", type=float, default=0.15, help="Fail retention gate above this amnesia value")
+    p.add_argument("--retention-scores-path", type=str, default="", help="Shared retention best-score JSON path")
     p.add_argument("--pcgrad", dest="pcgrad", action="store_true", help="Enable PCGrad between PPO and auxiliary losses")
     p.add_argument("--no-pcgrad", dest="pcgrad", action="store_false")
     p.set_defaults(strict_replay_mix=True, normalize_advantage_per_source=True, pcgrad=True)
@@ -1697,6 +2021,7 @@ def train_stage_model(
     make_env: Callable[[], gym.Env],
     stage_spec: Optional[StageSpec] = None,
     make_eval_env: Optional[Callable[[], gym.Env]] = None,
+    make_eval_env_for_phase: Optional[Callable[[str], gym.Env]] = None,
 ) -> None:
     """Train a stage LLC policy with PPO."""
     from feature_extractor.film_extractor import StageGoalFiLMExtractor
@@ -1712,6 +2037,11 @@ def train_stage_model(
         if make_eval_env is None:
             raise RuntimeError("make_eval_env was requested but not provided")
         return make_eval_env()
+
+    def _make_algo_eval_env_for_phase(phase: str) -> gym.Env:
+        if make_eval_env_for_phase is not None:
+            return make_eval_env_for_phase(phase)
+        return _make_algo_eval_env()
 
     base_vec = VecMonitor(DummyVecEnv([_make_algo_env]))
     vecnorm_path = save_dir / f"{args.model_name}.vecnormalize.pkl"
@@ -1762,6 +2092,19 @@ def train_stage_model(
                 seed=int(getattr(args, "seed", 42)),
                 save_dir=save_dir,
                 model_name=args.model_name,
+                current_phase=str(getattr(args, "phase", "")),
+                eval_phases=parse_phase_list(
+                    getattr(args, "eval_phases", ""),
+                    str(getattr(args, "phase", "")),
+                    include_previous=bool(getattr(args, "eval_include_previous", False)),
+                ),
+                make_eval_env_for_phase=_make_algo_eval_env_for_phase,
+                amnesia_threshold=float(getattr(args, "amnesia_threshold", 0.15)),
+                retention_scores_path=(
+                    Path(str(getattr(args, "retention_scores_path", "")).strip())
+                    if str(getattr(args, "retention_scores_path", "")).strip()
+                    else None
+                ),
             )
             callbacks_list.append(eval_cb)
             print(
@@ -1794,8 +2137,11 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     replay_ratio = float(np.clip(getattr(args, "replay_ratio", 0.30), 0.0, 0.95))
     replay_capacity = int(max(1, getattr(args, "replay_capacity", 262_144)))
     replay_warmup_updates = int(max(0, getattr(args, "replay_warmup_updates", 1)))
+    strict_replay_mix = bool(getattr(args, "strict_replay_mix", True))
+    normalize_advantage_per_source = bool(getattr(args, "normalize_advantage_per_source", True))
     anchor_kl_coef = float(max(0.0, getattr(args, "anchor_kl_coef", 0.02)))
     anchor_update_interval = int(max(1, getattr(args, "anchor_update_interval", 8)))
+    anchor_pool_size = int(max(1, getattr(args, "anchor_pool_size", 4)))
     bc_loss_coef = float(max(0.0, getattr(args, "bc_loss_coef", 0.05)))
     bc_batch_size = int(max(1, getattr(args, "bc_batch_size", 128)))
     bc_demos_path = getattr(args, "bc_demos_path", None)
@@ -1804,18 +2150,27 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     if not bc_demos_path:
         candidates: list[Path] = []
         save_root = Path(getattr(args, "save_dir", "train/models"))
-        if stage_spec is not None:
-            candidates.append(save_root / f"{stage_spec.name}_demos.npz")
         phase_name = getattr(args, "phase", None)
-        if phase_name:
-            candidates.append(save_root / f"{phase_name}_demos.npz")
-        model_name = str(getattr(args, "model_name", ""))
-        if model_name.startswith("llc_"):
-            candidates.append(save_root / f"{model_name[4:]}_demos.npz")
-        for candidate in candidates:
-            if candidate.exists():
-                bc_demos_path = str(candidate)
-                break
+        if str(phase_name or "").strip().lower() == "all_skills_llc":
+            archive_paths = [
+                save_root / f"{phase}_demos.npz"
+                for phase in previous_phases("all_skills_llc", include_current=False)
+            ]
+            archive_paths = [path for path in archive_paths if path.exists()]
+            if archive_paths:
+                bc_demos_path = ";".join(str(path) for path in archive_paths)
+        if not bc_demos_path:
+            if stage_spec is not None:
+                candidates.append(save_root / f"{stage_spec.name}_demos.npz")
+            if phase_name:
+                candidates.append(save_root / f"{phase_name}_demos.npz")
+            model_name = str(getattr(args, "model_name", ""))
+            if model_name.startswith("llc_"):
+                candidates.append(save_root / f"{model_name[4:]}_demos.npz")
+            for candidate in candidates:
+                if candidate.exists():
+                    bc_demos_path = str(candidate)
+                    break
 
     if args.resume:
         print(f"[{args.model_name}] Resuming PPO from {args.resume}")
@@ -1837,8 +2192,11 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
                 replay_ratio=replay_ratio,
                 replay_capacity=replay_capacity,
                 replay_warmup_updates=replay_warmup_updates,
+                strict_replay_mix=strict_replay_mix,
+                normalize_advantage_per_source=normalize_advantage_per_source,
                 anchor_kl_coef=anchor_kl_coef,
                 anchor_update_interval=anchor_update_interval,
+                anchor_pool_size=anchor_pool_size,
                 bc_loss_coef=bc_loss_coef,
                 bc_batch_size=bc_batch_size,
                 bc_demos_path=bc_demos_path,
@@ -1885,8 +2243,11 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
         replay_ratio=replay_ratio,
         replay_capacity=replay_capacity,
         replay_warmup_updates=replay_warmup_updates,
+        strict_replay_mix=strict_replay_mix,
+        normalize_advantage_per_source=normalize_advantage_per_source,
         anchor_kl_coef=anchor_kl_coef,
         anchor_update_interval=anchor_update_interval,
+        anchor_pool_size=anchor_pool_size,
         bc_loss_coef=bc_loss_coef,
         bc_batch_size=bc_batch_size,
         bc_demos_path=bc_demos_path,

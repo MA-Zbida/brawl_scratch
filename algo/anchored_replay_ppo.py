@@ -1,6 +1,6 @@
-"""AnchoredReplayPPO — PPO with replay anchoring, snapshot pool, BC, and PCGrad.
+"""AnchoredReplayPPO - PPO with replay anchoring, snapshot pool, BC, and PCGrad.
 
-Paper §2 — Training Modifications:
+Paper section 2 - Training Modifications:
   - 70 % on-policy PPO, 30 % replay (replay is KL + BC only, no PPO grad)
   - Policy snapshot pool (last K snapshots, sampled randomly for KL)
   - Prioritized replay (|advantage|-weighted)
@@ -39,13 +39,13 @@ class _PPOSamples:
 
 
 # ---------------------------------------------------------------------------
-#  Replay store with priority-weighted sampling  (paper §2.2 / §2.9)
+#  Replay store with priority-weighted sampling  (paper section 2.2 / 2.9)
 # ---------------------------------------------------------------------------
 
 class _TensorReplayStore:
     """Ring-buffer for past rollout transitions.  Sampling is weighted by
-    max(advantage, 0) + ε so that successful transitions are replayed more
-    often (paper §2.9 — replay prioritisation).
+    max(advantage, 0) + epsilon so that successful transitions are replayed
+    more often (paper section 2.9 - replay prioritisation).
     """
 
     def __init__(self, capacity: int, priority_alpha: float = 0.6) -> None:
@@ -103,7 +103,7 @@ class _TensorReplayStore:
         if n <= 0:
             return
 
-        # Priority = max(advantage, 0) + ε  → prefer good transitions
+        # Priority = max(advantage, 0) + epsilon; prefer good transitions.
         pri = np.maximum(advantages[:n], 0.0).astype(np.float32) + 1e-6
 
         self._cat("observations", th.as_tensor(obs[:n].copy(), dtype=th.float32))
@@ -145,38 +145,70 @@ class _TensorReplayStore:
         )
 
 
+def _split_npz_paths(raw: str) -> list[Path]:
+    parts = [part.strip() for part in str(raw).replace(",", ";").split(";")]
+    return [Path(part) for part in parts if part]
+
+
+@dataclass
+class _BCDataset:
+    path: Path
+    observations: th.Tensor
+    actions: th.Tensor
+    phase: str
+
+    @property
+    def size(self) -> int:
+        return int(self.observations.shape[0])
+
+
 class _BehaviorCloneStore:
     def __init__(self, npz_path: str, action_space: spaces.Space, expected_obs_dim: int) -> None:
-        self.path = Path(npz_path)
+        self.paths = _split_npz_paths(npz_path)
         self.enabled = False
         self.disable_reason = ""
-        self.observations: Optional[th.Tensor] = None
-        self.actions: Optional[th.Tensor] = None
+        self.datasets: list[_BCDataset] = []
 
-        if not self.path.exists():
-            self.disable_reason = f"dataset not found: {self.path}"
+        if not self.paths:
+            self.disable_reason = "no BC datasets configured"
             return
 
+        errors: list[str] = []
+        for path in self.paths:
+            dataset, error = self._load_one(path, action_space, expected_obs_dim)
+            if dataset is not None:
+                self.datasets.append(dataset)
+            elif error:
+                errors.append(error)
+
+        self.enabled = len(self.datasets) > 0
+        if not self.enabled:
+            self.disable_reason = "; ".join(errors) if errors else "no valid BC datasets loaded"
+        elif errors:
+            self.disable_reason = "some BC datasets skipped: " + "; ".join(errors)
+
+    def _load_one(
+        self,
+        path: Path,
+        action_space: spaces.Space,
+        expected_obs_dim: int,
+    ) -> tuple[Optional[_BCDataset], str]:
+        if not path.exists():
+            return None, f"dataset not found: {path}"
+
         try:
-            with np.load(self.path, allow_pickle=False) as data:
+            with np.load(path, allow_pickle=False) as data:
                 if "obs" not in data.files:
-                    self.disable_reason = f"missing 'obs' in {self.path}"
-                    return
+                    return None, f"missing 'obs' in {path}"
                 if "actions" not in data.files and "actions_discrete" not in data.files and "actions_multidiscrete" not in data.files:
-                    self.disable_reason = f"missing actions arrays in {self.path}"
-                    return
+                    return None, f"missing actions arrays in {path}"
 
                 obs_np = np.asarray(data["obs"], dtype=np.float32)
                 if obs_np.ndim != 2:
-                    self.disable_reason = f"expected obs shape [N, D], got {obs_np.shape}"
-                    return
+                    return None, f"expected obs shape [N, D], got {obs_np.shape} in {path}"
                 if expected_obs_dim > 0 and int(obs_np.shape[1]) != expected_obs_dim:
-                    self.disable_reason = (
-                        f"obs dim mismatch for {self.path}: demos={int(obs_np.shape[1])}, model={expected_obs_dim}"
-                    )
-                    return
+                    return None, f"obs dim mismatch for {path}: demos={int(obs_np.shape[1])}, model={expected_obs_dim}"
 
-                actions_np: np.ndarray
                 if isinstance(action_space, spaces.Discrete):
                     if "actions_discrete" in data.files:
                         actions_np = np.asarray(data["actions_discrete"], dtype=np.int64).reshape(-1)
@@ -194,10 +226,7 @@ class _BehaviorCloneStore:
                         raw = raw.reshape(-1, 1)
                     expected_dims = int(len(action_space.nvec))
                     if raw.ndim != 2 or int(raw.shape[1]) != expected_dims:
-                        self.disable_reason = (
-                            f"expected multidiscrete actions [N,{expected_dims}], got {raw.shape}"
-                        )
-                        return
+                        return None, f"expected multidiscrete actions [N,{expected_dims}], got {raw.shape} in {path}"
                     actions_np = raw
                 else:
                     raw = np.asarray(data["actions"], dtype=np.float32)
@@ -205,33 +234,53 @@ class _BehaviorCloneStore:
 
                 n = int(min(obs_np.shape[0], actions_np.shape[0]))
                 if n <= 0:
-                    self.disable_reason = f"empty dataset after alignment: {self.path}"
-                    return
+                    return None, f"empty dataset after alignment: {path}"
 
-                obs_np = obs_np[:n]
-                actions_np = actions_np[:n]
+                phase = path.stem
+                if "phase" in data.files:
+                    phase_arr = np.asarray(data["phase"]).reshape(-1)
+                    if phase_arr.size > 0:
+                        phase = str(phase_arr[0])
 
-                self.observations = th.as_tensor(np.array(obs_np, copy=True), dtype=th.float32)
+                obs_t = th.as_tensor(np.array(obs_np[:n], copy=True), dtype=th.float32)
                 if isinstance(action_space, (spaces.Discrete, spaces.MultiDiscrete)):
-                    self.actions = th.as_tensor(np.array(actions_np, copy=True), dtype=th.long)
+                    actions_t = th.as_tensor(np.array(actions_np[:n], copy=True), dtype=th.long)
                 else:
-                    self.actions = th.as_tensor(np.array(actions_np, copy=True), dtype=th.float32)
-                self.enabled = True
+                    actions_t = th.as_tensor(np.array(actions_np[:n], copy=True), dtype=th.float32)
+                return _BCDataset(path=path, observations=obs_t, actions=actions_t, phase=phase), ""
         except Exception as exc:
-            self.disable_reason = f"failed to load {self.path}: {exc}"
+            return None, f"failed to load {path}: {exc}"
 
     @property
     def size(self) -> int:
-        if not self.enabled or self.observations is None:
-            return 0
-        return int(self.observations.shape[0])
+        return int(sum(dataset.size for dataset in self.datasets))
+
+    @property
+    def num_datasets(self) -> int:
+        return int(len(self.datasets))
 
     def sample(self, batch_size: int, device: th.device) -> Optional[tuple[th.Tensor, th.Tensor]]:
-        if self.size <= 0 or self.observations is None or self.actions is None:
+        if self.size <= 0 or not self.datasets:
             return None
-        take = int(max(1, min(batch_size, self.size)))
-        indices = th.randint(0, self.size, (take,), device=th.device("cpu"))
-        return self.observations[indices].to(device), self.actions[indices].to(device)
+        take_total = int(max(1, batch_size))
+        base_take = max(1, take_total // max(1, len(self.datasets)))
+        remainder = take_total - (base_take * len(self.datasets))
+        obs_batches: list[th.Tensor] = []
+        action_batches: list[th.Tensor] = []
+
+        order = list(range(len(self.datasets)))
+        random.shuffle(order)
+        for rank, dataset_idx in enumerate(order):
+            dataset = self.datasets[dataset_idx]
+            take = base_take + (1 if rank < max(0, remainder) else 0)
+            take = int(max(1, take))
+            indices = th.randint(0, dataset.size, (take,), device=th.device("cpu"))
+            obs_batches.append(dataset.observations[indices])
+            action_batches.append(dataset.actions[indices])
+
+        observations = th.cat(obs_batches, dim=0)[:take_total].to(device)
+        actions = th.cat(action_batches, dim=0)[:take_total].to(device)
+        return observations, actions
 
 
 class AnchoredReplayPPO(PPO):
@@ -247,6 +296,7 @@ class AnchoredReplayPPO(PPO):
         normalize_advantage_per_source: bool = True,
         anchor_kl_coef: float = 0.02,
         anchor_update_interval: int = 8,
+        anchor_pool_size: int = 4,
         bc_loss_coef: float = 0.05,
         bc_batch_size: int = 128,
         bc_demos_path: Optional[str] = None,
@@ -263,6 +313,7 @@ class AnchoredReplayPPO(PPO):
 
         self.anchor_kl_coef = float(max(0.0, anchor_kl_coef))
         self.anchor_update_interval = int(max(1, anchor_update_interval))
+        self.anchor_pool_size = int(max(1, anchor_pool_size))
 
         self.bc_loss_coef = float(max(0.0, bc_loss_coef))
         self.bc_batch_size = int(max(1, bc_batch_size))
@@ -271,7 +322,7 @@ class AnchoredReplayPPO(PPO):
         self.enable_pcgrad = bool(enable_pcgrad)
 
         self._replay_store = _TensorReplayStore(self.replay_capacity)
-        self._anchor_policy: Optional[Any] = None
+        self._anchor_pool: deque[Any] = deque(maxlen=self.anchor_pool_size)
         self._updates_since_anchor = 0
         self._train_calls = 0
         self._bc_warning_printed = False
@@ -283,7 +334,7 @@ class AnchoredReplayPPO(PPO):
             self._bc_store = _BehaviorCloneStore(self.bc_demos_path, self.action_space, expected_obs_dim)
 
     def _excluded_save_params(self) -> list[str]:
-        return super()._excluded_save_params() + ["_replay_store", "_anchor_policy", "_bc_store"]
+        return super()._excluded_save_params() + ["_replay_store", "_anchor_pool", "_bc_store"]
 
     @staticmethod
     def _normalize_advantages(values: th.Tensor) -> th.Tensor:
@@ -313,13 +364,13 @@ class AnchoredReplayPPO(PPO):
         anchor.set_training_mode(False)
         for parameter in anchor.parameters():
             parameter.requires_grad_(False)
-        self._anchor_policy = anchor
+        self._anchor_pool.append(anchor)
         self._updates_since_anchor = 0
 
     def _maybe_init_anchor(self) -> None:
         if self.anchor_kl_coef <= 0.0:
             return
-        if self._anchor_policy is None:
+        if len(self._anchor_pool) == 0:
             self._refresh_anchor_policy()
 
     def _mix_rollout_with_replay(self, rollout_data: Any) -> tuple[_PPOSamples, float]:
@@ -425,11 +476,12 @@ class AnchoredReplayPPO(PPO):
         return kl_values.mean()
 
     def _compute_anchor_kl_loss(self, observations: th.Tensor) -> th.Tensor:
-        if self._anchor_policy is None or self.anchor_kl_coef <= 0.0:
+        if len(self._anchor_pool) == 0 or self.anchor_kl_coef <= 0.0:
             return th.zeros((), device=observations.device, dtype=th.float32)
 
+        anchor_policy = random.choice(list(self._anchor_pool))
         with th.no_grad():
-            anchor_distribution = self._anchor_policy.get_distribution(observations)
+            anchor_distribution = anchor_policy.get_distribution(observations)
         current_distribution = self.policy.get_distribution(observations)
 
         kl_loss = self._mean_distribution_kl(anchor_distribution, current_distribution)
@@ -620,6 +672,11 @@ class AnchoredReplayPPO(PPO):
         self.logger.record("train/replay_ratio_target", float(self.replay_ratio))
         self.logger.record("train/replay_fraction", float(np.mean(replay_fractions)) if replay_fractions else 0.0)
         self.logger.record("train/replay_buffer_size", int(self._replay_store.size))
+        self.logger.record("train/anchor_pool_size", int(len(self._anchor_pool)))
+        self.logger.record(
+            "train/bc_dataset_count",
+            int(self._bc_store.num_datasets) if self._bc_store is not None else 0,
+        )
         self.logger.record("train/anchor_kl_loss", float(np.mean(anchor_kl_losses)) if anchor_kl_losses else 0.0)
         self.logger.record("train/bc_loss", float(np.mean(bc_losses)) if bc_losses else 0.0)
         self.logger.record("train/aux_loss", float(np.mean(aux_losses)) if aux_losses else 0.0)

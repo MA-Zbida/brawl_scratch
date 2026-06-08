@@ -7,16 +7,11 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CallbackList
-from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
-
-from env import BrawlDeepEnv, EnvConfig
-from hierarchical.hsp_env import HSPEnv
-from train.llc_stage_common import PeriodicEvalCallback
+from train.hsp_guard import require_hsp_readiness
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,10 +37,27 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eval-every-steps", type=int, default=0, help="Run periodic evaluation every N timesteps (0 disables)")
     p.add_argument("--eval-episodes", type=int, default=3, help="Episodes to run at each periodic evaluation")
     p.add_argument("--eval-stochastic", action="store_true", help="Use stochastic policy actions during periodic evaluation")
+    p.add_argument(
+        "--llc-retention-csv",
+        type=str,
+        default="",
+        help="Required all_skills_llc retention eval CSV proving LLC readiness before HSP training",
+    )
+    p.add_argument("--allow-legacy-hsp", action="store_true", help="Override LLC readiness guard and run legacy HSP anyway")
+    p.add_argument("--amnesia-threshold", type=float, default=0.15, help="LLC readiness amnesia threshold")
+    p.add_argument("--min-retention", type=float, default=0.85, help="LLC readiness minimum retention")
+    p.add_argument("--min-current-score", type=float, default=None, help="Override LLC readiness minimum current all-skills score")
+    p.add_argument("--max-idle-rate", type=float, default=0.45, help="LLC readiness max idle rate")
+    p.add_argument("--max-combat-whiff-rate", type=float, default=0.80, help="LLC readiness max combat whiff rate")
+    p.add_argument("--min-combat-damage-trade", type=float, default=0.0, help="LLC readiness minimum combat damage trade")
+    p.add_argument("--no-combat-trade-gate", action="store_true", help="Disable readiness gate for non-negative combat trade")
     return p.parse_args()
 
 
-def build_hsp_env(llc_model: PPO, macro_steps: int, max_episode_steps: int) -> HSPEnv:
+def build_hsp_env(llc_model: Any, macro_steps: int, max_episode_steps: int):
+    from env import BrawlDeepEnv, EnvConfig
+    from hierarchical.hsp_env import HSPEnv
+
     config = EnvConfig(
         terminate_on_stock_out=True,
         max_episode_steps=max_episode_steps,
@@ -63,7 +75,15 @@ def build_hsp_env(llc_model: PPO, macro_steps: int, max_episode_steps: int) -> H
 
 
 def main() -> None:
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.callbacks import CallbackList
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
+
+    from train.llc_stage_common import PeriodicEvalCallback
+
     args = parse_args()
+    require_hsp_readiness(args)
+
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 

@@ -37,3 +37,6 @@ runs/
 wandb/
 logs/
 *.log
+
+# Codex scratch workspace
+work/

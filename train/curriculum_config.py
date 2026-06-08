@@ -26,11 +26,15 @@ PHASES = (
     "weapon_acquisition",
     "spacing_neutral",
     "combat_execution",
+    "all_skills_llc",
 )
 
 LOCO_PLATFORM_X_MARGIN = 0.03
 LOCO_GROUNDED_Y_EPS = 0.015
 LOCO_AIRBORNE_Y_DELTA = 0.28
+LOCO_RECOVERY_STEP1_OUTSIDE_BAND = 0.16
+LOCO_RECOVERY_STEP1_SIDE_OFFSET = 0.02
+LOCO_RECOVERY_STEP2_PLATFORM_Y_EPS = 0.015
 
 
 def _base_target() -> np.ndarray:
@@ -93,7 +97,7 @@ def _nearest_platform_side(player_x: float) -> str:
     return "left" if d_left <= d_right else "right"
 
 
-# ─── Samplers ──────────────────────────────────────────────────────────────────
+# Samplers
 
 def _sampler_recovery(_: np.ndarray) -> np.ndarray:
     """Recovery goal: reach the nearest ledge (zero signed offset in both axes)."""
@@ -120,7 +124,7 @@ def _sampler_weapon_acq(_: np.ndarray) -> np.ndarray:
     """Weapon goal: acquire and hold the weapon."""
     t = _base_target()
     t[GOAL_INDEX["player_has_weapon"]] = 1.0
-    # 0.5 == zero offset in the normalised [-1,1]→[0,1] space
+    # 0.5 == zero offset in the normalised [-1,1] -> [0,1] space
     t[GOAL_INDEX["weapon_dx"]] = 0.5
     t[GOAL_INDEX["weapon_dy"]] = 0.5
     return clip_goal_target(t)
@@ -145,7 +149,7 @@ def _sampler_combat(_: np.ndarray) -> np.ndarray:
     return clip_goal_target(t)
 
 
-# ─── Mask helper ───────────────────────────────────────────────────────────────
+# Mask helper
 
 def _mask_for(*active: tuple[str, float]) -> np.ndarray:
     mask = np.zeros((GOAL_DIM,), dtype=np.float32)
@@ -154,7 +158,40 @@ def _mask_for(*active: tuple[str, float]) -> np.ndarray:
     return mask
 
 
-# ─── Phase specs ───────────────────────────────────────────────────────────────
+def _sample_all_skills(_: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
+    lane = int(np.random.randint(0, 5))
+    if lane == 0:
+        return (
+            _sampler_recovery(_),
+            _mask_for(("signed_dx_to_ledge", 1.0), ("dy_to_ledge", 1.0)),
+            normalize_goal_type("recovery"),
+        )
+    if lane == 1:
+        return (
+            _sampler_movement(_),
+            _mask_for(("player_x", 1.0), ("player_y", 1.0)),
+            normalize_goal_type("movement"),
+        )
+    if lane == 2:
+        return (
+            _sampler_weapon_acq(_),
+            _mask_for(("player_has_weapon", 1.0), ("weapon_dx", 0.5), ("weapon_dy", 0.5)),
+            normalize_goal_type("weapon_acquisition"),
+        )
+    if lane == 3:
+        return (
+            _sampler_spacing(_),
+            _mask_for(("rel_distance", 1.0), ("rel_dy", 0.5)),
+            normalize_goal_type("spacing"),
+        )
+    return (
+        _sampler_combat(_),
+        _mask_for(("in_strike_range", 1.0), ("frame_advantage_estimate", 0.8)),
+        normalize_goal_type("combat"),
+    )
+
+
+# Phase specs
 
 def build_phase_spec(
     phase: str,
@@ -313,6 +350,38 @@ def build_phase_spec(
             disable_dodge=False,
             disable_jump=False,
             step_penalty=0.003,
+            terminate_on_death=bool(terminate_on_death),
+        )
+
+    if phase == "all_skills_llc":
+        return StageSpec(
+            stage_id=6,
+            name="stage6_all_skills_llc",
+            goal_type=normalize_goal_type("movement"),
+            mask=_mask_for(("player_x", 1.0), ("player_y", 1.0)),
+            target_sampler=_sampler_movement,
+            goal_family_sampler=_sample_all_skills,
+            feature_names=list(CURRICULUM_GOAL_FEATURES),
+            goal_extractor=extract_curriculum_goal_features,
+            min_goal_duration=30,
+            max_goal_duration=80,
+            progress_scale=2.0,
+            progress_clip_min=-0.20,
+            progress_clip_max=0.35,
+            success_threshold=0.10,
+            success_bonus=1.0,
+            reward_from_goal_progress=True,
+            in_strike_range_bonus=0.02,
+            hit_event_bonus=0.35,
+            damage_dealt_scale=1.25,
+            self_damage_penalty_scale=0.35,
+            offstage_penalty_scale=0.05,
+            death_penalty=float(death_penalty),
+            reward_clip=6.0,
+            disable_attack=False,
+            disable_dodge=False,
+            disable_jump=False,
+            step_penalty=0.02,
             terminate_on_death=bool(terminate_on_death),
         )
 

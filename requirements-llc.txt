@@ -1,0 +1,19 @@
+# Live Brawlhalla LLC training stack.
+# Install with:
+#   python -m pip install -r requirements-llc.txt
+#
+# If `tools/llc_preflight.py --device cuda` reports that torch is installed but
+# CUDA is unavailable, reinstall torch from the PyTorch selector for your CUDA
+# version, then rerun preflight.
+
+numpy
+gymnasium
+stable-baselines3[extra]
+torch
+ultralytics
+opencv-python
+keyboard
+dxcam
+pydirectinput
+matplotlib
+pytest

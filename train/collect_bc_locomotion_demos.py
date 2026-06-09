@@ -14,6 +14,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env import BrawlDeepEnv, EnvConfig, NullInputController, PyDirectInputController
+from feature_extractor.memory.state_spec import StateSpec
 from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv
 
@@ -42,6 +43,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-end-episode-on-first-hit", dest="end_episode_on_first_hit", action="store_false")
     p.set_defaults(end_episode_on_first_hit=None)
     p.add_argument("--hit-damage-threshold", type=float, default=1e-3)
+    p.add_argument(
+        "--weapon-hold-steps",
+        type=int,
+        default=30,
+        help="For weapon_acquisition, accept success only after holding the weapon this many steps",
+    )
     p.add_argument(
         "--enforce-recovery-sequence",
         dest="enforce_recovery_sequence",
@@ -115,6 +122,9 @@ def _build_env(args: argparse.Namespace) -> StageGoalEnv:
             max_goal_duration=max(int(args.min_goal_duration), int(args.max_goal_duration)),
         )
 
+    if str(args.phase).strip().lower() == "weapon_acquisition":
+        spec = replace(spec, success_hold_steps=max(1, int(args.weapon_hold_steps)))
+
     # Auto-pick max_episode_steps when the user didn't explicitly set it.
     max_ep_steps = int(args.max_episode_steps)
     if max_ep_steps == _DEFAULT_MAX_STEPS["default"] and is_combat:
@@ -147,28 +157,60 @@ def _screen_size_from_env(env: StageGoalEnv) -> tuple[int, int]:
     return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
 
 
-def _set_mouse_to_goal(env: StageGoalEnv, goal_target: np.ndarray, goal_mask: np.ndarray | None = None) -> None:
+def _goal_xy_for_mouse(env: StageGoalEnv, goal_target: np.ndarray, goal_mask: np.ndarray | None = None) -> np.ndarray | None:
     if goal_target is None or goal_target.shape[0] < 2:
-        return
+        return None
 
-    goal_xy = np.asarray(goal_target[:2], dtype=np.float32)
+    target = np.asarray(goal_target, dtype=np.float32).reshape(-1)
     feature_names = list(env.stage_spec.feature_names or [])
+    mask = (
+        np.asarray(goal_mask, dtype=np.float32).reshape(-1)
+        if goal_mask is not None
+        else np.asarray(env.stage_spec.mask, dtype=np.float32).reshape(-1)
+    )
+
     if "player_x" in feature_names and "player_y" in feature_names:
         x_idx = feature_names.index("player_x")
         y_idx = feature_names.index("player_y")
-        mask = (
-            np.asarray(goal_mask, dtype=np.float32).reshape(-1)
-            if goal_mask is not None
-            else np.asarray(env.stage_spec.mask, dtype=np.float32).reshape(-1)
-        )
         if (
-            x_idx < goal_target.shape[0]
-            and y_idx < goal_target.shape[0]
+            x_idx < target.shape[0]
+            and y_idx < target.shape[0]
             and (x_idx >= mask.shape[0] or y_idx >= mask.shape[0] or mask[x_idx] > 0.0 or mask[y_idx] > 0.0)
         ):
-            goal_xy = np.asarray([goal_target[x_idx], goal_target[y_idx]], dtype=np.float32)
+            return np.asarray([target[x_idx], target[y_idx]], dtype=np.float32)
+
+    if "rel_distance" in feature_names and "rel_dy" in feature_names:
+        dist_idx = feature_names.index("rel_distance")
+        dy_idx = feature_names.index("rel_dy")
+        if (
+            dist_idx < target.shape[0]
+            and dy_idx < target.shape[0]
+            and dist_idx < mask.shape[0]
+            and dy_idx < mask.shape[0]
+            and (mask[dist_idx] > 0.0 or mask[dy_idx] > 0.0)
+        ):
+            mem = getattr(env.unwrapped, "memory", None)
+            player = getattr(mem, "player", None)
+            opponent = getattr(mem, "opponent", None)
+            if player is not None and opponent is not None:
+                target_dist = float(np.clip(target[dist_idx], 0.0, 1.0) * 2.0)
+                target_rel_dy = float((np.clip(target[dy_idx], 0.0, 1.0) * 2.0) - 1.0)
+                dx_abs = float(np.sqrt(max(0.0, target_dist * target_dist - target_rel_dy * target_rel_dy)))
+                rel_dx = float(getattr(opponent, "x", 0.5) - getattr(player, "x", 0.5))
+                side = 1.0 if rel_dx >= 0.0 else -1.0
+                x = float(getattr(opponent, "x", 0.5) - side * dx_abs)
+                y = float(getattr(opponent, "y", 0.5) - target_rel_dy)
+                return np.asarray([np.clip(x, 0.0, 1.0), np.clip(y, 0.0, 1.0)], dtype=np.float32)
         else:
-            return
+            return None
+
+    return None
+
+
+def _set_mouse_to_goal(env: StageGoalEnv, goal_target: np.ndarray, goal_mask: np.ndarray | None = None) -> None:
+    goal_xy = _goal_xy_for_mouse(env, goal_target, goal_mask)
+    if goal_xy is None:
+        return
 
     user32 = ctypes.windll.user32
     try:
@@ -252,7 +294,23 @@ def _phase_uses_player_xy_goal(spec) -> bool:
         return False
 
     mask = np.asarray(spec.mask, dtype=np.float32).reshape(-1)
-    return bool(mask[x_idx] > 0.0 or mask[y_idx] > 0.0)
+    if bool(mask[x_idx] > 0.0 or mask[y_idx] > 0.0):
+        return True
+
+    dist_idx = idx.get("rel_distance")
+    dy_idx = idx.get("rel_dy")
+    return bool(
+        dist_idx is not None
+        and dy_idx is not None
+        and (mask[dist_idx] > 0.0 or mask[dy_idx] > 0.0)
+    )
+
+
+def _obs_player_offstage(obs: np.ndarray) -> bool:
+    try:
+        return bool(float(StateSpec.get(np.asarray(obs, dtype=np.float32), "player_is_offstage")) > 0.5)
+    except Exception:
+        return False
 
 
 def _resolve_output_path(args: argparse.Namespace) -> Path:
@@ -270,7 +328,8 @@ def main() -> None:
     hit_damage_threshold = float(max(0.0, args.hit_damage_threshold))
     phase_lower = str(args.phase).strip().lower()
     is_damage = phase_lower in _COMBAT_PHASES
-    phase_requires_weapon = False
+    phase_requires_weapon = phase_lower == "weapon_acquisition"
+    recovery_transition_collection = phase_lower == "recovery_mastery"
     enforce_recovery_sequence = bool(args.enforce_recovery_sequence and phase_lower == "recovery_mastery")
 
     target_episodes = max(1, int(args.episodes))
@@ -282,10 +341,10 @@ def main() -> None:
             # Only success episodes are accepted; budget for some max-step timeouts.
             max_collection_attempts = max(target_episodes, target_episodes * 3)
 
-    # Default: never end on first hit; BC episodes should mirror PPO episodes,
-    # which continue after hits until goal progress / max steps.
+    # Default combat demos are "land one hit cleanly"; PPO then extends that
+    # into combo timing through the combat shaping in StageGoalEnv.
     if args.end_episode_on_first_hit is None:
-        end_episode_on_first_hit = False
+        end_episode_on_first_hit = phase_lower == "combat_execution"
     else:
         end_episode_on_first_hit = bool(args.end_episode_on_first_hit)
 
@@ -339,9 +398,9 @@ def main() -> None:
     else:
         print("Goal resampling: on success; otherwise a new goal comes with the next episode reset")
     if mouse_guidance_enabled:
-        print("Mouse guidance: enabled (cursor moves to target_x,target_y)")
+        print("Mouse guidance: enabled (cursor moves to the phase target)")
     elif args.move_mouse_to_goal:
-        print("Mouse guidance: disabled (phase goals are relational/non-XY)")
+        print("Mouse guidance: disabled (no cursor target for this phase)")
     if force_drop:
         print("Episode end action: force drop weapon via NUM_5")
     if phase_requires_weapon:
@@ -350,6 +409,10 @@ def main() -> None:
         print(f"Episode end action: stop on first hit (op_delta_damage >= {hit_damage_threshold:.4f})")
     if enforce_recovery_sequence:
         print("Recovery quality gate: ON (keep only offstage->onstage sequence-complete episodes)")
+    if recovery_transition_collection:
+        print("Recovery collection: crop and keep only the offstage -> onstage transition")
+    if phase_lower == "weapon_acquisition":
+        print(f"Weapon success gate: hold weapon for {max(1, int(args.weapon_hold_steps))} consecutive steps")
     print("Press Ctrl+C to stop and save partial data.")
     print("=" * 68)
     print(f"Starting in {args.delay:.1f}s...")
@@ -386,6 +449,10 @@ def main() -> None:
             end_reason = "unknown"
             ep_step1_transition_seen = False
             ep_terminal_success_seen = False
+            ep_recovery_started = False
+            ep_recovery_start_idx = 0
+            ep_recovery_transition_seen = False
+            ep_recovery_transition_idx = -1
 
             ep_obs_buf: list[np.ndarray] = []
             ep_act_multi_buf: list[np.ndarray] = []
@@ -407,6 +474,11 @@ def main() -> None:
                 _set_mouse_to_goal(env, goal_target, goal_mask)
 
             while not done:
+                prev_offstage = _obs_player_offstage(obs)
+                if recovery_transition_collection and prev_offstage and not ep_recovery_started:
+                    ep_recovery_started = True
+                    ep_recovery_start_idx = len(ep_obs_buf)
+
                 action = read_action_from_keyboard(allowed_attack_values=allowed_attack_values)
                 action_seq = tuple(int(v) for v in action.tolist())
 
@@ -441,10 +513,23 @@ def main() -> None:
                 ep_terminal_success_seen = bool(ep_terminal_success_seen or seq_terminal_success)
 
                 terminated_by_hit = bool(end_episode_on_first_hit and hit_event)
+                curr_offstage = _obs_player_offstage(next_obs)
+                terminated_by_recovery_transition = bool(
+                    recovery_transition_collection
+                    and ep_recovery_started
+                    and prev_offstage
+                    and not curr_offstage
+                )
+                if terminated_by_recovery_transition:
+                    ep_recovery_transition_seen = True
+                    ep_recovery_transition_idx = len(ep_done_buf)
                 done = bool(terminated or truncated or terminated_by_hit)
+                done = bool(done or terminated_by_recovery_transition)
                 ep_done_buf.append(done)
 
-                if terminated_by_hit:
+                if terminated_by_recovery_transition:
+                    end_reason = "recovery_transition"
+                elif terminated_by_hit:
                     end_reason = "first_hit"
                 elif terminated:
                     end_reason = "env_terminated"
@@ -491,13 +576,37 @@ def main() -> None:
             if end_reason == "first_hit":
                 episodes_ended_on_first_hit += 1
 
-            accept_episode = bool(float(info.get("goal_success", 0.0)) > 0.5)
+            if recovery_transition_collection:
+                accept_episode = bool(ep_recovery_transition_seen)
+            elif phase_lower == "combat_execution" and end_episode_on_first_hit:
+                accept_episode = bool(ep_had_hit)
+            else:
+                accept_episode = bool(float(info.get("goal_success", 0.0)) > 0.5)
             if enforce_recovery_sequence:
                 accept_episode = bool(accept_episode and ep_step1_transition_seen and ep_terminal_success_seen)
                 if not accept_episode:
                     episodes_rejected_recovery += 1
 
             if accept_episode and len(ep_obs_buf) > 0:
+                if recovery_transition_collection and ep_recovery_transition_idx >= ep_recovery_start_idx:
+                    start_idx = int(ep_recovery_start_idx)
+                    end_idx = int(ep_recovery_transition_idx) + 1
+                    ep_obs_buf = ep_obs_buf[start_idx:end_idx]
+                    ep_act_multi_buf = ep_act_multi_buf[start_idx:end_idx]
+                    ep_done_buf = ep_done_buf[start_idx:end_idx]
+                    ep_goal_xy_buf = ep_goal_xy_buf[start_idx:end_idx]
+                    ep_goal_target_buf = ep_goal_target_buf[start_idx:end_idx]
+                    ep_goal_mask_buf = ep_goal_mask_buf[start_idx:end_idx]
+                    ep_goal_type_buf = ep_goal_type_buf[start_idx:end_idx]
+                    ep_goal_type_index_buf = ep_goal_type_index_buf[start_idx:end_idx]
+                    ep_op_ko_buf = ep_op_ko_buf[start_idx:end_idx]
+                    ep_seq_phase_buf = ep_seq_phase_buf[start_idx:end_idx]
+                    ep_seq_step1_transition_buf = ep_seq_step1_transition_buf[start_idx:end_idx]
+                    ep_seq_step1_completed_buf = ep_seq_step1_completed_buf[start_idx:end_idx]
+                    ep_seq_terminal_success_buf = ep_seq_terminal_success_buf[start_idx:end_idx]
+                    if ep_done_buf:
+                        ep_done_buf[-1] = True
+
                 obs_buf.extend(ep_obs_buf)
                 act_multi_buf.extend(ep_act_multi_buf)
                 done_buf.extend(ep_done_buf)
@@ -521,6 +630,11 @@ def main() -> None:
                 + (
                     f" seq(step1={int(ep_step1_transition_seen)}, step2={int(ep_terminal_success_seen)})"
                     if enforce_recovery_sequence
+                    else ""
+                )
+                + (
+                    f" recovery_transition={int(ep_recovery_transition_seen)}"
+                    if recovery_transition_collection
                     else ""
                 )
             )

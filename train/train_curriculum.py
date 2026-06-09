@@ -58,7 +58,29 @@ class GoalMouseTrackerWrapper(gym.Wrapper):
             if x_idx < goal_target.shape[0] and y_idx < goal_target.shape[0]:
                 if x_idx >= mask.shape[0] or y_idx >= mask.shape[0] or mask[x_idx] > 0.0 or mask[y_idx] > 0.0:
                     return np.asarray([goal_target[x_idx], goal_target[y_idx]], dtype=np.float32)
-                return None
+        if "rel_distance" in names and "rel_dy" in names:
+            dist_idx = names.index("rel_distance")
+            dy_idx = names.index("rel_dy")
+            if (
+                dist_idx < goal_target.shape[0]
+                and dy_idx < goal_target.shape[0]
+                and dist_idx < mask.shape[0]
+                and dy_idx < mask.shape[0]
+                and (mask[dist_idx] > 0.0 or mask[dy_idx] > 0.0)
+            ):
+                mem = getattr(self.unwrapped, "memory", None)
+                player = getattr(mem, "player", None)
+                opponent = getattr(mem, "opponent", None)
+                if player is not None and opponent is not None:
+                    target_dist = float(np.clip(goal_target[dist_idx], 0.0, 1.0) * 2.0)
+                    target_rel_dy = float((np.clip(goal_target[dy_idx], 0.0, 1.0) * 2.0) - 1.0)
+                    dx_abs = float(np.sqrt(max(0.0, target_dist * target_dist - target_rel_dy * target_rel_dy)))
+                    rel_dx = float(getattr(opponent, "x", 0.5) - getattr(player, "x", 0.5))
+                    side = 1.0 if rel_dx >= 0.0 else -1.0
+                    x = float(getattr(opponent, "x", 0.5) - side * dx_abs)
+                    y = float(getattr(opponent, "y", 0.5) - target_rel_dy)
+                    return np.asarray([np.clip(x, 0.0, 1.0), np.clip(y, 0.0, 1.0)], dtype=np.float32)
+            return None
         return goal_target[:2].astype(np.float32)
 
     def _set_cursor_to_goal(self, info) -> None:

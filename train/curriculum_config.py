@@ -276,7 +276,6 @@ def build_phase_spec(
             reward_from_goal_progress=False,
             player_has_weapon_bonus=0.1,
             weapon_pickup_bonus=2.0,
-            success_hold_steps=30,
             step_penalty=0.05,
             offstage_penalty_scale=0.1,
             proximity_scale=0.0,
@@ -290,9 +289,8 @@ def build_phase_spec(
             disable_dodge=False,
             disable_jump=False,
             agent_weapon_drop_penalty=1.0,
-            force_drop_weapon_on_timeout=False,
+            force_drop_weapon_on_timeout=True,
             drop_weapon_key="num5",
-            reset_player_weapon_state_on_reset=False,
             terminate_on_death=bool(terminate_on_death),
         )
 
@@ -344,10 +342,6 @@ def build_phase_spec(
             in_strike_range_bonus=0.03,
             hit_event_bonus=0.5,
             damage_dealt_scale=2.0,
-            combo_penalty_scale=0.08,
-            combo_penalty_after_first_hit_only=True,
-            combo_chain_bonus_scale=0.25,
-            combo_chain_reset_time_since_hit=0.50,
             self_damage_penalty_scale=0.5,
             offstage_penalty_scale=0.05,
             death_penalty=float(death_penalty),
@@ -356,7 +350,6 @@ def build_phase_spec(
             disable_dodge=False,
             disable_jump=False,
             step_penalty=0.003,
-            terminate_on_goal_success=False,
             terminate_on_death=bool(terminate_on_death),
         )
 

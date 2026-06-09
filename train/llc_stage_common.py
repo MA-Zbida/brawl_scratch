@@ -98,11 +98,9 @@ class StageSpec:
     attack_out_of_range_keep_prob: float = 1.0
     combo_chain_bonus_scale: float = 0.0
     combo_chain_reset_time_since_hit: float = 0.12
-    combo_penalty_after_first_hit_only: bool = False
     require_attack_for_success: bool = False
     require_opponent_damage_for_success: bool = False
     opponent_damage_success_tolerance: float = 0.01
-    success_hold_steps: int = 1
     use_l2_error: bool = False
     death_penalty: float = 0.0    # penalty applied when agent loses a stock
     velocity_penalty_scale: float = 0.0   # penalise speed when near goal
@@ -133,9 +131,8 @@ class StageSpec:
     agent_weapon_drop_penalty: float = 0.0
     force_drop_weapon_on_timeout: bool = False
     drop_weapon_key: str = "num5"
-    reset_player_weapon_state_on_reset: bool = True
     terminate_on_death: bool = False
-    terminate_on_goal_success: bool = True
+    terminate_on_goal_success: bool = False
     terminate_on_hit_event: bool = False
     hit_event_damage_threshold: float = 1e-6
     resample_goal_on_timer: bool = False
@@ -207,7 +204,6 @@ class StageGoalEnv(gym.Wrapper):
         self._prev_has_weapon: Optional[bool] = None
         self._prev_in_range: float = 0.0
         self._combo_chain_hits: int = 0
-        self._success_streak: int = 0
         self._seq_phase: int = 1
         self._seq_step1_completed: bool = False
         self._allowed_attack_actions: Optional[set[int]] = None
@@ -456,13 +452,13 @@ class StageGoalEnv(gym.Wrapper):
         else:
             obs, info = self._perturb_reset()
 
-        if self.stage_spec.reset_player_weapon_state_on_reset:
-            _unwrapped = self.unwrapped
-            _mem = getattr(_unwrapped, "memory", None)
-            if _mem is not None:
-                _player = getattr(_mem, "player", None)
-                if _player is not None:
-                    _player.weapon_state = 0.0
+        # Guarantee agent starts weaponless regardless of force-drop timing.
+        _unwrapped = self.unwrapped
+        _mem = getattr(_unwrapped, "memory", None)
+        if _mem is not None:
+            _player = getattr(_mem, "player", None)
+            if _player is not None:
+                _player.weapon_state = 0.0
 
         obs = np.asarray(obs, dtype=np.float32)
         init_feats = self._extract(obs)
@@ -482,7 +478,6 @@ class StageGoalEnv(gym.Wrapper):
         self._prev_has_weapon = self._feature_value(init_feats, "player_has_weapon", 0.0) > 0.5
         self._prev_in_range = float(np.clip(self._feature_value(init_feats, "in_strike_range", 0.0), 0.0, 1.0))
         self._combo_chain_hits = 0
-        self._success_streak = 0
         self._prev_error = None
 
         info["stage_name"] = self.stage_spec.name
@@ -645,14 +640,7 @@ class StageGoalEnv(gym.Wrapper):
                 offstage_penalty = float(self.stage_spec.offstage_penalty_scale * offstage)
                 reward -= offstage_penalty
 
-            combo_penalty_enabled = bool(
-                self.stage_spec.combo_penalty_scale > 0.0
-                and (
-                    not self.stage_spec.combo_penalty_after_first_hit_only
-                    or self._combo_chain_hits > 0
-                )
-            )
-            if combo_penalty_enabled:
+            if self.stage_spec.combo_penalty_scale > 0.0:
                 combo_delay_penalty = float(self.stage_spec.combo_penalty_scale * time_since_hit)
                 reward -= combo_delay_penalty
 
@@ -712,14 +700,6 @@ class StageGoalEnv(gym.Wrapper):
                     success = bool(step2_ok)
 
             if success:
-                self._success_streak += 1
-            else:
-                self._success_streak = 0
-
-            required_success_steps = int(max(1, self.stage_spec.success_hold_steps))
-            success = bool(success and self._success_streak >= required_success_steps)
-
-            if success and (self.stage_spec.terminate_on_goal_success or self._success_streak == required_success_steps):
                 reward += self.stage_spec.success_bonus
         else:
             self._active_mask = self.mask.copy()
@@ -727,7 +707,6 @@ class StageGoalEnv(gym.Wrapper):
             goal_progress = 0.0
             reward = 0.0
             success = False
-            self._success_streak = 0
 
         if self._goal_active and self.stage_spec.step_penalty > 0.0:
             reward -= self.stage_spec.step_penalty
@@ -741,7 +720,7 @@ class StageGoalEnv(gym.Wrapper):
             reward -= self.stage_spec.jump_usage_penalty_scale * jumps_used
 
         # Episode ends when goal is reached.
-        if self._goal_active and success and self.stage_spec.terminate_on_goal_success:
+        if self._goal_active and success:
             truncated = True
 
         terminated_by_hit_event = False
@@ -826,7 +805,6 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_error"] = float(curr_error)
         info["goal_progress"] = float(goal_progress)
         info["goal_success"] = float(1.0 if success else 0.0)
-        info["goal_success_streak"] = int(self._success_streak)
         info["goal_steps_left"] = int(self._goal_steps_left)
         info["llc_reward"] = float(reward)
         info["stage_feature_names"] = list(self.feature_names)

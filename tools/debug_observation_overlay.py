@@ -174,6 +174,16 @@ def draw_obs_panel(
         f"step: {step_idx}",
         f"reward: {float(reward):+.4f}",
         f"action [mv,j,d,atk]: {list(action)}",
+        (
+            "weapon diag: "
+            f"state={float(info.get('player_weapon_state', 0.0)):.1f} "
+            f"vis={int(float(info.get('weapon_visible_this_frame', 0.0)) > 0.5)} "
+            f"inf={int(float(info.get('weapon_pickup_inferred', 0.0)) > 0.5)} "
+            f"act={int(float(info.get('weapon_pickup_action', 0.0)) > 0.5)} "
+            f"drop={int(float(info.get('weapon_drop_action', 0.0)) > 0.5)} "
+            f"cand={int(float(info.get('weapon_pickup_candidate_frames', 0.0)))} "
+            f"miss={int(float(info.get('weapon_pickup_candidate_missing_frames', 0.0)))}"
+        ),
     ]
 
     y = 32

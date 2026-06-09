@@ -599,7 +599,9 @@ class BrawlDeepEnv(gym.Env):
         """Fast lookup from relational features."""
         if not self.memory.weapon.exists:
             return float("inf")
-        return float((self.memory.weapon_dx**2 + self.memory.weapon_dy**2)**0.5)
+        dx = float(self.memory.weapon.x - self.memory.player.x)
+        dy = float(self.memory.weapon.y - self.memory.player.y)
+        return float((dx**2 + dy**2)**0.5)
 
     def _update_game_logic(self, detections, action_jump: bool, action_dodge: bool) -> None:
         frame = self._last_frame
@@ -967,6 +969,13 @@ class BrawlDeepEnv(gym.Env):
             "player_respawn_timer": float(self.memory.player_respawn_timer),
             "self_delta_damage": float(self.memory.self_delta_damage),
             "op_delta_damage": float(self.memory.op_delta_damage),
+            "player_weapon_state": float(self.memory.player.weapon_state),
+            "weapon_visible_this_frame": float(1.0 if self.memory.weapon_visible_this_frame else 0.0),
+            "weapon_pickup_inferred": float(1.0 if self.memory.weapon_pickup_inferred_this_frame else 0.0),
+            "weapon_pickup_action": float(1.0 if self.memory.weapon_pickup_action_this_frame else 0.0),
+            "weapon_drop_action": float(1.0 if self.memory.weapon_drop_action_this_frame else 0.0),
+            "weapon_pickup_candidate_frames": float(getattr(self.memory, "_pickup_candidate_frames", 0)),
+            "weapon_pickup_candidate_missing_frames": float(getattr(self.memory, "_pickup_candidate_missing_frames", 0)),
             "reward_breakdown": reward_breakdown_total if reward_breakdown_total else {"total_reward": reward},
             "frame_skip": int(repeat_steps),
         }

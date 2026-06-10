@@ -1,6 +1,5 @@
-import numpy as np
 from ultralytics import YOLO  # type: ignore[attr-defined]
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 from pathlib import Path
 
 
@@ -100,42 +99,3 @@ class Extract:
         raise RuntimeError(
             f"TensorRT engine failed and no .onnx/.pt fallback found in {parent}"
         )
-
-    def find_detection(self, detections, name) -> Optional[Dict[str, Any]]:
-        candidates = [det for det in detections if det['class_name'] == name]
-        if not candidates:
-            return None
-        
-        return max(candidates, key=lambda d: d.get("confidence", 0.0))
-
-    def find_detections(self, detections, name):
-        return [det for det in detections if det['class_name'] == name]
-    
-    def detections_vector(self, detections) -> Optional[np.ndarray]:
-        vec = np.zeros(shape=(7,), dtype=np.float32)
-
-        # Find Detections
-        agent = self.find_detection(detections=detections, name="agent")
-        op = (self.find_detection(detections=detections, name="op") or
-            self.find_detection(detections=detections, name="op1") or
-            self.find_detection(detections=detections, name="op2"))
-        weapons = self.find_detection(detections=detections, name="weapons")
-
-        # Player 1 / Agent
-        if agent:
-            vec[0] = agent['bbox'][0]
-            vec[1] = agent['bbox'][1]
-        
-        # Opponent
-        if op:
-            vec[2] = op['bbox'][0]
-            vec[3] = op['bbox'][1]
-            vec[4] = 0 if op['class_name'] == "op" else 1 if op['class_name'] == "op1" else 2
-        
-        # Weapons
-        if weapons:
-            vec[5] = weapons['bbox'][0]
-            vec[6] = weapons['bbox'][1]
-
-        return vec
-

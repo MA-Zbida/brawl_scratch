@@ -71,7 +71,7 @@ class Physics:
 
 
 class Memory:
-    def __init__(self, yolo_blend_alpha: float = 0.95):
+    def __init__(self):
         self.max_health = 351.0
         self.max_stocks = 3.0
         self.min_xy = 0.0
@@ -84,8 +84,6 @@ class Memory:
         self.physics = Physics()
 
         self._obs_buffer = np.zeros((StateSpec.dim(),), dtype=np.float32)
-
-        self._alpha_blend: float = float(np.clip(yolo_blend_alpha, 0.0, 1.0))
 
         self._edge_x_radius = 0.04
         self._edge_y_tolerance = 0.03
@@ -135,10 +133,6 @@ class Memory:
 
         self._prev_action = np.zeros(4, dtype=np.float32)
 
-    def set_yolo_blend_alpha(self, alpha: float) -> None:
-        """Set fusion weight for YOLO position vs tracker output."""
-        self._alpha_blend = float(np.clip(alpha, 0.0, 1.0))
-
     def _clamp_position(self, x: float, y: float) -> Tuple[float, float]:
         return (
             clamp(x, self.min_xy, self.max_xy),
@@ -175,8 +169,7 @@ class Memory:
     def _update_fighter(
         self,
         state: FighterState,
-        yolo_detection: Optional[dict],
-        tracker_detection: Optional[dict],
+        detection: Optional[dict],
         dt: float = 1.0 / 41.0,
         max_vel: float = 3.0,
         max_missing: int = 10,
@@ -184,27 +177,7 @@ class Memory:
     ) -> None:
         dt = max(1e-6, float(dt))
 
-        yolo_xy: Optional[Tuple[float, float]] = None
-        tracker_xy: Optional[Tuple[float, float]] = None
-
-        if yolo_detection is not None:
-            x, y = bbox_center(yolo_detection)
-            yolo_xy = self._clamp_position(x, y + float(y_offset))
-
-        if tracker_detection is not None:
-            x, y = bbox_center(tracker_detection)
-            tracker_xy = self._clamp_position(x, y + float(y_offset))
-
-        if yolo_xy is not None and tracker_xy is not None:
-            # Desired fusion: alpha * YOLO + (1 - alpha) * tracker.
-            alpha = self._alpha_blend
-            x_new = (alpha * yolo_xy[0]) + ((1.0 - alpha) * tracker_xy[0])
-            y_new = (alpha * yolo_xy[1]) + ((1.0 - alpha) * tracker_xy[1])
-        elif yolo_xy is not None:
-            x_new, y_new = yolo_xy
-        elif tracker_xy is not None:
-            x_new, y_new = tracker_xy
-        else:
+        if detection is None:
             # No physics fallback: keep last location until detections return.
             state.last_x, state.last_y = state.x, state.y
             state.vx = 0.0
@@ -215,6 +188,8 @@ class Memory:
                 state.exists = False
             return
 
+        x, y = bbox_center(detection)
+        x_new, y_new = self._clamp_position(x, y + float(y_offset))
         x_new, y_new = self._clamp_position(x_new, y_new)
         state.last_x, state.last_y = state.x, state.y
         state.vx = clamp((x_new - state.x) / dt, -max_vel, max_vel)
@@ -223,12 +198,7 @@ class Memory:
         state.exists = True
         state.missing_frames = 0
 
-        if yolo_detection is not None:
-            det_conf = float(yolo_detection.get("confidence", 0.0))
-        elif tracker_detection is not None:
-            det_conf = 0.85 * float(tracker_detection.get("confidence", 0.0))
-        else:
-            det_conf = 0.0
+        det_conf = float(detection.get("confidence", 0.0))
         state.confidence = float(np.clip((0.5 * state.confidence) + (0.5 * det_conf), 0.0, 1.0))
 
     def update_from_detections(
@@ -242,8 +212,8 @@ class Memory:
         player_yolo = self._select_detection(yolo_detections, ["agent"], self.player)
         opponent_yolo = self._select_detection(yolo_detections, ["op", "op1", "op2"], self.opponent)
 
-        self._update_fighter(self.player, player_yolo, player_yolo, dt=dt, y_offset=self.player.height)
-        self._update_fighter(self.opponent, opponent_yolo, opponent_yolo, dt=dt)
+        self._update_fighter(self.player, player_yolo, dt=dt, y_offset=self.player.height)
+        self._update_fighter(self.opponent, opponent_yolo, dt=dt)
 
         opponent_det = opponent_yolo
         if opponent_det is not None:

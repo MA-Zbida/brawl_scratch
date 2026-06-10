@@ -29,7 +29,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stochastic", action="store_true", help="Use stochastic actions instead of deterministic")
 
     p.add_argument("--yolo-every", type=int, default=1)
-    p.add_argument("--yolo-blend-alpha", type=float, default=0.95)
 
     p.add_argument("--death-penalty", type=float, default=1.0, help="Only used when --phase is set")
     return p.parse_args()
@@ -108,7 +107,6 @@ def make_env(args: argparse.Namespace):
         terminate_on_stock_out=True,
         max_episode_steps=max(0, int(args.max_episode_steps)),
         yolo_infer_every_n_steps=max(1, int(args.yolo_every)),
-        yolo_obs_blend_alpha=float(np.clip(args.yolo_blend_alpha, 0.0, 1.0)),
         action_repeat_steps=1,
         action_repeat_min_steps=1,
         action_repeat_max_steps=1,
@@ -122,7 +120,6 @@ def make_env(args: argparse.Namespace):
     )
     # During evaluation, terminate only when a stock-out happens (or max-steps if configured).
     stage_spec.terminate_on_death = False
-    stage_spec.terminate_on_goal_success = False
     stage_spec.terminate_on_hit_event = False
     env: gym.Env = StageGoalEnv(base_env, stage_spec)
 

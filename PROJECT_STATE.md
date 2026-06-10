@@ -6,6 +6,14 @@ Last updated: 2026-06-10
 
 This project trains a low-level controller for Brawlhalla. The controller learns small reusable skills first, then those skills can later be reused by a higher-level policy.
 
+The current training philosophy is pure basics first:
+
+```text
+heuristic teacher -> behavior cloning -> PPO fine-tuning -> retention checks
+```
+
+The first teacher policies should be simple and predictable, even if they are bad at the full game. The goal is to teach the action grammar for each skill before asking PPO to optimize timing and adaptation.
+
 The current pipeline is intentionally simple:
 
 1. Capture the game frame.
@@ -80,17 +88,21 @@ Drop rule:
 if player_has_weapon = 1 and NUM5 is pressed, player_has_weapon becomes 0
 ```
 
-Demo success for this phase requires the player to pick up the weapon and keep holding it for the configured hold window, currently 30 steps. The collector no longer force-drops the weapon at timeout, so a new episode can start with the current held-weapon state unless the game itself removes it.
+Stage success currently happens when the observation reports `player_has_weapon = 1`. The collector and stage wrapper no longer force-drop the weapon between episodes, and reset logic no longer manually overwrites weapon state. If the game still has the player holding a weapon, memory is allowed to preserve that state.
 
 ## Cleaned Up
 
-Removed from the weapon path:
+Removed from the active path:
 
 - disappearance-based pickup inference,
 - pending pickup candidate counters,
 - extra weapon distance debug fields,
 - high-FPS debug recorder arguments,
-- larger YOLO debug max-detection defaults.
+- forced weapon-drop side effects,
+- unused YOLO tracker export,
+- unused YOLO detection-vector helpers,
+- tracker/Yolo blend-alpha configuration,
+- stale stage timer settings.
 
 The remaining weapon path is:
 
@@ -100,7 +112,15 @@ all visible weapons -> closest weapon -> NUM5 and distance <= 0.05 -> player_has
 
 ## Next Goal
 
-Collect a small `weapon_acquisition` demo set with this exact behavior:
+Build pure heuristic teachers for the easiest phases first:
+
+1. `movement_fluency`: move toward target `player_x/player_y`.
+2. `weapon_acquisition`: move toward closest weapon, press NUM5 within `0.05`, then avoid pressing NUM5 while armed.
+3. `recovery_mastery`: move toward nearest ledge and jump when below/near ledge.
+
+Then use those heuristic rollouts as BC data before PPO fine-tuning.
+
+For manual `weapon_acquisition` collection, use this exact behavior:
 
 1. Start unarmed.
 2. Walk to the closest visible weapon.

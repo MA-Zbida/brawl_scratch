@@ -13,7 +13,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from env import BrawlDeepEnv, EnvConfig, NullInputController, PyDirectInputController
+from env import BrawlDeepEnv, EnvConfig, NullInputController
 from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv
 
@@ -29,15 +29,11 @@ def parse_args() -> argparse.Namespace:
         help="Max attempted episodes to gather target accepted demos (0 = auto)",
     )
     p.add_argument("--max-episode-steps", type=int, default=100)
-    p.add_argument("--min-goal-duration", type=int, default=120, help="Only used by legacy timer-resampled phases")
-    p.add_argument("--max-goal-duration", type=int, default=220, help="Only used by legacy timer-resampled phases")
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--output", type=str, default="")
     p.add_argument("--move-mouse-to-goal", action="store_true", default=True)
     p.add_argument("--no-move-mouse-to-goal", dest="move_mouse_to_goal", action="store_false")
     p.add_argument("--death-penalty", type=float, default=0.0)
-    p.add_argument("--force-drop-on-episode-end", action="store_true", default=True)
-    p.add_argument("--no-force-drop-on-episode-end", dest="force_drop_on_episode_end", action="store_false")
     p.add_argument("--end-episode-on-first-hit", dest="end_episode_on_first_hit", action="store_true")
     p.add_argument("--no-end-episode-on-first-hit", dest="end_episode_on_first_hit", action="store_false")
     p.set_defaults(end_episode_on_first_hit=None)
@@ -105,15 +101,6 @@ def _build_env(args: argparse.Namespace) -> StageGoalEnv:
     spec = replace(spec, reset_perturb_steps=0)
 
     is_combat = args.phase in _COMBAT_PHASES
-
-    # Keep BC collection aligned with PPO: current curriculum phases resample on
-    # success or episode reset, but legacy timer-driven phases can still opt in.
-    if spec.resample_goal_on_timer:
-        spec = replace(
-            spec,
-            min_goal_duration=max(1, int(args.min_goal_duration)),
-            max_goal_duration=max(int(args.min_goal_duration), int(args.max_goal_duration)),
-        )
 
     # Auto-pick max_episode_steps when the user didn't explicitly set it.
     max_ep_steps = int(args.max_episode_steps)
@@ -206,40 +193,6 @@ def _describe_goal(env: StageGoalEnv, goal_target: np.ndarray, goal_mask: np.nda
     return "goal(n/a)"
 
 
-def _force_drop_weapon_num5_key(drop_controller: PyDirectInputController | None = None) -> bool:
-    """Press numpad 5 once to force drop between episodes.
-
-    Prefer DirectInput (same path used by env attacks), then keyboard fallback.
-    """
-    if drop_controller is not None:
-        try:
-            # Retry a couple of times to survive occasional missed synthetic inputs.
-            for _ in range(3):
-                drop_controller.tap({"num5"})
-                time.sleep(0.02)
-            return True
-        except Exception:
-            pass
-
-    # keyboard scan code fallback for numpad 5.
-    try:
-        keyboard.press(76)
-        time.sleep(0.03)
-        keyboard.release(76)
-        return True
-    except Exception:
-        pass
-
-    for key_name in ("num_5", "num 5", "num5"):
-        try:
-            keyboard.press_and_release(key_name)
-            return True
-        except Exception:
-            continue
-
-    return False
-
-
 def _phase_uses_player_xy_goal(spec) -> bool:
     feature_names = list(spec.feature_names or [])
     if not feature_names:
@@ -270,7 +223,6 @@ def main() -> None:
     hit_damage_threshold = float(max(0.0, args.hit_damage_threshold))
     phase_lower = str(args.phase).strip().lower()
     is_damage = phase_lower in _COMBAT_PHASES
-    phase_requires_weapon = False
     enforce_recovery_sequence = bool(args.enforce_recovery_sequence and phase_lower == "recovery_mastery")
 
     target_episodes = max(1, int(args.episodes))
@@ -289,18 +241,7 @@ def main() -> None:
     else:
         end_episode_on_first_hit = bool(args.end_episode_on_first_hit)
 
-    # Auto-disable weapon drop for phases that require the agent to hold a weapon.
-    force_drop = bool(args.force_drop_on_episode_end) and not phase_requires_weapon
-
     env = _build_env(args)
-    drop_controller: PyDirectInputController | None = None
-    drop_warning_printed = False
-    if force_drop:
-        try:
-            drop_controller = PyDirectInputController()
-        except Exception as exc:
-            print(f"Force-drop warning: PyDirectInput unavailable ({exc}); using keyboard fallback.")
-
     spec = env.stage_spec
     if spec.disable_attack:
         allowed_attack_values = {0}
@@ -334,18 +275,11 @@ def main() -> None:
     if eff_max_steps == _DEFAULT_MAX_STEPS["default"] and is_damage:
         eff_max_steps = _DEFAULT_MAX_STEPS["combat"]
     print(f"Max episode steps: {eff_max_steps}")
-    if spec.resample_goal_on_timer:
-        print(f"Goal resampling: every {spec.min_goal_duration}-{spec.max_goal_duration} steps")
-    else:
-        print("Goal resampling: on success; otherwise a new goal comes with the next episode reset")
+    print("Goal resampling: on success; otherwise a new goal comes with the next episode reset")
     if mouse_guidance_enabled:
         print("Mouse guidance: enabled (cursor moves to target_x,target_y)")
     elif args.move_mouse_to_goal:
         print("Mouse guidance: disabled (phase goals are relational/non-XY)")
-    if force_drop:
-        print("Episode end action: force drop weapon via NUM_5")
-    if phase_requires_weapon:
-        print("Weapon drop disabled (phase requires weapon)")
     if end_episode_on_first_hit:
         print(f"Episode end action: stop on first hit (op_delta_damage >= {hit_damage_threshold:.4f})")
     if enforce_recovery_sequence:
@@ -524,12 +458,6 @@ def main() -> None:
                     else ""
                 )
             )
-            if force_drop:
-                dropped = _force_drop_weapon_num5_key(drop_controller=drop_controller)
-                if not dropped and not drop_warning_printed:
-                    print("Force-drop warning: could not send NUM_5 synthetic key press.")
-                    drop_warning_printed = True
-
         if episodes_collected < target_episodes:
             print(
                 f"Collection stopped with {episodes_collected}/{target_episodes} accepted episodes "
@@ -539,11 +467,6 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nInterrupted by user. Saving partial dataset...")
     finally:
-        if drop_controller is not None:
-            try:
-                drop_controller.reset()
-            except Exception:
-                pass
         env.close()
 
     if episodes_attempted > 0 and end_episode_on_first_hit:

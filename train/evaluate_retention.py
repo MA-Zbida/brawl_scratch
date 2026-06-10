@@ -34,7 +34,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stochastic", action="store_true")
     p.add_argument("--death-penalty", type=float, default=1.0)
     p.add_argument("--yolo-every", type=int, default=1)
-    p.add_argument("--yolo-blend-alpha", type=float, default=0.95)
     p.add_argument("--amnesia-threshold", type=float, default=0.15)
     p.add_argument("--best-scores", type=str, default="", help="JSON best-score file to load/update")
     p.add_argument("--csv", type=str, default="", help="Optional CSV output path")
@@ -52,7 +51,6 @@ def make_env(args: argparse.Namespace, phase: str) -> Any:
         terminate_on_stock_out=True,
         max_episode_steps=max(0, int(args.max_episode_steps)),
         yolo_infer_every_n_steps=max(1, int(args.yolo_every)),
-        yolo_obs_blend_alpha=float(np.clip(args.yolo_blend_alpha, 0.0, 1.0)),
         action_repeat_steps=1,
         action_repeat_min_steps=1,
         action_repeat_max_steps=1,
@@ -65,7 +63,6 @@ def make_env(args: argparse.Namespace, phase: str) -> Any:
         terminate_on_death=False,
     )
     spec.terminate_on_death = False
-    spec.terminate_on_goal_success = False
     spec.terminate_on_hit_event = False
     return StageGoalEnv(base, spec)
 

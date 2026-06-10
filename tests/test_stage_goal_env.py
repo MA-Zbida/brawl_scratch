@@ -14,6 +14,16 @@ from train.curriculum_config import build_phase_spec
 from train.llc_stage_common import StageGoalEnv
 
 
+class _DummyPlayer:
+    def __init__(self) -> None:
+        self.weapon_state = 1.0
+
+
+class _DummyMemory:
+    def __init__(self) -> None:
+        self.player = _DummyPlayer()
+
+
 class DummyStageEnv(gym.Env):
     metadata = {}
 
@@ -27,6 +37,7 @@ class DummyStageEnv(gym.Env):
         )
         self.action_space = gym.spaces.MultiDiscrete([4, 2, 2, 4])
         self.steps = 0
+        self.memory = _DummyMemory()
 
     def _obs(self) -> np.ndarray:
         obs = np.zeros((StateSpec.dim(),), dtype=np.float32)
@@ -74,3 +85,13 @@ def test_stage_goal_env_emits_dynamic_goal_diagnostics() -> None:
     assert info["stage_action_attack"] == 1
     assert np.asarray(info["goal_mask"]).shape == np.asarray(info["goal_target"]).shape
 
+
+def test_stage_goal_env_reset_preserves_base_weapon_state() -> None:
+    spec = build_phase_spec("weapon_acquisition", terminate_on_death=False)
+    base = DummyStageEnv()
+    base.memory.player.weapon_state = 1.0
+    env = StageGoalEnv(base, spec)
+
+    env.reset(seed=7)
+
+    assert base.memory.player.weapon_state == 1.0

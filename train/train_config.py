@@ -79,7 +79,6 @@ class TrainConfig:
     terminate_on_death: bool = True
     move_mouse_to_goal: bool = False
     yolo_every: int = 1
-    yolo_blend_alpha: float = 0.95
 
 
 # Phase-specific overrides applied on top of defaults.

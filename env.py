@@ -383,9 +383,6 @@ class PixelStocksHealthProvider:
 
 @dataclass
 class EnvConfig:
-    max_vel: float = 0.15
-    max_weapon_missing: int = 5
-    vy_ground_threshold: float = 0.01
     terminate_on_stock_out: bool = True
     ui_regions: Optional[dict] = field(default_factory=lambda: dict(UI_REGIONS))
     yolo_infer_every_n_steps: int = 1
@@ -394,7 +391,6 @@ class EnvConfig:
     yolo_verbose: bool = False
     yolo_infer_width: int = 640
     yolo_infer_height: int = 360
-    yolo_obs_blend_alpha: float = 0.95
     temporal_stack_size: int = 1  # 1 = single frame (LSTM handles time)
     temporal_offsets: tuple[int, ...] = (0,)  # only t-0; LSTM does the rest
     profile_step_timing: bool = False
@@ -445,7 +441,7 @@ class BrawlDeepEnv(gym.Env):
         else:
             self.stocks_health_provider = None
 
-        self.memory = Memory(yolo_blend_alpha=self.config.yolo_obs_blend_alpha)
+        self.memory = Memory()
         self._last_step_time = time.perf_counter()
         self._step_count = 0
         self._last_detections: list = []
@@ -605,7 +601,7 @@ class BrawlDeepEnv(gym.Env):
 
     def _update_game_logic(self, detections, action_jump: bool, action_dodge: bool) -> None:
         frame = self._last_frame
-        self.memory.update_on_ground(vy_threshold=self.config.vy_ground_threshold)
+        self.memory.update_on_ground()
 
         dt = max(1e-6, time.perf_counter() - self._last_step_time)
         self._last_step_time = time.perf_counter()
@@ -711,7 +707,7 @@ class BrawlDeepEnv(gym.Env):
         if prev_player_respawn_timer > 1e-6 or prev_self_stock_lost > 0.0:
             prev_weapon_state = 0.0
 
-        self.memory = Memory(yolo_blend_alpha=self.config.yolo_obs_blend_alpha)
+        self.memory = Memory()
         self.memory.player.weapon_state = prev_weapon_state
         self.memory.self_stocks_left = float(prev_self_stocks)
         self.memory.prev_self_stocks_left = float(prev_self_stocks)

@@ -73,8 +73,6 @@ class StageSpec:
     goal_family_sampler: Optional[GoalFamilySampler] = None
     feature_names: Optional[list[str]] = None  # logging + goal feature order
     goal_extractor: Optional[GoalExtractor] = None
-    min_goal_duration: int = 100
-    max_goal_duration: int = 120
     progress_scale: float = 1.0
     progress_clip_min: float = -0.1
     progress_clip_max: float = 0.3
@@ -116,8 +114,6 @@ class StageSpec:
     disable_jump: bool = False
     reset_perturb_steps: int = 0
     step_penalty: float = 0.0  # constant per-step penalty to discourage time wastage
-    idle_movement_penalty: float = 0.0
-    idle_action_index: int = 3
     reward_from_goal_progress: bool = False
     player_has_weapon_bonus: float = 0.0
     weapon_pickup_bonus: float = 0.0
@@ -129,14 +125,10 @@ class StageSpec:
     player_xy_to_opponent_goal: bool = False
     anchor_player_xy_goal_when_in_strike_range: bool = False
     agent_weapon_drop_penalty: float = 0.0
-    force_drop_weapon_on_timeout: bool = False
     drop_weapon_key: str = "num5"
     terminate_on_death: bool = False
-    terminate_on_goal_success: bool = False
     terminate_on_hit_event: bool = False
     hit_event_damage_threshold: float = 1e-6
-    resample_goal_on_timer: bool = False
-    resample_goal_on_opponent_stock_loss: bool = False
     opponent_ko_bonus: float = 0.0
     sample_goal_only_when_player_exists: bool = True
     sequential_goal_enabled: bool = False
@@ -196,7 +188,6 @@ class StageGoalEnv(gym.Wrapper):
 
         self._obs_buf = np.zeros((self._aug_dim,), dtype=np.float32)
         self._goal_target = np.zeros((self.goal_dim,), dtype=np.float32)
-        self._goal_steps_left = 0
         self._goal_active = False
         self._step_count = 0
         self._awaiting_respawn_after_death = False
@@ -330,23 +321,6 @@ class StageGoalEnv(gym.Wrapper):
             except Exception:
                 pass
 
-    def _force_drop_weapon_if_needed(self, feats: np.ndarray, truncated: bool) -> float:
-        if not truncated or not self.stage_spec.force_drop_weapon_on_timeout:
-            return 0.0
-        has_weapon = self._feature_value(feats, "player_has_weapon", 0.0) > 0.5
-        if not has_weapon:
-            return 0.0
-
-        key = str(self.stage_spec.drop_weapon_key or "num5").strip().lower() or "num5"
-        try:
-            controller = getattr(self.unwrapped, "input_controller", None)
-            if controller is not None and hasattr(controller, "tap"):
-                controller.tap({key})
-                return 1.0
-        except Exception:
-            return 0.0
-        return 0.0
-
     @staticmethod
     def _attack_action_value_for_key(key: str) -> int:
         key_to_action = {
@@ -375,7 +349,6 @@ class StageGoalEnv(gym.Wrapper):
                 f"Target sampler returned dim={self._goal_target.shape[0]}, expected {self.goal_dim}"
             )
         self._goal_active = True
-        self._goal_steps_left = -1
 
     def _activate_goal(self, obs: np.ndarray, feats: np.ndarray, *, sequence_step: Optional[int] = None) -> None:
         if sequence_step is None:
@@ -452,14 +425,6 @@ class StageGoalEnv(gym.Wrapper):
         else:
             obs, info = self._perturb_reset()
 
-        # Guarantee agent starts weaponless regardless of force-drop timing.
-        _unwrapped = self.unwrapped
-        _mem = getattr(_unwrapped, "memory", None)
-        if _mem is not None:
-            _player = getattr(_mem, "player", None)
-            if _player is not None:
-                _player.weapon_state = 0.0
-
         obs = np.asarray(obs, dtype=np.float32)
         init_feats = self._extract(obs)
         self._step_count = 0
@@ -467,7 +432,6 @@ class StageGoalEnv(gym.Wrapper):
         self._seq_step1_completed = False
         if self.stage_spec.sample_goal_only_when_player_exists and not self._player_is_controllable(info):
             self._goal_target.fill(0.0)
-            self._goal_steps_left = -1
             self._goal_active = False
             self._active_mask = self.mask.copy()
         else:
@@ -535,8 +499,6 @@ class StageGoalEnv(gym.Wrapper):
 
         goal_new_sampled = False
         goal_resampled_after_reward = False
-        resample_due_to_stock_loss = False
-        resample_due_to_timer = False
         resample_goal_after_reward = False
         resample_goal_sequence_step: Optional[int] = None
         curr_feats = self._extract(obs)  # compute once; reused for reward, resampling, and HER buffer
@@ -758,7 +720,6 @@ class StageGoalEnv(gym.Wrapper):
         if seq_failure_penalty > 0.0:
             reward -= float(seq_failure_penalty)
 
-        forced_weapon_drop = float(self._force_drop_weapon_if_needed(curr_feats, truncated))
         agent_weapon_drop_event = 0.0
         agent_weapon_drop_penalty_applied = 0.0
         if self.stage_spec.agent_weapon_drop_penalty > 0.0:
@@ -769,7 +730,6 @@ class StageGoalEnv(gym.Wrapper):
                 dropped_now
                 and agent_drop_input
                 and effective_self_stock_lost <= 0.0
-                and forced_weapon_drop <= 0.0
             ):
                 reward -= float(self.stage_spec.agent_weapon_drop_penalty)
                 agent_weapon_drop_event = 1.0
@@ -805,7 +765,6 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_error"] = float(curr_error)
         info["goal_progress"] = float(goal_progress)
         info["goal_success"] = float(1.0 if success else 0.0)
-        info["goal_steps_left"] = int(self._goal_steps_left)
         info["llc_reward"] = float(reward)
         info["stage_feature_names"] = list(self.feature_names)
         info["goal_new_sampled"] = goal_new_sampled
@@ -825,7 +784,6 @@ class StageGoalEnv(gym.Wrapper):
         info["duplicate_death_suppressed"] = float(1.0 if raw_self_stock_lost > 0.0 and effective_self_stock_lost <= 0.0 else 0.0)
         info["terminal_success"] = float(1.0 if (self._goal_active and success) else 0.0)
         info["terminal_hit_event"] = float(1.0 if terminated_by_hit_event else 0.0)
-        info["forced_weapon_drop"] = forced_weapon_drop
         info["agent_weapon_drop_event"] = agent_weapon_drop_event
         info["agent_weapon_drop_penalty"] = agent_weapon_drop_penalty_applied
         info["combat_bonus_chase"] = float(chase_bonus)

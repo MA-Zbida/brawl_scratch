@@ -389,7 +389,7 @@ class EnvConfig:
     terminate_on_stock_out: bool = True
     ui_regions: Optional[dict] = field(default_factory=lambda: dict(UI_REGIONS))
     yolo_infer_every_n_steps: int = 1
-    yolo_max_det: int = 5
+    yolo_max_det: int = 8
     yolo_conf: float = 0.25
     yolo_verbose: bool = False
     yolo_infer_width: int = 640
@@ -971,11 +971,8 @@ class BrawlDeepEnv(gym.Env):
             "op_delta_damage": float(self.memory.op_delta_damage),
             "player_weapon_state": float(self.memory.player.weapon_state),
             "weapon_visible_this_frame": float(1.0 if self.memory.weapon_visible_this_frame else 0.0),
-            "weapon_pickup_inferred": float(1.0 if self.memory.weapon_pickup_inferred_this_frame else 0.0),
             "weapon_pickup_action": float(1.0 if self.memory.weapon_pickup_action_this_frame else 0.0),
             "weapon_drop_action": float(1.0 if self.memory.weapon_drop_action_this_frame else 0.0),
-            "weapon_pickup_candidate_frames": float(getattr(self.memory, "_pickup_candidate_frames", 0)),
-            "weapon_pickup_candidate_missing_frames": float(getattr(self.memory, "_pickup_candidate_missing_frames", 0)),
             "reward_breakdown": reward_breakdown_total if reward_breakdown_total else {"total_reward": reward},
             "frame_skip": int(repeat_steps),
         }

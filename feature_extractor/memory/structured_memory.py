@@ -63,12 +63,7 @@ class Physics:
     respawn_duration: float = 4.7
     ground_y_tolerance: float = 0.028
     max_weapon_missing_frames: float = 4
-    max_dist_threshold: float = 0.14
-    pickup_candidate_distance: float = 0.16
-    pickup_candidate_linger_frames: int = 8
-    pickup_candidate_missing_frames: int = 2
-    pickup_candidate_match_radius: float = 0.055
-    pickup_candidate_player_radius: float = 0.22
+    pickup_distance_norm: float = 0.05
     # Movement physics (normalised-coordinate space)
     gravity: float = 3.0             # norm_coords/s²  (positive = downward in screen coords)
     ground_friction: float = 8.0     # 1/s  velocity damping on ground
@@ -103,6 +98,8 @@ class Memory:
         self.weapon_dx: float = 0.0
         self.weapon_dy: float = 0.0
         self.weapon_visible_this_frame: bool = False
+        self.visible_weapon_centers: list[Tuple[float, float]] = []
+        self.closest_weapon_distance: float = float("inf")
 
         self.player_time_since_hit: float = 2.0
         self.opponent_time_since_hit: float = 2.0
@@ -133,13 +130,6 @@ class Memory:
 
         self.player_respawn_timer: float = 0.0
         self.opponent_respawn_timer: float = 0.0
-        self._pending_player_weapon_pick_frames: int = 0
-        self._pending_player_weapon_pick_missing_frames: int = 0
-        self._pickup_candidate_frames: int = 0
-        self._pickup_candidate_missing_frames: int = 0
-        self._pickup_candidate_x: float = 0.5
-        self._pickup_candidate_y: float = 0.5
-        self.weapon_pickup_inferred_this_frame: bool = False
         self.weapon_pickup_action_this_frame: bool = False
         self.weapon_drop_action_this_frame: bool = False
 
@@ -169,6 +159,18 @@ class Memory:
             return min(candidates, key=score)
 
         return max(candidates, key=lambda d: float(d.get("confidence", 0.0)))
+
+    def _closest_weapon_center(self, centers: List[Tuple[float, float]]) -> Optional[Tuple[float, float]]:
+        if not centers:
+            self.closest_weapon_distance = float("inf")
+            return None
+
+        closest = min(
+            centers,
+            key=lambda xy: euclidian(xy, (self.player.x, self.player.y)),
+        )
+        self.closest_weapon_distance = float(euclidian(closest, (self.player.x, self.player.y)))
+        return closest
 
     def _update_fighter(
         self,
@@ -236,7 +238,6 @@ class Memory:
     ) -> None:
         # YOLO is the sole detection source; tracker layer removed.
         yolo_detections = list(detections or [])
-        self.weapon_pickup_inferred_this_frame = False
 
         player_yolo = self._select_detection(yolo_detections, ["agent"], self.player)
         opponent_yolo = self._select_detection(yolo_detections, ["op", "op1", "op2"], self.opponent)
@@ -255,20 +256,15 @@ class Memory:
                 self.opponent.weapon_state = 0.0
 
         yolo_weapon_candidates = [d for d in yolo_detections if d.get("class_name") == "weapons"]
-        self.weapon_visible_this_frame = bool(yolo_weapon_candidates)
         visible_weapon_centers: list[Tuple[float, float]] = [
             self._clamp_position(*bbox_center(d)) for d in yolo_weapon_candidates
         ]
+        self.visible_weapon_centers = visible_weapon_centers
+        self.weapon_visible_this_frame = bool(visible_weapon_centers)
 
-        yolo_weapon = None
-        if yolo_weapon_candidates:
-            yolo_weapon = min(
-                yolo_weapon_candidates,
-                key=lambda d: euclidian(bbox_center(d), (self.player.x, self.player.y)),
-            )
-
-        if yolo_weapon is not None:
-            wx, wy = self._clamp_position(*bbox_center(yolo_weapon))
+        closest_weapon = self._closest_weapon_center(visible_weapon_centers)
+        if closest_weapon is not None:
+            wx, wy = closest_weapon
             self.weapon.x, self.weapon.y = wx, wy
             self.weapon.exists = True
             self.weapon.missing_frames = 0
@@ -277,8 +273,6 @@ class Memory:
             if self.weapon.missing_frames >= self.physics.max_weapon_missing_frames:
                 self.weapon.exists = False
 
-        self._update_player_weapon_from_visual_disappearance(visible_weapon_centers)
-
         if abs(self.player.vx) > 0.005:
             self._player_last_dx = 1.0 if self.player.vx > 0 else -1.0
         if abs(self.opponent.vx) > 0.005:
@@ -286,100 +280,24 @@ class Memory:
 
         self.update_on_ground()
 
-    def _reset_visual_pickup_candidate(self) -> None:
-        self._pickup_candidate_frames = 0
-        self._pickup_candidate_missing_frames = 0
-
-    def _update_player_weapon_from_visual_disappearance(self, visible_weapon_centers: List[Tuple[float, float]]) -> None:
-        if self.player.weapon_state > 0.0:
-            self._reset_visual_pickup_candidate()
-            return
-
-        if visible_weapon_centers:
-            nearest = min(
-                visible_weapon_centers,
-                key=lambda xy: euclidian(xy, (self.player.x, self.player.y)),
-            )
-            nearest_dist = euclidian(nearest, (self.player.x, self.player.y))
-            if nearest_dist <= float(self.physics.pickup_candidate_distance):
-                self._pickup_candidate_x, self._pickup_candidate_y = nearest
-                self._pickup_candidate_frames = max(
-                    self._pickup_candidate_frames,
-                    int(self.physics.pickup_candidate_linger_frames),
-                )
-                self._pickup_candidate_missing_frames = 0
-
-        if self._pickup_candidate_frames <= 0:
-            return
-
-        candidate = (self._pickup_candidate_x, self._pickup_candidate_y)
-        still_visible = any(
-            euclidian(xy, candidate) <= float(self.physics.pickup_candidate_match_radius)
-            for xy in visible_weapon_centers
-        )
-        player_still_near = (
-            euclidian((self.player.x, self.player.y), candidate)
-            <= float(self.physics.pickup_candidate_player_radius)
-        )
-
-        if still_visible:
-            self._pickup_candidate_missing_frames = 0
-        else:
-            self._pickup_candidate_missing_frames += 1
-            if (
-                self._pickup_candidate_missing_frames >= int(self.physics.pickup_candidate_missing_frames)
-                and player_still_near
-            ):
-                self.player.weapon_state = 1.0
-                self.weapon_pickup_inferred_this_frame = True
-                if not visible_weapon_centers:
-                    self.weapon.exists = False
-                    self.weapon.missing_frames = self.physics.max_weapon_missing_frames + 1
-                self._reset_visual_pickup_candidate()
-                return
-            if self._pickup_candidate_missing_frames >= int(self.physics.pickup_candidate_missing_frames):
-                self._reset_visual_pickup_candidate()
-                return
-
-        self._pickup_candidate_frames -= 1
-        if self._pickup_candidate_frames <= 0:
-            self._reset_visual_pickup_candidate()
-
     def update_player_weapon_from_action(self, action_pick_throw: bool, dist_to_weapon: float) -> None:
         self.weapon_pickup_action_this_frame = False
         self.weapon_drop_action_this_frame = False
 
-        if self._pending_player_weapon_pick_frames > 0:
-            self._pending_player_weapon_pick_frames -= 1
-            if self.weapon_visible_this_frame:
-                self._pending_player_weapon_pick_missing_frames = 0
-            else:
-                self._pending_player_weapon_pick_missing_frames += 1
-                if self._pending_player_weapon_pick_missing_frames >= 2:
-                    self.player.weapon_state = 1.0
-                    self.weapon_pickup_action_this_frame = True
-                    self.weapon.exists = False
-                    self.weapon.missing_frames = self.physics.max_weapon_missing_frames + 1
-                    self._pending_player_weapon_pick_frames = 0
-                    self._pending_player_weapon_pick_missing_frames = 0
-
         if not action_pick_throw:
-            return
-
-        if self.weapon_pickup_inferred_this_frame:
             return
 
         if self.player.weapon_state > 0.0:
             self.player.weapon_state = 0.0
             self.weapon_drop_action_this_frame = True
-            self._pending_player_weapon_pick_frames = 0
-            self._pending_player_weapon_pick_missing_frames = 0
-            self._reset_visual_pickup_candidate()
             return
 
-        if dist_to_weapon <= self.physics.max_dist_threshold and self.weapon_visible_this_frame:
-            self._pending_player_weapon_pick_frames = max(self._pending_player_weapon_pick_frames, 5)
-            self._pending_player_weapon_pick_missing_frames = 0
+        distance_to_weapon = float(max(0.0, dist_to_weapon))
+        if self.weapon.exists and distance_to_weapon <= float(self.physics.pickup_distance_norm):
+            self.player.weapon_state = 1.0
+            self.weapon_pickup_action_this_frame = True
+            self.weapon.exists = False
+            self.weapon.missing_frames = self.physics.max_weapon_missing_frames + 1
 
     def update_on_ground(self, vy_threshold: float | None = None) -> None:
         _ = vy_threshold
@@ -572,8 +490,6 @@ class Memory:
             self.player_respawn_timer = self.physics.respawn_duration
             self.player.exists = False
             self.player.weapon_state = 0.0
-            self._pending_player_weapon_pick_frames = 0
-            self._pending_player_weapon_pick_missing_frames = 0
             self.player.jumps_left = 3
         else:
             self.self_total_damage_taken_before_stock_loss += self.self_delta_damage
@@ -657,8 +573,10 @@ class Memory:
                 facing = 1.0 if self.rel_dx > 0.0 else -1.0
             elif prev_move == 0:
                 facing = 1.0 if self.rel_dx < 0.0 else -1.0
+            elif abs(self._player_last_dx) > 0.1 and abs(self.rel_dx) > 1e-6:
+                facing = 1.0 if np.sign(self._player_last_dx) == np.sign(self.rel_dx) else -1.0
             else:
-                facing = -1.0
+                facing = 0.0
 
         player_facing_dir = 0.0
         if abs(self._player_last_dx) > 0.1:

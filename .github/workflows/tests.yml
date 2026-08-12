@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # CPU torch only: CI exercises logic, not the GPU pipeline.
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy gymnasium "stable-baselines3[extra]" matplotlib pytest pyyaml
+          # ultralytics, dxcam, pydirectinput and keyboard are Windows/GPU-only.
+          # tests/conftest.py substitutes them when absent, so the suite runs headless.
+
+      - name: Run tests
+        run: python -m pytest tests -q
+
+      - name: Check every entry point still launches
+        run: |
+          for f in tools/debug_observation_overlay.py train/train_curriculum.py; do
+            out=$(python "$f" --help 2>&1 || true)
+            echo "$out" | grep -q "No module named 'capture_first'" && { echo "FAIL: $f"; exit 1; }
+            echo "$out" | grep -q "SyntaxError" && { echo "FAIL: $f"; exit 1; }
+            echo "ok: $f"
+          done

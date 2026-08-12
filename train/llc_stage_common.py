@@ -15,6 +15,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormali
 
 from algo.anchored_replay_ppo import AnchoredReplayPPO
 from env import BrawlDeepEnv, EnvConfig
+from action_space import ACTION_DIM, Action, components as action_components
+from feature_extractor.memory.canonicalize import mirror_goal_target
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goals import GOAL_FEATURE_NAMES, GOAL_STATE_SPEC_NAMES, GOAL_TARGET_DIM, extract_goal_features
 from train.curriculum_goals import GOAL_TYPE_INDEX, goal_type_onehot, normalize_goal_type
@@ -48,11 +50,9 @@ FEATURE_SCALE: dict[str, float] = {
     "weapon_dx": 2.0,
     "weapon_dy": 2.0,
     "rel_distance": 2.0,
-    "facing_opponent": 1.0,
     "in_strike_range": 1.0,
     "opponent_damage_pct": 1.0,
-    "opponent_hitstun": 1.0,
-    "frame_advantage_estimate": 2.0,
+    "opponent_damage_pct": 1.0,
 }
 
 
@@ -82,7 +82,6 @@ class StageSpec:
     proximity_scale: float = 0.0  # penalty for current error: -proximity_scale * error
     chase_rel_distance_scale: float = 0.0
     in_strike_range_bonus: float = 0.0
-    facing_opponent_bonus: float = 0.0
     hit_event_bonus: float = 0.0
     damage_dealt_scale: float = 0.0
     self_damage_penalty_scale: float = 0.0
@@ -109,7 +108,7 @@ class StageSpec:
     velocity_threshold: float = 0.15      # speed considered "stopped"
     reward_clip: float = 1.0
     disable_attack: bool = False
-    allowed_attack_actions: Optional[tuple[int, ...]] = None  # attack channel values allowed (0=none,1=num4,2=num6,3=num5)
+    allowed_actions: Optional[tuple[int, ...]] = None  # action ids this phase may execute
     disable_dodge: bool = False
     disable_jump: bool = False
     reset_perturb_steps: int = 0
@@ -117,6 +116,10 @@ class StageSpec:
     reward_from_goal_progress: bool = False
     player_has_weapon_bonus: float = 0.0
     weapon_pickup_bonus: float = 0.0
+    # Pay the pickup bonus at most once per episode. Paying it on every 0->1
+    # transition makes repeated pickup/drop a reward source: the agent can farm it
+    # standing still next to a weapon, which is cheaper than learning to fetch one.
+    weapon_pickup_bonus_once_per_episode: bool = True
     conditional_weapon_guidance_when_unarmed: bool = False
     unarmed_weapon_dx_weight: float = 0.0
     unarmed_weapon_dy_weight: float = 0.0
@@ -188,22 +191,23 @@ class StageGoalEnv(gym.Wrapper):
 
         self._obs_buf = np.zeros((self._aug_dim,), dtype=np.float32)
         self._goal_target = np.zeros((self.goal_dim,), dtype=np.float32)
+        # Canonical-frame view of _goal_target, refreshed by _sync_goal_frame.
+        self._active_goal_target = self._goal_target
         self._goal_active = False
         self._step_count = 0
         self._awaiting_respawn_after_death = False
         self._prev_error: float | None = None
         self._prev_has_weapon: Optional[bool] = None
+        self._weapon_pickup_awarded: bool = False
         self._prev_in_range: float = 0.0
         self._combo_chain_hits: int = 0
         self._seq_phase: int = 1
         self._seq_step1_completed: bool = False
-        self._allowed_attack_actions: Optional[set[int]] = None
-        if spec.allowed_attack_actions is not None:
-            allowed = {int(v) for v in spec.allowed_attack_actions}
-            allowed = {v for v in allowed if 0 <= v <= 3}
-            if not allowed:
-                allowed = {0}
-            self._allowed_attack_actions = allowed
+        self._allowed_actions: Optional[set[int]] = None
+        if spec.allowed_actions is not None:
+            allowed = {int(v) for v in spec.allowed_actions if 0 <= int(v) < ACTION_DIM}
+            allowed.add(int(Action.NOOP))
+            self._allowed_actions = allowed
 
     def _set_goal_type(self, goal_type: str) -> None:
         self.goal_type = normalize_goal_type(goal_type)
@@ -221,6 +225,23 @@ class StageGoalEnv(gym.Wrapper):
         self._seq_phase = 1
         self._seq_step1_completed = False
         self._sample_goal(obs, sampler=self.stage_spec.target_sampler)
+
+    def _sync_goal_frame(self, mirrored: bool) -> np.ndarray:
+        """Express the goal target in the observation's frame of reference.
+
+        Goal samplers produce world-frame targets, but the environment may hand
+        back a horizontally mirrored observation (see
+        ``feature_extractor.memory.canonicalize``). Comparing a world-frame target
+        against canonical features would silently invert every horizontal goal, so
+        the target is mirrored to match before any error is computed.
+
+        ``self._goal_target`` stays in world frame; the canonical view is derived.
+        """
+        if mirrored:
+            self._active_goal_target = mirror_goal_target(self._goal_target, self.feature_names)
+        else:
+            self._active_goal_target = self._goal_target
+        return self._active_goal_target
 
     def _extract(self, obs: np.ndarray) -> np.ndarray:
         if self.goal_extractor is not None:
@@ -400,7 +421,7 @@ class StageGoalEnv(gym.Wrapper):
         # Emit [base_obs | goal_target(goal_dim) | mask(goal_dim)].
         # goal_target is already in [0, 1] (extract_goal_features space).
         np.copyto(self._obs_buf[: self._base_dim], obs)
-        np.copyto(self._obs_buf[self._base_dim : self._base_dim + self.goal_dim], self._goal_target)
+        np.copyto(self._obs_buf[self._base_dim : self._base_dim + self.goal_dim], self._active_goal_target)
         np.copyto(self._obs_buf[self._base_dim + self.goal_dim :], self._active_mask)
         return self._obs_buf
 
@@ -439,41 +460,42 @@ class StageGoalEnv(gym.Wrapper):
                 self._activate_goal(obs, init_feats, sequence_step=1)
             else:
                 self._activate_goal(obs, init_feats)
+        self._sync_goal_frame(bool(float(info.get('canon_mirrored', 0.0)) > 0.5))
         self._prev_has_weapon = self._feature_value(init_feats, "player_has_weapon", 0.0) > 0.5
         self._prev_in_range = float(np.clip(self._feature_value(init_feats, "in_strike_range", 0.0), 0.0, 1.0))
         self._combo_chain_hits = 0
+        self._weapon_pickup_awarded = False
         self._prev_error = None
 
         info["stage_name"] = self.stage_spec.name
         info["goal_type"] = self.goal_type
         info["goal_type_index"] = int(self.goal_type_index)
         info["goal_type_onehot"] = self._goal_type_onehot.copy()
-        info["goal_target"] = self._goal_target.copy()
+        info["goal_target"] = self._active_goal_target.copy()
         info["goal_mask"] = self._active_mask.copy()
         info["goal_active"] = float(1.0 if self._goal_active else 0.0)
         return self._augment(obs), info
 
     def step(self, action: Sequence[int]):
-        action_arr = np.asarray(action, dtype=np.int64).copy()
-        if self.stage_spec.disable_attack:
-            action_arr[3] = 0
-        elif self._allowed_attack_actions is not None and int(action_arr[3]) not in self._allowed_attack_actions:
-            action_arr[3] = 0
+        action_id = int(np.asarray(action).reshape(-1)[0])
+        action_id = int(np.clip(action_id, 0, ACTION_DIM - 1))
+        comp = action_components(action_id)
 
-        # Action grounding: when clearly out of range, reduce attack frequency
-        # to bias the policy toward spacing first, then commit.
-        if action_arr.shape[0] > 3 and int(action_arr[3]) != 0:
-            keep_prob = float(np.clip(self.stage_spec.attack_out_of_range_keep_prob, 0.0, 1.0))
-            if keep_prob < 1.0:
-                if self._prev_in_range < float(np.clip(self.stage_spec.attack_out_of_range_threshold, 0.0, 1.0)):
-                    if float(np.random.rand()) > keep_prob:
-                        action_arr[3] = 0
+        # Phase restrictions used to zero individual channels. With one categorical
+        # head the equivalent is refusing the action outright and falling back to
+        # NOOP, which keeps the executed action consistent with what gets recorded.
+        if self.stage_spec.disable_attack and (comp.light or comp.heavy):
+            action_id = int(Action.NOOP)
+        elif self._allowed_actions is not None and action_id not in self._allowed_actions:
+            action_id = int(Action.NOOP)
+        if self.stage_spec.disable_dodge and comp.dodge:
+            action_id = int(Action.NOOP)
+        if self.stage_spec.disable_jump and comp.jump:
+            action_id = int(Action.NOOP)
 
-        attack_input = int(action_arr[3]) if action_arr.shape[0] > 3 else 0
-        if self.stage_spec.disable_dodge:
-            action_arr[2] = 0
-        if self.stage_spec.disable_jump:
-            action_arr[1] = 0
+        comp = action_components(action_id)
+        attack_input = int(comp.light or comp.heavy)
+        action_arr = action_id
         if self.action_adapter is not None:
             action_arr = self.action_adapter(action_arr)
 
@@ -502,12 +524,14 @@ class StageGoalEnv(gym.Wrapper):
         resample_goal_after_reward = False
         resample_goal_sequence_step: Optional[int] = None
         curr_feats = self._extract(obs)  # compute once; reused for reward, resampling, and HER buffer
+        self._sync_goal_frame(bool(float(info.get('canon_mirrored', 0.0)) > 0.5))
         if player_controllable:
             if not self._goal_active:
                 if seq_enabled:
                     self._activate_goal(obs, curr_feats, sequence_step=1)
                 else:
                     self._activate_goal(obs, curr_feats)
+                self._sync_goal_frame(bool(float(info.get('canon_mirrored', 0.0)) > 0.5))
                 goal_new_sampled = True
         # When player is not controllable (YOLO miss / respawning), keep the
         # existing goal active.  The goal is NEVER resampled mid-episode.
@@ -529,7 +553,7 @@ class StageGoalEnv(gym.Wrapper):
         if self._goal_active and player_controllable:
             self._maybe_update_player_xy_goal(obs)
             self._active_mask = self._effective_mask_for_step(curr_feats)
-            curr_error = self._goal_error_from_feats(curr_feats, self._goal_target, mask=self._active_mask)
+            curr_error = self._goal_error_from_feats(curr_feats, self._active_goal_target, mask=self._active_mask)
 
             goal_progress = 0.0
             if self._prev_error is not None and not goal_new_sampled:
@@ -549,17 +573,22 @@ class StageGoalEnv(gym.Wrapper):
             if self.stage_spec.player_has_weapon_bonus > 0.0 and self._feature_value(curr_feats, "player_has_weapon", 0.0) > 0.5:
                 reward += self.stage_spec.player_has_weapon_bonus
 
-            # One-time bonus when agent picks up a weapon this step.
-            if self.stage_spec.weapon_pickup_bonus > 0.0 and curr_has_weapon and not self._prev_has_weapon:
+            # Bonus on the 0->1 transition, once per episode by default.
+            if (
+                self.stage_spec.weapon_pickup_bonus > 0.0
+                and curr_has_weapon
+                and not self._prev_has_weapon
+                and not (self.stage_spec.weapon_pickup_bonus_once_per_episode and self._weapon_pickup_awarded)
+            ):
                 reward += self.stage_spec.weapon_pickup_bonus
+                self._weapon_pickup_awarded = True
 
             # Explicit combat shaping (phase-configurable): chase, orient, connect, and trade favorably.
             rel_distance = float(np.clip(self._feature_value(curr_feats, "rel_distance", 1.0), 0.0, 1.0))
             in_range = float(np.clip(self._feature_value(curr_feats, "in_strike_range", 0.0), 0.0, 1.0))
-            facing_norm = float(np.clip(self._feature_value(curr_feats, "facing_opponent", 0.5), 0.0, 1.0))
-            facing_score = max(0.0, (2.0 * facing_norm) - 1.0)
             offstage = float(np.clip(self._feature_value(curr_feats, "player_is_offstage", 0.0), 0.0, 1.0))
-            time_since_hit = float(np.clip(StateSpec.get(obs, "opponent_time_since_hit"), 0.0, 1.0))
+            mem = getattr(self.env, "memory", None)
+            time_since_hit = float(np.clip(getattr(mem, "opponent_time_since_hit", 2.0) / 2.0, 0.0, 1.0))
 
             # Stage A: immediate supervision on attack timing.
             commit_threshold = float(np.clip(self.stage_spec.attack_commit_threshold, 0.0, 1.0))
@@ -578,10 +607,6 @@ class StageGoalEnv(gym.Wrapper):
             if self.stage_spec.in_strike_range_bonus > 0.0 and in_range > 0.5:
                 strike_bonus = float(self.stage_spec.in_strike_range_bonus)
                 reward += strike_bonus
-
-            if self.stage_spec.facing_opponent_bonus > 0.0:
-                facing_bonus = float(self.stage_spec.facing_opponent_bonus * facing_score)
-                reward += facing_bonus
 
             if self.stage_spec.hit_event_bonus > 0.0 and op_delta_damage > 1e-6:
                 hit_bonus = float(self.stage_spec.hit_event_bonus)
@@ -632,7 +657,7 @@ class StageGoalEnv(gym.Wrapper):
                 if op_dmg_idx is None or self._active_mask[op_dmg_idx] <= 0.0:
                     success = False
                 else:
-                    op_dmg_target = float(self._goal_target[op_dmg_idx])
+                    op_dmg_target = float(self._active_goal_target[op_dmg_idx])
                     op_dmg_curr = float(curr_feats[op_dmg_idx])
                     tol = float(max(0.0, self.stage_spec.opponent_damage_success_tolerance))
                     success = bool((op_dmg_curr + tol) >= op_dmg_target)
@@ -673,11 +698,11 @@ class StageGoalEnv(gym.Wrapper):
         if self._goal_active and self.stage_spec.step_penalty > 0.0:
             reward -= self.stage_spec.step_penalty
 
-        if self._goal_active and self.stage_spec.vertical_velocity_penalty_scale > 0.0 and obs.shape[0] > 3:
-            reward -= self.stage_spec.vertical_velocity_penalty_scale * abs(float(obs[3]))
+        if self._goal_active and self.stage_spec.vertical_velocity_penalty_scale > 0.0:
+            reward -= self.stage_spec.vertical_velocity_penalty_scale * abs(StateSpec.get(obs, "player_vy"))
 
-        if self._goal_active and self.stage_spec.jump_usage_penalty_scale > 0.0 and obs.shape[0] > 7:
-            jumps_norm = float(np.clip(obs[7], 0.0, 1.0))
+        if self._goal_active and self.stage_spec.jump_usage_penalty_scale > 0.0:
+            jumps_norm = float(np.clip(StateSpec.get(obs, "player_jumps_norm"), 0.0, 1.0))
             jumps_used = 1.0 - jumps_norm
             reward -= self.stage_spec.jump_usage_penalty_scale * jumps_used
 
@@ -692,12 +717,12 @@ class StageGoalEnv(gym.Wrapper):
 
         # Velocity damping: penalise speed when close to target
         if self._goal_active and self.stage_spec.velocity_penalty_scale > 0.0 and curr_error < self.stage_spec.velocity_penalty_radius * self.stage_spec.success_threshold:
-            speed = np.sqrt(obs[2] ** 2 + obs[3]** 2)  # player_vx, player_vy
+            speed = float(np.hypot(StateSpec.get(obs, "player_vx"), StateSpec.get(obs, "player_vy")))
             reward -= self.stage_spec.velocity_penalty_scale * speed
 
         # Stay bonus: reward holding position with low velocity
         if self._goal_active and self.stage_spec.stay_bonus > 0.0 and success:
-            speed = np.sqrt(obs[2] ** 2 + obs[3] ** 2)
+            speed = float(np.hypot(StateSpec.get(obs, "player_vx"), StateSpec.get(obs, "player_vy")))
             if speed < self.stage_spec.velocity_threshold:
                 reward += self.stage_spec.stay_bonus
 
@@ -723,9 +748,8 @@ class StageGoalEnv(gym.Wrapper):
         agent_weapon_drop_event = 0.0
         agent_weapon_drop_penalty_applied = 0.0
         if self.stage_spec.agent_weapon_drop_penalty > 0.0:
-            drop_attack_action = self._attack_action_value_for_key(self.stage_spec.drop_weapon_key)
             dropped_now = bool(self._prev_has_weapon) and not curr_has_weapon
-            agent_drop_input = drop_attack_action > 0 and attack_input == drop_attack_action
+            agent_drop_input = bool(comp.interact)
             if (
                 dropped_now
                 and agent_drop_input
@@ -742,6 +766,7 @@ class StageGoalEnv(gym.Wrapper):
                 self._activate_goal(obs, curr_feats)
             else:
                 self._activate_goal(obs, curr_feats, sequence_step=resample_goal_sequence_step)
+            self._sync_goal_frame(bool(float(info.get('canon_mirrored', 0.0)) > 0.5))
             goal_new_sampled = True
             goal_resampled_after_reward = True
 
@@ -750,7 +775,7 @@ class StageGoalEnv(gym.Wrapper):
         elif not player_controllable:
             pass  # Preserve prev_error so progress resumes correctly when player returns
         elif goal_resampled_after_reward:
-            self._prev_error = self._goal_error_from_feats(curr_feats, self._goal_target, mask=self._active_mask)
+            self._prev_error = self._goal_error_from_feats(curr_feats, self._active_goal_target, mask=self._active_mask)
         else:
             self._prev_error = curr_error
         self._prev_has_weapon = curr_has_weapon
@@ -760,7 +785,7 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_type"] = self.goal_type
         info["goal_type_index"] = int(self.goal_type_index)
         info["goal_type_onehot"] = self._goal_type_onehot.copy()
-        info["goal_target"] = self._goal_target.copy()
+        info["goal_target"] = self._active_goal_target.copy()
         info["goal_mask"] = self._active_mask.copy()
         info["goal_error"] = float(curr_error)
         info["goal_progress"] = float(goal_progress)
@@ -771,13 +796,13 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_active"] = float(1.0 if self._goal_active else 0.0)
         info["raw_goal_feats"] = curr_feats  # already computed above - no second call
         info["active_goal_feature_errors"] = (
-            np.abs(curr_feats - self._goal_target) * self._active_mask
+            np.abs(curr_feats - self._active_goal_target) * self._active_mask
         ).astype(np.float32)
-        info["stage_action"] = action_arr.astype(np.int64).copy()
-        info["stage_action_movement"] = int(action_arr[0]) if action_arr.shape[0] > 0 else 3
-        info["stage_action_jump"] = int(action_arr[1]) if action_arr.shape[0] > 1 else 0
-        info["stage_action_dodge"] = int(action_arr[2]) if action_arr.shape[0] > 2 else 0
-        info["stage_action_attack"] = int(action_arr[3]) if action_arr.shape[0] > 3 else 0
+        info["stage_action"] = int(action_id)
+        info["stage_action_hdir"] = int(comp.hdir)
+        info["stage_action_jump"] = int(comp.jump)
+        info["stage_action_dodge"] = int(comp.dodge)
+        info["stage_action_attack"] = int(attack_input)
         info["self_stock_lost_step_raw"] = raw_self_stock_lost
         info["self_stock_lost_step_effective"] = effective_self_stock_lost
         info["death_event"] = float(1.0 if effective_self_stock_lost > 0.0 else 0.0)

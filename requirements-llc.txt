@@ -1,19 +1,31 @@
-# Live Brawlhalla LLC training stack.
-# Install with:
+# Brawlhalla LLC — live training stack (Python 3.12, CUDA 12.x)
+#
+# torch is NOT listed here: it must come from the PyTorch CUDA index, not PyPI.
+# Install it FIRST, in its own command, then this file. See docs/setup.md.
+#
+#   python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 #   python -m pip install -r requirements-llc.txt
 #
-# If `tools/llc_preflight.py --device cuda` reports that torch is installed but
-# CUDA is unavailable, reinstall torch from the PyTorch selector for your CUDA
-# version, then rerun preflight.
+# Installing them together lets the resolver pull the CPU-only torch from PyPI,
+# which fails silently: everything imports, torch.cuda.is_available() is False,
+# and the detector quietly runs on CPU at a few frames per second.
 
-numpy
-gymnasium
-stable-baselines3[extra]
-torch
-ultralytics
-opencv-python
-keyboard
-dxcam
-pydirectinput
-matplotlib
-pytest
+# ── perception ──────────────────────────────────────────────────────────────
+ultralytics>=8.3.0
+opencv-python>=4.10
+tensorrt-cu12>=10.0            # engine build/inference; must match the local CUDA 12.x
+
+# ── capture and input injection (Windows only) ──────────────────────────────
+dxcam>=0.0.5                   # DXGI duplication (fast path)
+mss>=9.0                       # opt-in GDI capture only; far slower, never automatic
+pydirectinput>=1.0.4
+keyboard>=0.13.5
+
+# ── RL ──────────────────────────────────────────────────────────────────────
+gymnasium>=0.29
+stable-baselines3[extra]>=2.3.0
+
+# ── numerics, plotting, tests ───────────────────────────────────────────────
+numpy>=1.26
+matplotlib>=3.8
+pytest>=8.0

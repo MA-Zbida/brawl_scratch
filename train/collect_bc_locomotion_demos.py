@@ -1,6 +1,23 @@
 #!/usr/bin/env python
 from __future__ import annotations
 
+
+
+
+# Acquire the screen duplicator before torch loads. On hybrid graphics importing
+# torch moves the process to the discrete GPU, and DXGI duplication of the
+# integrated-GPU display output then becomes impossible. Must stay above every
+# import that pulls in torch (ultralytics, stable_baselines3, env, ...).
+#
+# The sys.path bootstrap has to come first: running this file directly puts its
+# own directory on sys.path, not the repo root, so capture_first is not
+# importable without it. sys and pathlib are safe -- neither loads torch.
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
+import capture_first  # noqa: E402,F401  (import order is load-bearing)
+
 import argparse
 import ctypes
 import sys
@@ -14,7 +31,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env import BrawlDeepEnv, EnvConfig, NullInputController
+from feature_extractor.memory.state_spec import StateSpec
 from train.curriculum_config import PHASES, build_phase_spec
+from action_space import Action
+from train.heuristic_teachers import heuristic_action
 from train.llc_stage_common import StageGoalEnv
 
 
@@ -31,6 +51,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-episode-steps", type=int, default=100)
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--output", type=str, default="")
+    p.add_argument(
+        "--teacher",
+        choices=("heuristic",),
+        default="heuristic",
+        help=(
+            "Only the scripted teacher is supported. Manual recording was dropped with "
+            "the move to a single 27-action space: a human cannot select one canonical "
+            "action per frame, and inferring intent from raw key state cannot recover "
+            "which of several actions sharing those keys was meant."
+        ),
+    )
     p.add_argument("--move-mouse-to-goal", action="store_true", default=True)
     p.add_argument("--no-move-mouse-to-goal", dest="move_mouse_to_goal", action="store_false")
     p.add_argument("--death-penalty", type=float, default=0.0)
@@ -50,38 +81,37 @@ def parse_args() -> argparse.Namespace:
         dest="enforce_recovery_sequence",
         action="store_false",
     )
+    p.add_argument(
+        "--weapon-hold-steps",
+        type=int,
+        default=20,
+        help="For weapon_acquisition demos, accept only after pickup is held for this many consecutive steps.",
+    )
+    p.add_argument(
+        "--weapon-reset-max-steps",
+        type=int,
+        default=30,
+        help="For heuristic weapon_acquisition demos, max warmup steps used to drop a held weapon before recording.",
+    )
+    p.add_argument(
+        "--weapon-reset-retry-interval",
+        type=int,
+        default=8,
+        help="During weapon reset warmup, retry NUM5 every N steps while still armed.",
+    )
+    p.add_argument(
+        "--weapon-drop-grace-steps",
+        type=int,
+        default=3,
+        help="After pickup, reject the weapon episode only after this many consecutive unarmed observations.",
+    )
     return p.parse_args()
 
 
-def read_action_from_keyboard(allowed_attack_values: set[int]) -> np.ndarray:
-    movement = 3
-    if keyboard.is_pressed("a"):
-        movement = 0
-    elif keyboard.is_pressed("d"):
-        movement = 1
-    elif keyboard.is_pressed("s"):
-        movement = 2
-
-    jump = 1 if keyboard.is_pressed("space") else 0
-    dodge = 1 if keyboard.is_pressed("e") else 0
-
-    attack = 0
-    # keyboard uses scan codes: 75/76/77 correspond to numpad 4/5/6.
-    if 1 in allowed_attack_values and keyboard.is_pressed(75):
-        attack = 1
-    elif 2 in allowed_attack_values and keyboard.is_pressed(77):
-        attack = 2
-    elif 3 in allowed_attack_values and keyboard.is_pressed(76):
-        attack = 3
-
-    # Match env sanitize behavior: no simultaneous dodge+attack.
-    if dodge == 1 and attack != 0:
-        attack = 0
-
-    return np.array([movement, jump, dodge, attack], dtype=np.int64)
-
-
 _COMBAT_PHASES = frozenset({"combat_execution", "all_skills_llc"})
+_WEAPON_PHASE = "weapon_acquisition"
+_WEAPON_IDLE_ACTION = int(Action.NOOP)
+_WEAPON_DROP_ACTION = int(Action.PICKUP)
 
 _DEFAULT_MAX_STEPS = {
     # Locomotion / weapon: short episodes suffice.
@@ -116,9 +146,8 @@ def _build_env(args: argparse.Namespace) -> StageGoalEnv:
         action_repeat_max_steps=1,
         tap_latch_steps=1,
     )
-    # Use NullInputController so env.step does not press/release keys.
-    # You keep full manual control while we only record state/action labels.
-    base = BrawlDeepEnv(config=config, input_controller=NullInputController())
+    input_controller = NullInputController() if str(args.teacher) == "manual" else None
+    base = BrawlDeepEnv(config=config, input_controller=input_controller)
     return StageGoalEnv(base, spec)
 
 
@@ -217,13 +246,51 @@ def _resolve_output_path(args: argparse.Namespace) -> Path:
     return out
 
 
+def _obs_has_weapon(obs: np.ndarray) -> bool:
+    try:
+        return bool(StateSpec.get(np.asarray(obs, dtype=np.float32), "player_has_weapon") > 0.5)
+    except Exception:
+        return False
+
+
+def _prepare_weapon_episode_start(
+    env: StageGoalEnv,
+    args: argparse.Namespace,
+    obs: np.ndarray,
+    info: dict,
+) -> tuple[np.ndarray, dict, bool, int]:
+    """Make heuristic weapon demos start unarmed; warmup steps are not recorded."""
+    if not _obs_has_weapon(obs):
+        return obs, info, True, 0
+
+    if str(args.teacher) != "heuristic":
+        return obs, info, False, 0
+
+    max_steps = max(0, int(args.weapon_reset_max_steps))
+    retry_interval = max(1, int(args.weapon_reset_retry_interval))
+    warmup_steps = 0
+
+    for step_idx in range(max_steps):
+        action = _WEAPON_DROP_ACTION if step_idx % retry_interval == 0 else _WEAPON_IDLE_ACTION
+        obs, _reward, _terminated, _truncated, info = env.step(action)
+        warmup_steps += 1
+        if not _obs_has_weapon(obs):
+            obs, info = env.reset()
+            return obs, info, not _obs_has_weapon(obs), warmup_steps
+
+    return obs, info, not _obs_has_weapon(obs), warmup_steps
+
+
 def main() -> None:
     args = parse_args()
     out_path = _resolve_output_path(args)
     hit_damage_threshold = float(max(0.0, args.hit_damage_threshold))
     phase_lower = str(args.phase).strip().lower()
     is_damage = phase_lower in _COMBAT_PHASES
+    is_weapon_acquisition = phase_lower == _WEAPON_PHASE
     enforce_recovery_sequence = bool(args.enforce_recovery_sequence and phase_lower == "recovery_mastery")
+    weapon_hold_steps_required = max(1, int(args.weapon_hold_steps))
+    weapon_drop_grace_steps = max(0, int(args.weapon_drop_grace_steps))
 
     target_episodes = max(1, int(args.episodes))
     max_collection_attempts = int(args.max_collection_attempts)
@@ -263,12 +330,16 @@ def main() -> None:
     print("=" * 68)
     print(f"BC DEMO COLLECTION - {args.phase.upper()}")
     print("Action encoding target: MultiDiscrete([4,2,2,4])")
-    print("Action source: keyboard -> MultiDiscrete([4,2,2,4])")
-    print("Input mode: manual only (env key injection disabled)")
-    if active_attack_keys:
-        print(f"Controls: A/D/S, Space, E, {'/'.join(active_attack_keys)}")
+    if args.teacher == "heuristic":
+        print("Action source: heuristic teacher -> MultiDiscrete([4,2,2,4])")
+        print("Input mode: heuristic controls Brawlhalla through env key injection")
     else:
-        print("Controls: A/D/S, Space, E (attacks disabled by phase)")
+        print("Action source: keyboard -> MultiDiscrete([4,2,2,4])")
+        print("Input mode: manual only (env key injection disabled)")
+        if active_attack_keys:
+            print(f"Controls: A/D/S, Space, E, {'/'.join(active_attack_keys)}")
+        else:
+            print("Controls: A/D/S, Space, E (attacks disabled by phase)")
     print(f"Target episodes (accepted): {target_episodes} | Output: {out_path}")
     print(f"Collection attempt budget: {max_collection_attempts}")
     eff_max_steps = int(args.max_episode_steps)
@@ -284,6 +355,14 @@ def main() -> None:
         print(f"Episode end action: stop on first hit (op_delta_damage >= {hit_damage_threshold:.4f})")
     if enforce_recovery_sequence:
         print("Recovery quality gate: ON (keep only offstage->onstage sequence-complete episodes)")
+    if is_weapon_acquisition:
+        print(
+            "Weapon quality gate: start unarmed -> pickup transition -> "
+            f"hold for {weapon_hold_steps_required} consecutive steps "
+            f"(drop grace={weapon_drop_grace_steps})"
+        )
+        if args.teacher == "heuristic":
+            print("Weapon reset warmup: if an episode starts armed, tap NUM5 before recording the next episode")
     print("Press Ctrl+C to stop and save partial data.")
     print("=" * 68)
     print(f"Starting in {args.delay:.1f}s...")
@@ -307,6 +386,8 @@ def main() -> None:
     episodes_collected = 0
     episodes_attempted = 0
     episodes_rejected_recovery = 0
+    episodes_rejected_weapon = 0
+    weapon_reset_failures = 0
     episodes_with_hit = 0
     episodes_ended_on_first_hit = 0
 
@@ -314,12 +395,32 @@ def main() -> None:
         while episodes_collected < target_episodes and episodes_attempted < max_collection_attempts:
             attempt_id = episodes_attempted + 1
             obs, info = env.reset()
+            if is_weapon_acquisition:
+                obs, info, weapon_start_ready, weapon_warmup_steps = _prepare_weapon_episode_start(env, args, obs, info)
+                if not weapon_start_ready:
+                    episodes_attempted += 1
+                    episodes_rejected_weapon += 1
+                    weapon_reset_failures += 1
+                    print(
+                        f"Attempt {attempt_id}/{max_collection_attempts} -> accepted=0 "
+                        f"accepted_total={episodes_collected}/{target_episodes} "
+                        f"steps=0 reason=weapon_reset_failed warmup_steps={weapon_warmup_steps}"
+                    )
+                    continue
+
             done = False
             ep_steps = 0
             ep_had_hit = False
             end_reason = "unknown"
             ep_step1_transition_seen = False
             ep_terminal_success_seen = False
+            ep_weapon_started_unarmed = bool(not _obs_has_weapon(obs))
+            ep_weapon_prev_has_weapon = bool(_obs_has_weapon(obs))
+            ep_weapon_pickup_seen = False
+            ep_weapon_hold_steps = 0
+            ep_weapon_lost_steps_after_pickup = 0
+            ep_weapon_hold_success = False
+            ep_weapon_dropped_after_pickup = False
 
             ep_obs_buf: list[np.ndarray] = []
             ep_act_multi_buf: list[np.ndarray] = []
@@ -341,24 +442,46 @@ def main() -> None:
                 _set_mouse_to_goal(env, goal_target, goal_mask)
 
             while not done:
-                action = read_action_from_keyboard(allowed_attack_values=allowed_attack_values)
-                action_seq = tuple(int(v) for v in action.tolist())
+                # The teacher already holds position without re-pressing pickup once
+                # armed. Overriding it with a forced NOOP here used to fill the hold
+                # window with idle frames, and since only successful episodes are
+                # saved, those became a behaviour-cloning anchor that taught the agent
+                # to freeze after every pickup.
+                action = heuristic_action(args.phase, obs, info)
+                action_id = int(action)
 
                 ep_obs_buf.append(np.asarray(obs, dtype=np.float32).copy())
-                ep_act_multi_buf.append(np.asarray(action_seq, dtype=np.int64).copy())
+                ep_act_multi_buf.append(int(action_id))
                 ep_goal_xy_buf.append(np.asarray(goal_target[:2], dtype=np.float32).copy())
                 ep_goal_target_buf.append(np.asarray(goal_target, dtype=np.float32).copy())
                 ep_goal_mask_buf.append(np.asarray(goal_mask, dtype=np.float32).copy())
                 ep_goal_type_buf.append(str(info.get("goal_type", "unknown")))
                 ep_goal_type_index_buf.append(int(info.get("goal_type_index", -1)))
 
-                next_obs, _reward, terminated, truncated, info = env.step(action_seq)
+                next_obs, _reward, terminated, truncated, info = env.step(action_id)
                 op_delta_damage = float(max(0.0, info.get("op_delta_damage", 0.0)))
                 op_ko_event = float(info.get("op_stock_lost_step", 0.0)) > 0.0
                 ep_op_ko_buf.append(op_ko_event)
                 hit_event = op_delta_damage >= hit_damage_threshold
                 if hit_event:
                     ep_had_hit = True
+
+                if is_weapon_acquisition:
+                    curr_has_weapon = _obs_has_weapon(next_obs)
+                    pickup_now = bool(ep_weapon_started_unarmed and curr_has_weapon and not ep_weapon_prev_has_weapon)
+                    if pickup_now:
+                        ep_weapon_pickup_seen = True
+                    if ep_weapon_pickup_seen:
+                        if curr_has_weapon:
+                            ep_weapon_hold_steps += 1
+                            ep_weapon_lost_steps_after_pickup = 0
+                        else:
+                            ep_weapon_hold_steps = 0
+                            ep_weapon_lost_steps_after_pickup += 1
+                            if ep_weapon_lost_steps_after_pickup > weapon_drop_grace_steps:
+                                ep_weapon_dropped_after_pickup = True
+                    ep_weapon_hold_success = bool(ep_weapon_pickup_seen and ep_weapon_hold_steps >= weapon_hold_steps_required)
+                    ep_weapon_prev_has_weapon = curr_has_weapon
 
                 seq_phase = int(info.get("sequential_phase", 0))
                 seq_step1_transition = bool(float(info.get("sequential_step1_transition", 0.0)) > 0.5)
@@ -375,10 +498,17 @@ def main() -> None:
                 ep_terminal_success_seen = bool(ep_terminal_success_seen or seq_terminal_success)
 
                 terminated_by_hit = bool(end_episode_on_first_hit and hit_event)
-                done = bool(terminated or truncated or terminated_by_hit)
+                if is_weapon_acquisition:
+                    done = bool(terminated or ep_weapon_hold_success or ep_weapon_dropped_after_pickup)
+                else:
+                    done = bool(terminated or truncated or terminated_by_hit)
                 ep_done_buf.append(done)
 
-                if terminated_by_hit:
+                if is_weapon_acquisition and ep_weapon_hold_success:
+                    end_reason = "weapon_hold_success"
+                elif is_weapon_acquisition and ep_weapon_dropped_after_pickup:
+                    end_reason = "weapon_dropped_after_pickup"
+                elif terminated_by_hit:
                     end_reason = "first_hit"
                 elif terminated:
                     end_reason = "env_terminated"
@@ -426,6 +556,15 @@ def main() -> None:
                 episodes_ended_on_first_hit += 1
 
             accept_episode = bool(float(info.get("goal_success", 0.0)) > 0.5)
+            if is_weapon_acquisition:
+                accept_episode = bool(
+                    ep_weapon_started_unarmed
+                    and ep_weapon_pickup_seen
+                    and ep_weapon_hold_success
+                    and not ep_weapon_dropped_after_pickup
+                )
+                if not accept_episode:
+                    episodes_rejected_weapon += 1
             if enforce_recovery_sequence:
                 accept_episode = bool(accept_episode and ep_step1_transition_seen and ep_terminal_success_seen)
                 if not accept_episode:
@@ -457,6 +596,14 @@ def main() -> None:
                     if enforce_recovery_sequence
                     else ""
                 )
+                + (
+                    f" weapon(start_unarmed={int(ep_weapon_started_unarmed)}, "
+                    f"pickup={int(ep_weapon_pickup_seen)}, "
+                    f"hold={ep_weapon_hold_steps}/{weapon_hold_steps_required}, "
+                    f"dropped={int(ep_weapon_dropped_after_pickup)})"
+                    if is_weapon_acquisition
+                    else ""
+                )
             )
         if episodes_collected < target_episodes:
             print(
@@ -483,6 +630,16 @@ def main() -> None:
             f"accepted={episodes_collected}/{target_episodes}, "
             f"attempted={episodes_attempted}/{max_collection_attempts}, "
             f"rejected={episodes_rejected_recovery}"
+        )
+    if is_weapon_acquisition:
+        print(
+            "Weapon acquisition summary: "
+            f"accepted={episodes_collected}/{target_episodes}, "
+            f"attempted={episodes_attempted}/{max_collection_attempts}, "
+            f"rejected={episodes_rejected_weapon}, "
+            f"reset_failures={weapon_reset_failures}, "
+            f"hold_steps_required={weapon_hold_steps_required}, "
+            f"drop_grace_steps={weapon_drop_grace_steps}"
         )
 
     if len(obs_buf) == 0:
@@ -527,9 +684,9 @@ def main() -> None:
             done_buf[-1] = True
 
     obs_arr = np.stack(obs_buf).astype(np.float32)
-    act_multi_arr = np.stack(act_multi_buf).astype(np.int64)
+    act_multi_arr = np.asarray(act_multi_buf, dtype=np.int64)
     act_arr = act_multi_arr
-    action_encoding = "multidiscrete"
+    action_encoding = "discrete27"
     done_arr = np.asarray(done_buf, dtype=bool)
     goal_xy_arr = np.stack(goal_xy_buf).astype(np.float32)
     goal_target_arr = np.stack(goal_target_buf).astype(np.float32)
@@ -564,6 +721,11 @@ def main() -> None:
         episodes_attempted=np.asarray([episodes_attempted], dtype=np.int64),
         episodes_collected=np.asarray([episodes_collected], dtype=np.int64),
         episodes_rejected=np.asarray([episodes_rejected_recovery], dtype=np.int64),
+        episodes_rejected_weapon=np.asarray([episodes_rejected_weapon], dtype=np.int64),
+        weapon_reset_failures=np.asarray([weapon_reset_failures], dtype=np.int64),
+        weapon_hold_steps_required=np.asarray([weapon_hold_steps_required], dtype=np.int64),
+        weapon_drop_grace_steps=np.asarray([weapon_drop_grace_steps], dtype=np.int64),
+        teacher=np.asarray([args.teacher]),
         phase=np.asarray([args.phase]),
     )
 

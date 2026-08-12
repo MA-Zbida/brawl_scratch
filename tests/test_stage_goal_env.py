@@ -9,6 +9,13 @@ pytest.importorskip("ultralytics")
 
 import gymnasium as gym
 
+from action_space import ACTION_DIM, Action, components as action_components
+
+
+def _is_attack(action) -> bool:
+    comp = action_components(int(np.asarray(action).reshape(-1)[0]))
+    return bool(comp.light or comp.heavy)
+
 from feature_extractor.memory.state_spec import StateSpec
 from train.curriculum_config import build_phase_spec
 from train.llc_stage_common import StageGoalEnv
@@ -35,7 +42,7 @@ class DummyStageEnv(gym.Env):
             shape=(StateSpec.dim(),),
             dtype=np.float32,
         )
-        self.action_space = gym.spaces.MultiDiscrete([4, 2, 2, 4])
+        self.action_space = gym.spaces.Discrete(ACTION_DIM)
         self.steps = 0
         self.memory = _DummyMemory()
 
@@ -51,7 +58,7 @@ class DummyStageEnv(gym.Env):
         obs[StateSpec.index("rel_distance")] = 0.2
         obs[StateSpec.index("rel_dy")] = 0.0
         obs[StateSpec.index("in_strike_range")] = 1.0
-        obs[StateSpec.index("frame_advantage_estimate")] = 0.2
+        obs[StateSpec.index("opponent_damage_pct")] = 0.2
         return obs
 
     def reset(self, *, seed=None, options=None):
@@ -62,7 +69,8 @@ class DummyStageEnv(gym.Env):
     def step(self, action):
         self.steps += 1
         info = {
-            "op_delta_damage": 1.0 if int(np.asarray(action).reshape(-1)[3]) else 0.0,
+            # An attack landed iff the executed action carries a light/heavy component.
+            "op_delta_damage": 1.0 if _is_attack(action) else 0.0,
             "self_delta_damage": 0.25,
             "player_exists": 1.0,
             "player_respawn_timer": 0.0,
@@ -78,11 +86,14 @@ def test_stage_goal_env_emits_dynamic_goal_diagnostics() -> None:
     assert obs.shape[0] == StateSpec.dim() + (2 * len(spec.feature_names or []))
     assert "goal_mask" in info
 
-    _, _, _, _, info = env.step(np.array([3, 0, 0, 1], dtype=np.int64))
+    # Action 0 is NOOP; use a real attack so the attack diagnostic is exercised.
+    _, _, _, _, info = env.step(int(Action.LIGHT_TOWARD))
     assert "active_goal_feature_errors" in info
     assert "raw_goal_feats" in info
     assert "stage_action" in info
+    assert info["stage_action"] == int(Action.LIGHT_TOWARD)
     assert info["stage_action_attack"] == 1
+    assert info["stage_action_hdir"] == 1
     assert np.asarray(info["goal_mask"]).shape == np.asarray(info["goal_target"]).shape
 
 

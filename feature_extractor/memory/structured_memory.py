@@ -5,8 +5,13 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from feature_extractor.memory.detection_schema import (
+    OPPONENT_WEAPON_STATE_FROM_CLASS,
+    resolve as resolve_detections,
+)
+from action_space import ACTION_DIM, Action, component_vector, components
 from feature_extractor.memory.state_spec import StateSpec
-from feature_extractor.memory.utils import _nearest_ledge, bbox_center, clamp, euclidian
+from feature_extractor.memory.utils import _nearest_ledge, bbox_center, bbox_size, clamp, euclidian
 
 
 @dataclass
@@ -36,6 +41,12 @@ class FighterState:
     dodge_cooldown: float = 0.0
     hitstun_duration: float = 0.0
     got_hit: bool = False
+    # Detector bounding-box extent. The silhouette carries animation information
+    # the centre point throws away: a swing widens the box, a dodge compresses it.
+    bbox_w: float = 0.0
+    bbox_h: float = 0.0
+    prev_bbox_w: float = 0.0
+    prev_bbox_h: float = 0.0
 
 
 @dataclass
@@ -99,6 +110,17 @@ class Memory:
         self.visible_weapon_centers: list[Tuple[float, float]] = []
         self.closest_weapon_distance: float = float("inf")
 
+        # Perception provenance for the current frame. `identity_observed` is False
+        # when the self-indicator was not detected and agent identity was carried
+        # forward from the previous frame, so consumers can distinguish a measured
+        # identity from a guessed one.
+        self.detection_schema: str = "none"
+        self.identity_source: str = "none"
+        self.identity_observed: bool = False
+        self.indicator_match_score: float = float("inf")
+        self.time_since_indicator: float = 2.0
+        self.time_since_dodge_input: float = 2.0
+
         self.player_time_since_hit: float = 2.0
         self.opponent_time_since_hit: float = 2.0
         self.last_knockback_dx: float = 0.0
@@ -131,7 +153,11 @@ class Memory:
         self.weapon_pickup_action_this_frame: bool = False
         self.weapon_drop_action_this_frame: bool = False
 
-        self._prev_action = np.zeros(4, dtype=np.float32)
+        # Decomposed previous action, in canonical space. All-zero means NOOP, which
+        # is the correct "nothing happened yet" state -- unlike the old encoding where
+        # a zeroed movement channel meant "holding left".
+        self._prev_action_id: int = int(Action.NOOP)
+        self._prev_action = component_vector(Action.NOOP)
 
     def _clamp_position(self, x: float, y: float) -> Tuple[float, float]:
         return (
@@ -139,20 +165,9 @@ class Memory:
             clamp(y, self.min_xy, self.max_xy),
         )
 
-    def _select_detection(self, detections: List[dict], names: List[str], state: Optional[FighterState] = None) -> Optional[dict]:
-        candidates = [d for d in detections if d.get("class_name") in names]
-        if not candidates:
-            return None
-
-        if state is not None and state.exists:
-            def score(det: dict) -> Tuple[float, float]:
-                x, y = bbox_center(det)
-                dist = euclidian((x, y), (state.x, state.y))
-                return (dist, -float(det.get("confidence", 0.0)))
-
-            return min(candidates, key=score)
-
-        return max(candidates, key=lambda d: float(d.get("confidence", 0.0)))
+    def _last_xy(self, state: FighterState) -> Optional[Tuple[float, float]]:
+        """Last known position, or None when the fighter is not currently tracked."""
+        return (state.x, state.y) if state.exists else None
 
     def _closest_weapon_center(self, centers: List[Tuple[float, float]]) -> Optional[Tuple[float, float]]:
         if not centers:
@@ -182,6 +197,7 @@ class Memory:
             state.last_x, state.last_y = state.x, state.y
             state.vx = 0.0
             state.vy = 0.0
+            state.prev_bbox_w, state.prev_bbox_h = state.bbox_w, state.bbox_h
             state.missing_frames += 1
             state.confidence *= 0.92
             if state.missing_frames > max_missing:
@@ -189,12 +205,29 @@ class Memory:
             return
 
         x, y = bbox_center(detection)
-        x_new, y_new = self._clamp_position(x, y + float(y_offset))
-        x_new, y_new = self._clamp_position(x_new, y_new)
+        bbox_w, bbox_h = bbox_size(detection)
+
+        # Shift the box centre down to the feet, using the MEASURED half-height.
+        #
+        # Both fighters must use the same convention. Previously the agent was
+        # shifted by a full `height` at detection time while the opponent was
+        # shifted by `height / 2` at ground-check time, so the agent's foot sat
+        # roughly half a body too low: it read as airborne while standing on the
+        # platform, and grounded movement goals became unreachable because
+        # `player_y` was biased past the target by more than the success radius.
+        #
+        # Measuring per frame also tracks the sprite: crouches, aerial poses and
+        # attack animations change the box, and a fixed constant cannot follow that.
+        half_height = (bbox_h if bbox_h > 0.0 else state.height) / 2.0
+        x_new, y_new = self._clamp_position(x, y + half_height + float(y_offset))
         state.last_x, state.last_y = state.x, state.y
         state.vx = clamp((x_new - state.x) / dt, -max_vel, max_vel)
         state.vy = clamp((y_new - state.y) / dt, -max_vel, max_vel)
         state.x, state.y = x_new, y_new
+
+        state.prev_bbox_w, state.prev_bbox_h = state.bbox_w, state.bbox_h
+        state.bbox_w, state.bbox_h = bbox_w, bbox_h
+
         state.exists = True
         state.missing_frames = 0
 
@@ -209,25 +242,35 @@ class Memory:
         # YOLO is the sole detection source; tracker layer removed.
         yolo_detections = list(detections or [])
 
-        player_yolo = self._select_detection(yolo_detections, ["agent"], self.player)
-        opponent_yolo = self._select_detection(yolo_detections, ["op", "op1", "op2"], self.opponent)
+        # Identity is resolved by the self-indicator under the current schema, and
+        # by class label under the legacy one. The schema is inferred per frame.
+        resolution = resolve_detections(
+            yolo_detections,
+            last_agent_xy=self._last_xy(self.player),
+            last_opponent_xy=self._last_xy(self.opponent),
+        )
+        self.detection_schema = resolution.schema
+        self.identity_source = resolution.identity_source
+        self.identity_observed = resolution.identity_is_observed
+        self.indicator_match_score = resolution.indicator_score
+        if resolution.identity_is_observed:
+            self.time_since_indicator = 0.0
+        else:
+            self.time_since_indicator = min(2.0, self.time_since_indicator + dt)
 
-        self._update_fighter(self.player, player_yolo, dt=dt, y_offset=self.player.height)
-        self._update_fighter(self.opponent, opponent_yolo, dt=dt)
+        self._update_fighter(self.player, resolution.agent, dt=dt)
+        self._update_fighter(self.opponent, resolution.opponent, dt=dt)
 
-        opponent_det = opponent_yolo
-        if opponent_det is not None:
+        opponent_det = resolution.opponent
+        if opponent_det is not None and resolution.schema == "legacy":
+            # Legacy only: opponent weapon state was encoded in the op1/op2 split.
+            # Under the 3-class schema it must come from the crop classifier, so
+            # the previous value is left untouched rather than asserted as zero.
             op_name = str(opponent_det.get("class_name", "op"))
-            if op_name == "op1":
-                self.opponent.weapon_state = 1.0
-            elif op_name == "op2":
-                self.opponent.weapon_state = 2.0
-            else:
-                self.opponent.weapon_state = 0.0
+            self.opponent.weapon_state = OPPONENT_WEAPON_STATE_FROM_CLASS.get(op_name, 0.0)
 
-        yolo_weapon_candidates = [d for d in yolo_detections if d.get("class_name") == "weapons"]
         visible_weapon_centers: list[Tuple[float, float]] = [
-            self._clamp_position(*bbox_center(d)) for d in yolo_weapon_candidates
+            self._clamp_position(*bbox_center(d)) for d in resolution.weapons
         ]
         self.visible_weapon_centers = visible_weapon_centers
         self.weapon_visible_this_frame = bool(visible_weapon_centers)
@@ -273,8 +316,12 @@ class Memory:
         _ = vy_threshold
         # Player y is already shifted by player.height at detection update time
         # (see update_from_detections -> _update_fighter with y_offset=self.player.height).
+        # Both fighters store the FOOT position in .y (shifted from the box centre by
+        # the measured half-height in _update_fighter), so neither is re-shifted here.
+        # Applying a second offset to one and not the other is exactly what made the
+        # agent read as airborne while standing on the platform.
         player_foot_y = self.player.y
-        opponent_foot_y = self.opponent.y + (self.opponent.height / 2.0)
+        opponent_foot_y = self.opponent.y
 
         player_in_x = self.platform.x_min <= self.player.x <= self.platform.x_max
         opp_in_x = self.platform.x_min <= self.opponent.x <= self.platform.x_max
@@ -350,6 +397,12 @@ class Memory:
 
     def update_dodge_cooldown(self, dt: float, action_dodge: bool) -> None:
         dt = max(1e-6, float(dt))
+        # Measured ingredient beside the simulated cooldown estimate: the policy
+        # can use it to learn when the estimate has drifted.
+        if action_dodge:
+            self.time_since_dodge_input = 0.0
+        else:
+            self.time_since_dodge_input = min(2.0, self.time_since_dodge_input + dt)
         current_player_max = (
             self.physics.dodge_ground_cooldown if (self.player.grounded or self.player.on_edge) else self.physics.dodge_air_cooldown
         )
@@ -387,24 +440,12 @@ class Memory:
                 self.opponent_dodge_cooldown_remaining = 0.0
                 self.opponent.dodge_available = True
 
-    def update_action(self, action: np.ndarray | list[int] | tuple[int, ...]) -> None:
-        action_arr = np.asarray(action, dtype=np.int64).reshape(-1)
-        if action_arr.size == 0:
-            return
-
-        movement = int(action_arr[0])
-        jump = int(action_arr[1]) if action_arr.size > 1 else 0
-        dodge = int(action_arr[2]) if action_arr.size > 2 else 0
-        attack = int(action_arr[3]) if action_arr.size > 3 else 0
-
-        # save current action as prev before overwrite
-        self._prev_action[0] = float(movement)
-        self._prev_action[1] = float(jump)
-        self._prev_action[2] = float(dodge)
-        self._prev_action[3] = float(attack)
-
-        packed_action_id = movement + (4 * jump) + (8 * dodge) + (16 * attack)
-        self.player.last_action_id = float(packed_action_id)
+    def update_action(self, action: int) -> None:
+        """Record the executed action, decomposed, in canonical space."""
+        action_id = int(np.clip(int(np.asarray(action).reshape(-1)[0]), 0, ACTION_DIM - 1))
+        self._prev_action_id = action_id
+        self._prev_action = component_vector(action_id)
+        self.player.last_action_id = float(action_id)
 
     def update_jumps(self, action_jump: bool) -> None:
         if action_jump and not (self.player.grounded or self.player.on_edge):
@@ -502,7 +543,12 @@ class Memory:
     def update_player_off_stage(self) -> bool:
         return self.update_off_stage(self.player)
 
-    def _env_features(self) -> Tuple[float, ...]:
+    def _refresh_relational(self) -> None:
+        """Recompute relational quantities and cache them on the instance.
+
+        Reward providers read ``rel_distance`` / ``weapon_dx`` directly, so these
+        stay as attributes rather than becoming locals of ``to_vector``.
+        """
         both = self.player.exists and self.opponent.exists
 
         self.weapon_dx = float(self.weapon.x - self.player.x) if self.weapon.exists else 0.0
@@ -514,173 +560,123 @@ class Memory:
             euclidian((self.player.x, self.player.y), (self.opponent.x, self.opponent.y)) if both else 1.0
         )
 
-        # User-calibrated hit windows:
-        # - ~0.01: guaranteed/light-confirm range
-        # - ~0.15: enlarged awareness band for policy shaping
-        guaranteed_hit_range = 0.01
-        extended_hit_range = 0.15
-        if both:
-            if self.rel_distance <= guaranteed_hit_range:
-                in_strike_range = 1.0
-            elif self.rel_distance <= extended_hit_range:
-                # Smoothly decay confidence through the extended range band.
-                in_strike_range = float(
-                    (extended_hit_range - self.rel_distance)
-                    / max(1e-6, extended_hit_range - guaranteed_hit_range)
-                )
-            else:
-                in_strike_range = 0.0
-        else:
-            in_strike_range = 0.0
+    def _in_strike_range(self) -> float:
+        """Smooth distance band. Derived from measured geometry, not from frame data.
 
-        facing = 0.0
-        if both:
-            # Facing from previous horizontal input:
-            # movement=1 (right) and opponent on right => facing opponent
-            # movement=0 (left) and opponent on left  => facing opponent
-            prev_move = int(np.clip(self._prev_action[0], 0.0, 3.0))
-            if prev_move == 1:
-                facing = 1.0 if self.rel_dx > 0.0 else -1.0
-            elif prev_move == 0:
-                facing = 1.0 if self.rel_dx < 0.0 else -1.0
-            elif abs(self._player_last_dx) > 0.1 and abs(self.rel_dx) > 1e-6:
-                facing = 1.0 if np.sign(self._player_last_dx) == np.sign(self.rel_dx) else -1.0
-            else:
-                facing = 0.0
+        User-calibrated windows: ~0.01 is a guaranteed connect, ~0.15 is the outer
+        awareness band that decays to zero.
+        """
+        if not (self.player.exists and self.opponent.exists):
+            return 0.0
 
-        player_facing_dir = 0.0
-        if abs(self._player_last_dx) > 0.1:
-            player_facing_dir = 1.0 if self._player_last_dx > 0.0 else -1.0
+        guaranteed, extended = 0.01, 0.15
+        if self.rel_distance <= guaranteed:
+            return 1.0
+        if self.rel_distance <= extended:
+            return float((extended - self.rel_distance) / max(1e-6, extended - guaranteed))
+        return 0.0
 
-        opponent_facing_dir = 0.0
-        if abs(self._opponent_last_dx) > 0.1:
-            opponent_facing_dir = 1.0 if self._opponent_last_dx > 0.0 else -1.0
+    def _weapon_type(self, state: FighterState) -> float:
+        """0 = unarmed, 1 / 2 = the legend's two weapons.
 
-        dodge_cooldown_norm = clamp(
-            self.player_dodge_cooldown_remaining / max(1e-6, self.player_dodge_cooldown_max),
-            0.0,
-            1.0,
-        )
-
-        nearest_ledge = _nearest_ledge(self.player.x, self.platform.y_min, self.platform.x_min, self.platform.x_max)
-        dist_to_nearest_ledge = euclidian((self.player.x, self.player.y), nearest_ledge)
-        signed_dx_to_ledge = nearest_ledge[0] - self.player.x
-        dy_to_ledge = self.player.y - nearest_ledge[1]
-
-        mid_x = (self.platform.x_min + self.platform.x_max) * 0.5
-        dist_to_stage_center = euclidian((self.player.x, self.player.y), (mid_x, self.platform.y_min))
-        signed_dx_to_stage_center = mid_x - self.player.x
-        ledge_is_occupied = 1.0 if (self.player.on_edge or self.opponent.on_edge) else 0.0
-
-        opponent_dodge_cooldown_norm = clamp(
-            self.opponent_dodge_cooldown_remaining / max(1e-6, self.physics.dodge_air_cooldown),
-            0.0,
-            1.0,
-        )
-
-        rel_vx = clamp(self.opponent.vx - self.player.vx, -3.0, 3.0)
-        rel_vy = clamp(self.opponent.vy - self.player.vy, -3.0, 3.0)
-
-        player_hitstun_norm = clamp(self.player.hitstun_duration / 0.8, 0.0, 1.0)
-        opponent_hitstun_norm = clamp(self.opponent.hitstun_duration / 0.8, 0.0, 1.0)
-        frame_advantage_estimate = clamp(opponent_hitstun_norm - player_hitstun_norm, -1.0, 1.0)
-
-        return (
-            clamp(self.rel_dx, -1.0, 1.0),
-            clamp(self.rel_dy, -1.0, 1.0),
-            clamp(self.rel_distance, 0.0, 2.0),
-            in_strike_range,
-            facing,
-            player_facing_dir,
-            clamp(self.weapon_dx, -1.0, 1.0),
-            clamp(self.weapon_dy, -1.0, 1.0),
-            clamp(self.self_stocks_left / self.max_stocks, 0.0, 1.0),
-            clamp(self.op_stocks_left / self.max_stocks, 0.0, 1.0),
-            dodge_cooldown_norm,
-            1.0 if self.weapon.exists else 0.0,
-            clamp(dist_to_nearest_ledge, 0.0, 2.0),
-            clamp(signed_dx_to_ledge, -1.0, 1.0),
-            clamp(dy_to_ledge, -1.0, 1.0),
-            opponent_facing_dir,
-            clamp(self.player_time_since_hit / 2.0, 0.0, 1.0),
-            clamp(self.opponent_time_since_hit / 2.0, 0.0, 1.0),
-            clamp(self.last_knockback_dx, -1.0, 1.0),
-            clamp(self.last_knockback_dy, -1.0, 1.0),
-            clamp(dist_to_stage_center, 0.0, 2.0),
-            clamp(signed_dx_to_stage_center, -1.0, 1.0),
-            ledge_is_occupied,
-            opponent_dodge_cooldown_norm,
-            clamp(rel_vx, -1.0, 1.0),
-            clamp(rel_vy, -1.0, 1.0),
-            frame_advantage_estimate,
-        )
+        Kept as a small ordinal rather than a one-hot on request. The values are
+        nominal, so the ordering carries no meaning; if aliasing between the two
+        weapons shows up in training, widen this to a one-hot before adding features.
+        """
+        return float(clamp(state.weapon_state, 0.0, 2.0))
 
     def to_vector(self) -> np.ndarray:
+        """Assemble the single-frame observation in StateSpec order.
+
+        Every entry is measured, derived from measurement plus fixed stage
+        calibration, an estimate shipped alongside its measured ingredient, or the
+        agent's own previous action. Nothing here is an unverifiable guess at hidden
+        game state.
+        """
         buf = self._obs_buffer
         p = self.player
         o = self.opponent
-        env = self._env_features()
 
+        self._refresh_relational()
+
+        # ══ DYNAMIC BLOCK ═════════════════════════════════════════════════
         buf[0] = p.x
         buf[1] = p.y
-        buf[2] = p.vx
-        buf[3] = p.vy
-        buf[4] = 1.0 if p.grounded else 0.0
-        buf[5] = clamp(p.damage_percent, 0.0, 1.0)
-        buf[6] = 1.0 if p.weapon_state > 0.0 else 0.0
-        buf[7] = clamp(float(p.jumps_left) / 3.0, 0.0, 1.0)
-        buf[8] = 1.0 if p.on_edge else 0.0
-        buf[9] = 1.0 if p.off_stage else 0.0
+        buf[2] = clamp(p.vx, -1.0, 1.0)
+        buf[3] = clamp(p.vy, -1.0, 1.0)
+        buf[4] = clamp(p.bbox_w, 0.0, 1.0)
+        buf[5] = clamp(p.bbox_h, 0.0, 1.0)
+        buf[6] = clamp(p.bbox_w - p.prev_bbox_w, -1.0, 1.0)
+        buf[7] = clamp(p.bbox_h - p.prev_bbox_h, -1.0, 1.0)
 
-        buf[10] = o.x
-        buf[11] = o.y
-        buf[12] = o.vx
-        buf[13] = o.vy
-        buf[14] = 1.0 if o.grounded else 0.0
-        buf[15] = clamp(o.damage_percent, 0.0, 1.0)
-        buf[16] = 1.0 if o.exists else 0.0
-        buf[17] = clamp(float(o.jumps_left) / 3.0, 0.0, 1.0)
-        buf[18] = 1.0 if o.on_edge else 0.0
-        buf[19] = 1.0 if o.off_stage else 0.0
+        buf[8] = o.x
+        buf[9] = o.y
+        buf[10] = clamp(o.vx, -1.0, 1.0)
+        buf[11] = clamp(o.vy, -1.0, 1.0)
+        buf[12] = clamp(o.bbox_w, 0.0, 1.0)
+        buf[13] = clamp(o.bbox_h, 0.0, 1.0)
+        buf[14] = clamp(o.bbox_w - o.prev_bbox_w, -1.0, 1.0)
+        buf[15] = clamp(o.bbox_h - o.prev_bbox_h, -1.0, 1.0)
 
-        buf[20] = env[0]
-        buf[21] = env[1]
-        buf[22] = env[2]
-        buf[23] = env[3]
-        buf[24] = env[4]
-        buf[25] = env[5]
-        buf[26] = env[6]
-        buf[27] = env[7]
-        buf[28] = env[8]
-        buf[29] = env[9]
-        buf[30] = env[10]
-        buf[31] = env[11]
-        buf[32] = env[12]
-        buf[33] = env[13]
-        buf[34] = env[14]
+        buf[16] = clamp(self.rel_dx, -1.0, 1.0)
+        buf[17] = clamp(self.rel_dy, -1.0, 1.0)
+        buf[18] = clamp(self.rel_distance, 0.0, 2.0)
+        buf[19] = clamp(o.vx - p.vx, -1.0, 1.0)
+        buf[20] = clamp(o.vy - p.vy, -1.0, 1.0)
 
-        buf[35] = clamp(float(p.airborne_frames) / self.physics.airborne_max_frames, 0.0, 1.0)
-        buf[36] = clamp(float(o.airborne_frames) / self.physics.airborne_max_frames, 0.0, 1.0)
-        buf[37] = clamp(p.hitstun_duration / 0.8, 0.0, 1.0)
-        buf[38] = clamp(o.hitstun_duration / 0.8, 0.0, 1.0)
+        # Executed previous action, decomposed. Inside the dynamic block so every
+        # history slice carries the action that produced the next state.
+        offset = StateSpec.ACTION_OFFSET
+        buf[offset : offset + self._prev_action.shape[0]] = self._prev_action
 
-        buf[39] = env[15]
-        buf[40] = env[16]
-        buf[41] = env[17]
-        buf[42] = env[18]
-        buf[43] = env[19]
-        buf[44] = env[20]
-        buf[45] = env[21]
-        buf[46] = env[22]
-        buf[47] = env[23]
-        buf[48] = env[24]
-        buf[49] = env[25]
-        buf[50] = env[26]
+        # ══ STATIC CONTEXT ════════════════════════════════════════════════
+        i = StateSpec.DYNAMIC_DIM
 
-        # previous action (normalised)
-        buf[51] = self._prev_action[0] / 3.0   # movement ∈ {0,1,2,3}
-        buf[52] = self._prev_action[1]          # jump     ∈ {0,1}
-        buf[53] = self._prev_action[2]          # dodge    ∈ {0,1}
-        buf[54] = self._prev_action[3] / 3.0   # attack   ∈ {0,1,2,3}
+        nearest_ledge = _nearest_ledge(p.x, self.platform.y_min, self.platform.x_min, self.platform.x_max)
+        mid_x = (self.platform.x_min + self.platform.x_max) * 0.5
+        half_span = min(mid_x, 1.0 - mid_x)
+
+        buf[i + 0] = clamp(nearest_ledge[0] - p.x, -1.0, 1.0)
+        buf[i + 1] = clamp(p.y - nearest_ledge[1], -1.0, 1.0)
+        buf[i + 2] = clamp(euclidian((p.x, p.y), nearest_ledge), 0.0, 2.0)
+        buf[i + 3] = 1.0 if p.grounded else 0.0
+        buf[i + 4] = 1.0 if p.on_edge else 0.0
+        buf[i + 5] = 1.0 if p.off_stage else 0.0
+        buf[i + 6] = clamp(mid_x - p.x, -1.0, 1.0)
+        # Blast-zone margins measured about the STAGE centre, so they stay symmetric
+        # under the canonicalisation mirror.
+        buf[i + 7] = clamp(half_span - abs(p.x - mid_x), 0.0, 1.0)
+        buf[i + 8] = clamp(1.0 - p.y, 0.0, 1.0)
+        buf[i + 9] = 1.0 if o.grounded else 0.0
+        buf[i + 10] = 1.0 if o.off_stage else 0.0
+
+        buf[i + 11] = clamp(p.damage_percent, 0.0, 1.0)
+        buf[i + 12] = clamp(o.damage_percent, 0.0, 1.0)
+        buf[i + 13] = clamp(self.self_stocks_left / self.max_stocks, 0.0, 1.0)
+        buf[i + 14] = clamp(self.op_stocks_left / self.max_stocks, 0.0, 1.0)
+        buf[i + 15] = 1.0 if p.weapon_state > 0.0 else 0.0
+        buf[i + 16] = self._weapon_type(p)
+        buf[i + 17] = self._weapon_type(o)
+        buf[i + 18] = clamp(self.weapon_dx, -1.0, 1.0)
+        buf[i + 19] = clamp(self.weapon_dy, -1.0, 1.0)
+        buf[i + 20] = 1.0 if self.weapon.exists else 0.0
+
+        buf[i + 21] = clamp(float(p.jumps_left) / 3.0, 0.0, 1.0)
+        buf[i + 22] = clamp(float(p.airborne_frames) / self.physics.airborne_max_frames, 0.0, 1.0)
+        buf[i + 23] = clamp(
+            self.player_dodge_cooldown_remaining / max(1e-6, self.player_dodge_cooldown_max), 0.0, 1.0
+        )
+        buf[i + 24] = clamp(self.time_since_dodge_input / 2.0, 0.0, 1.0)
+        buf[i + 25] = clamp(float(o.airborne_frames) / self.physics.airborne_max_frames, 0.0, 1.0)
+
+        buf[i + 26] = 1.0 if self.identity_observed else 0.0
+        buf[i + 27] = clamp(self.time_since_indicator / 2.0, 0.0, 1.0)
+        buf[i + 28] = clamp(float(p.missing_frames) / 10.0, 0.0, 1.0)
+        buf[i + 29] = clamp(float(o.missing_frames) / 10.0, 0.0, 1.0)
+        buf[i + 30] = clamp(p.confidence, 0.0, 1.0)
+        buf[i + 31] = clamp(o.confidence, 0.0, 1.0)
+
+        buf[i + 32] = self._in_strike_range()
+        buf[i + 33] = 1.0 if o.exists else 0.0
 
         return buf

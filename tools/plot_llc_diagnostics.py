@@ -26,7 +26,7 @@ except Exception:
         "rel_distance",
         "rel_dy",
         "in_strike_range",
-        "frame_advantage_estimate",
+        "opponent_damage_pct",
     ]
 
 
@@ -35,7 +35,7 @@ GOAL_GROUPS: dict[str, tuple[str, ...]] = {
     "movement": ("player_x", "player_y"),
     "weapon": ("player_has_weapon", "weapon_dx", "weapon_dy"),
     "spacing": ("rel_distance", "rel_dy"),
-    "combat": ("in_strike_range", "frame_advantage_estimate"),
+    "combat": ("in_strike_range", "opponent_damage_pct"),
 }
 
 
@@ -302,9 +302,9 @@ def _plot_goal_phase_spaces(rows: list[dict[str, str]], out_path: Path) -> None:
         "Spacing Distance/Vertical Band",
     )
 
-    frame_idx = _feature_indices(("frame_advantage_estimate",))
+    frame_idx = _feature_indices(("opponent_damage_pct",))
     range_idx = _feature_indices(("in_strike_range",))
-    combat_active = _active_rows_for_features(mask, ("in_strike_range", "frame_advantage_estimate"))
+    combat_active = _active_rows_for_features(mask, ("in_strike_range", "opponent_damage_pct"))
     ax = axes_flat[4]
     if combat_active.size > 0 and np.any(combat_active) and frame_idx:
         vals = raw[combat_active, frame_idx[0]]

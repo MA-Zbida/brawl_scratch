@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+title: "Brawlhalla RL: Vision-Only Reinforcement Learning on a Commercial Fighting Game"
+message: "If you use this software or its findings, please cite it."
+type: software
+authors:
+  - family-names: Zbida
+    given-names: Mohamed Amine
+repository-code: "https://github.com/MA-Zbida/brawl_scratch"
+url: "https://github.com/MA-Zbida/brawl_scratch"
+abstract: >-
+  A reinforcement learning agent for Brawlhalla trained from screen pixels alone,
+  with no memory access, no game API and no emulator, on a single consumer laptop.
+  Comprises a YOLO-based perception stack, a structured state representation with
+  explicit provenance, horizontal canonicalisation for sample efficiency, and a
+  goal-conditioned skill curriculum with measured retention gates.
+keywords:
+  - reinforcement-learning
+  - computer-vision
+  - object-detection
+  - goal-conditioned-rl
+  - fighting-games
+license: MIT

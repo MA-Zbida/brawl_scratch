@@ -88,7 +88,27 @@ Drop rule:
 if player_has_weapon = 1 and NUM5 is pressed, player_has_weapon becomes 0
 ```
 
-Stage success currently happens when the observation reports `player_has_weapon = 1`. The collector and stage wrapper no longer force-drop the weapon between episodes, and reset logic no longer manually overwrites weapon state. If the game still has the player holding a weapon, memory is allowed to preserve that state.
+For demo collection, a valid `weapon_acquisition` episode is now stricter:
+
+```text
+start unarmed -> find weapon -> pick it up -> hold it for N consecutive steps -> success
+```
+
+Default hold window:
+
+```text
+N = 20 collector steps
+```
+
+The hold window must be consecutive observed `player_has_weapon = 1` steps. A short `player_has_weapon = 0` flicker is tolerated for up to 3 steps, but it resets the hold counter. A longer unarmed streak means the weapon was probably dropped, so the episode is rejected and not saved.
+
+This prevents the collector from counting episodes that start while the player is already holding a weapon. During heuristic collection, if a new weapon episode starts armed, the collector runs an unrecorded warmup reset:
+
+```text
+tap NUM5 to drop weapon -> wait until player_has_weapon = 0 -> reset collector state -> start recording
+```
+
+The collector and stage wrapper still do not force-drop the weapon as part of normal environment reset. The drop is a weapon-demo warmup step only, because the real game does not reset weapon state between collector episodes.
 
 ## Cleaned Up
 
@@ -119,6 +139,50 @@ Build pure heuristic teachers for the easiest phases first:
 3. `recovery_mastery`: move toward nearest ledge and jump when below/near ledge.
 
 Then use those heuristic rollouts as BC data before PPO fine-tuning.
+
+Combat heuristic rule:
+
+- turn toward opponent before attacking,
+- light attack (`NUM4`) only when facing and within about `0.055` normalized horizontal distance,
+- heavy attack (`NUM6`) only when facing and within about `0.075` normalized horizontal distance,
+- do not attack when vertical offset is larger than about `0.04`.
+
+Heuristic collection is now available through the normal demo collector:
+
+```powershell
+python -m train.collect_bc_locomotion_demos --phase movement_fluency --teacher heuristic --episodes 30
+python -m train.collect_bc_locomotion_demos --phase weapon_acquisition --teacher heuristic --episodes 30
+python -m train.collect_bc_locomotion_demos --phase recovery_mastery --teacher heuristic --episodes 30
+```
+
+To collect the full heuristic curriculum in one run, use:
+
+```powershell
+python -m train.collect_heuristic_curriculum_demos --episodes-per-phase 50
+```
+
+This runs each phase sequentially with `--teacher heuristic` and saves:
+
+```text
+train/models/recovery_mastery_demos.npz
+train/models/movement_fluency_demos.npz
+train/models/weapon_acquisition_demos.npz
+train/models/spacing_neutral_demos.npz
+train/models/combat_execution_demos.npz
+train/models/all_skills_llc_demos.npz
+```
+
+Useful variants:
+
+```powershell
+python -m train.collect_heuristic_curriculum_demos --episodes-per-phase 50 --dry-run
+python -m train.collect_heuristic_curriculum_demos --phases core --episodes-per-phase 50
+python -m train.collect_heuristic_curriculum_demos --episodes-per-phase 50 --weapon-hold-steps 30
+```
+
+`--dry-run` prints the exact commands without collecting. `--phases core` runs only the five focused phases and skips `all_skills_llc`.
+
+Manual collection is still available with `--teacher manual`, which keeps env key injection disabled and records keyboard labels while you control the game.
 
 For manual `weapon_acquisition` collection, use this exact behavior:
 

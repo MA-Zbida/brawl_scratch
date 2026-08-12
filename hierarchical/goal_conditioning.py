@@ -45,13 +45,13 @@ class GoalConditionedModulationExtractor(BaseFeaturesExtractor):
         self.idx_player_vy = StateSpec.index("player_vy")
 
         self.goal_feature_indices = [
-            StateSpec.index("dist_to_stage_center"),
+            StateSpec.index("signed_dx_to_stage_center"),
             StateSpec.index("dist_to_nearest_ledge"),
             StateSpec.index("in_strike_range"),
             StateSpec.index("player_grounded"),
             StateSpec.index("player_is_offstage"),
             StateSpec.index("rel_distance"),
-            StateSpec.index("frame_advantage_estimate"),
+            StateSpec.index("opponent_damage_pct"),
         ]
 
         if len(self.goal_feature_indices) != self.goal_target_dim:

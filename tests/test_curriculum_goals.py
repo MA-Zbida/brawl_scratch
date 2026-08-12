@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from feature_extractor.memory.state_spec import StateSpec
 from train.curriculum_goals import CURRICULUM_GOAL_FEATURES, GOAL_DIM, GOAL_INDEX, extract_curriculum_goal_features
@@ -18,7 +19,7 @@ def test_curriculum_feature_extraction_matches_goal_space() -> None:
     obs[StateSpec.index("rel_distance")] = 0.5
     obs[StateSpec.index("rel_dy")] = 0.0
     obs[StateSpec.index("in_strike_range")] = 1.0
-    obs[StateSpec.index("frame_advantage_estimate")] = -1.0
+    obs[StateSpec.index("opponent_damage_pct")] = 0.4
 
     feats = extract_curriculum_goal_features(obs)
 
@@ -30,5 +31,5 @@ def test_curriculum_feature_extraction_matches_goal_space() -> None:
     assert feats[GOAL_INDEX["player_x"]] == 0.25
     assert feats[GOAL_INDEX["player_has_weapon"]] == 1.0
     assert feats[GOAL_INDEX["weapon_dy"]] == 0.0
-    assert feats[GOAL_INDEX["frame_advantage_estimate"]] == 0.0
+    assert feats[GOAL_INDEX["opponent_damage_pct"]] == pytest.approx(0.4)
 

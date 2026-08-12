@@ -47,19 +47,17 @@ _FEAT_BOUNDS: dict[str, tuple[float, float]] = {
     "player_has_weapon": (0.0, 1.0),
     "player_jumps_norm": (0.0, 1.0),
     "player_is_offstage": (0.0, 1.0),
-    "dist_to_stage_center": (0.0, 2.0),
+    "signed_dx_to_stage_center": (-1.0, 1.0),
     "dist_to_nearest_ledge": (0.0, 2.0),
+    "signed_dx_to_ledge": (-1.0, 1.0),
     "dy_to_ledge": (-1.0, 1.0),
     "rel_dx": (-1.0, 1.0),
     "rel_dy": (-1.0, 1.0),
     "weapon_dx": (-1.0, 1.0),
     "weapon_dy": (-1.0, 1.0),
     "rel_distance": (0.0, 2.0),
-    "facing_opponent": (-1.0, 1.0),
     "in_strike_range": (0.0, 1.0),
     "opponent_damage_pct": (0.0, 1.0),
-    "opponent_hitstun": (0.0, 1.0),
-    "frame_advantage_estimate": (-1.0, 1.0),
 }
 
 # Fall-back for any feature not listed: use FEATURE_SCALE as the max, min = 0.

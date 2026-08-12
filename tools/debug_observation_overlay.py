@@ -13,7 +13,24 @@ Usage:
     python tools/debug_observation_overlay.py --phase combat_execution --show --max-steps 4000
 """
 
+
 from __future__ import annotations
+
+
+
+# Acquire the screen duplicator before torch loads. On hybrid graphics importing
+# torch moves the process to the discrete GPU, and DXGI duplication of the
+# integrated-GPU display output then becomes impossible. Must stay above every
+# import that pulls in torch (ultralytics, stable_baselines3, env, ...).
+#
+# The sys.path bootstrap has to come first: running this file directly puts its
+# own directory on sys.path, not the repo root, so capture_first is not
+# importable without it. sys and pathlib are safe -- neither loads torch.
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
+import capture_first  # noqa: E402,F401  (import order is load-bearing)
 
 import argparse
 import sys
@@ -97,8 +114,8 @@ def make_env(args: argparse.Namespace) -> tuple[StageGoalEnv, StageSpec]:
         yolo_conf=float(args.yolo_conf),
         yolo_infer_every_n_steps=max(1, int(args.yolo_every)),
         yolo_verbose=False,
-        yolo_infer_width=640,
-        yolo_infer_height=360,
+        yolo_infer_width=960,
+        yolo_infer_height=540,
         emit_detailed_info=False,
         profile_step_timing=False,
         action_repeat_steps=1,

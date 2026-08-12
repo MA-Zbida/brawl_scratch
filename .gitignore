@@ -40,3 +40,18 @@ logs/
 
 # Codex scratch workspace
 work/
+
+# Local datasets and experiment outputs (large, machine-specific)
+brawlhalla-yolo-data/
+yolo26-p2-result/
+dev/
+assets/figures/
+
+# TensorRT engines are machine-specific: a plan is tied to the GPU architecture,
+# driver and TensorRT version that built it, so a committed .engine is unusable to
+# anyone else (and routinely exceeds GitHub's 100MB file limit). Build locally from
+# the .pt -- see docs/setup.md.
+*.engine
+
+# Downloaded/exported result archives
+*.zip

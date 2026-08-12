@@ -1,0 +1,35 @@
+{
+  "frames": 1557,
+  "usable": 1475,
+  "ambiguous": 25,
+  "no_candidate": 1,
+  "dx": {
+    "1": -0.019406250000000007,
+    "25": -0.0057291666666666186,
+    "50": -0.0005208333333333037,
+    "75": 0.00520833333333337,
+    "99": 0.019406250000000003
+  },
+  "dy": {
+    "1": 0.020697916666666656,
+    "25": 0.03906250000000003,
+    "50": 0.042187500000000044,
+    "75": 0.04531249999999998,
+    "99": 0.05430208333333335
+  },
+  "true_score_p95": 0.07499999999999997,
+  "true_score_p99": 0.08593750000000007,
+  "false_score_p01": 0.06893749999999993,
+  "gate_rejected": 692,
+  "threshold_quality": {
+    "true_accept_rate": 0.9986440677966102,
+    "false_admit_rate": 0.4287878787878788,
+    "n_false_admitted": 283
+  },
+  "constants": {
+    "INDICATOR_HORIZONTAL_WEIGHT": 2.0,
+    "INDICATOR_VERTICAL_WEIGHT": 1.0,
+    "INDICATOR_MAX_MATCH_SCORE": 0.2148,
+    "INDICATOR_ABOVE_TOLERANCE": 0.01
+  }
+}

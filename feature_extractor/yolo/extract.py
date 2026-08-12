@@ -11,17 +11,30 @@ class Extract:
         max_det: int = 5,
         verbose: bool = False,
         conf: float = 0.25,
-        infer_width: int = 640,
-        infer_height: int = 360,
+        infer_width: int = 960,
+        infer_height: int = 540,
+        imgsz: int = 960,
+        grayscale: bool = False,
         class_names: Optional[List[str]] = None,
     ):
         self.config = config
         self.max_det = max_det
         self.verbose = verbose
         self.conf = conf
+        # Pre-resize preserving 16:9, then let the model letterbox to a square.
+        # These must correspond to the resolution the detector was TRAINED at:
+        # feeding a 960-trained model at 640 shrinks the self-indicator below the
+        # size the P2 head was trained to find, and nothing reports the mismatch.
         self.infer_width = int(infer_width)
         self.infer_height = int(infer_height)
-        self.class_names = list(class_names) if class_names is not None else ["agent", "op", "op1", "op2", "weapons"]
+        self.imgsz = int(imgsz)
+        # The detector is trained on colour. Converting to grayscale here was a
+        # workaround for a grayscale-trained model and destroys accuracy otherwise.
+        self.grayscale = bool(grayscale)
+        # Class names come from the model's own metadata by default. Hardcoding
+        # them lets the list silently drift out of order with data.yaml, which
+        # mislabels every detection without raising anything.
+        self.class_names = list(class_names) if class_names is not None else None
         try:
             import cv2
         except Exception as exc:
@@ -34,7 +47,47 @@ class Extract:
 
         self.yolo = YOLO(str(model_path), task="detect")
         self._model_path = model_path
+        model_names = getattr(self.yolo, "names", None)
         print(f"[YOLO] Loaded model: {model_path.as_posix()}")
+        if self.class_names is not None:
+            print(f"[YOLO] Class names overridden: {self.class_names}")
+        elif model_names:
+            print(f"[YOLO] Class names from model metadata: {model_names}")
+        else:
+            # Without names, detections carry numeric ids, `detect_schema` matches
+            # nothing, and the pipeline yields an empty game state every frame while
+            # reporting success. Refuse to start rather than lie for an entire run.
+            raise RuntimeError(
+                f"{model_path.as_posix()} exposes no class names.\n"
+                "The engine almost certainly failed to deserialise -- check the lines above\n"
+                "for a TensorRT version error. Without names every detection is a numeric id,\n"
+                "the 3-class schema matches nothing, and the agent would train on an empty\n"
+                "observation without any error being raised.\n\n"
+                "Fix by rebuilding the engine against the installed TensorRT:\n"
+                "  python -m tools.check_capture --rebuild-engine\n"
+                "or point at the .pt directly, or pass class_names=['character','indicator_self','weapon']."
+            )
+
+    @staticmethod
+    def _name_from(source, cls_id: int) -> Optional[str]:
+        if isinstance(source, dict):
+            value = source.get(cls_id)
+            return None if value is None else str(value)
+        if isinstance(source, (list, tuple)) and 0 <= cls_id < len(source):
+            return str(source[cls_id])
+        return None
+
+    def _resolve_class_name(self, cls_id: int, names_from_result) -> str:
+        """Model metadata wins; an explicit override wins over that."""
+        if self.class_names is not None:
+            name = self._name_from(self.class_names, cls_id)
+            if name is not None:
+                return name
+        for source in (names_from_result, getattr(self.yolo, "names", None)):
+            name = self._name_from(source, cls_id)
+            if name is not None:
+                return name
+        return str(cls_id)
 
     def _results_to_detections(self, results) -> List[Dict]:
         detections = []
@@ -43,14 +96,7 @@ class Extract:
                 names_from_result = getattr(res, "names", None)
                 for box in res.boxes:
                     cls_id = int(box.cls)
-                    if 0 <= cls_id < len(self.class_names):
-                        class_name = self.class_names[cls_id]
-                    elif isinstance(names_from_result, dict):
-                        class_name = str(names_from_result.get(cls_id, cls_id))
-                    elif isinstance(names_from_result, list) and 0 <= cls_id < len(names_from_result):
-                        class_name = str(names_from_result[cls_id])
-                    else:
-                        class_name = str(cls_id)
+                    class_name = self._resolve_class_name(cls_id, names_from_result)
 
                     detections.append({
                         'class_name': class_name,
@@ -69,18 +115,20 @@ class Extract:
                     interpolation=self._cv2.INTER_AREA,
                 )
 
-            gray = self._cv2.cvtColor(model_input, self._cv2.COLOR_BGR2GRAY)
-            model_input = self._cv2.cvtColor(gray, self._cv2.COLOR_GRAY2BGR)
+            if self.grayscale:
+                gray = self._cv2.cvtColor(model_input, self._cv2.COLOR_BGR2GRAY)
+                model_input = self._cv2.cvtColor(gray, self._cv2.COLOR_GRAY2BGR)
 
+        kwargs = dict(max_det=self.max_det, verbose=self.verbose, conf=self.conf, imgsz=self.imgsz)
         try:
-            results = self.yolo(model_input, max_det=self.max_det, verbose=self.verbose, conf=self.conf)
+            results = self.yolo(model_input, **kwargs)
         except MemoryError:
             # TensorRT engine metadata version mismatch — fall back to ONNX or PT.
             fallback = self._find_fallback(self._model_path)
             print(f"[YOLO] TensorRT MemoryError — falling back to {fallback}")
             self.yolo = YOLO(str(fallback), task="detect")
             self._model_path = fallback
-            results = self.yolo(model_input, max_det=self.max_det, verbose=self.verbose, conf=self.conf)
+            results = self.yolo(model_input, **kwargs)
         return self._results_to_detections(results)
 
     @staticmethod

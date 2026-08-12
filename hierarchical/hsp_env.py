@@ -109,7 +109,7 @@ class HSPEnv(gym.Env):
         info["hsp_combat_delta"] = float(total_combat)
         info["hsp_stock_delta"] = float(total_stock)
         info["hsp_reward"] = float(reward)
-        info["frame_advantage_estimate"] = StateSpec.get(self._obs, "frame_advantage_estimate")
+        info["opponent_damage_pct"] = StateSpec.get(self._obs, "opponent_damage_pct")
 
         return self._obs, float(reward), terminated, truncated, info
 

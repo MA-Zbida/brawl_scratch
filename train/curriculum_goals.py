@@ -24,7 +24,7 @@ CURRICULUM_GOAL_FEATURES: list[str] = [
     "rel_dy",                   # 8  signed vertical offset to opponent, normalised [-1,1]→[0,1]
     # Stage 5 – Combat
     "in_strike_range",          # 9  in punish range {0,1}
-    "frame_advantage_estimate", # 10 frame advantage, normalised [-1,1]→[0,1]
+    "opponent_damage_pct",      # 10 opponent damage, measured from the UI [0,1]
 ]
 
 GOAL_INDEX: Dict[str, int] = {name: i for i, name in enumerate(CURRICULUM_GOAL_FEATURES)}
@@ -84,7 +84,7 @@ def extract_curriculum_goal_features(obs: np.ndarray) -> np.ndarray:
             _norm01(StateSpec.get(obs, "rel_dy"), -1.0, 1.0),                  # 8
             # Stage 5 – Combat execution
             float(np.clip(StateSpec.get(obs, "in_strike_range"), 0.0, 1.0)),   # 9
-            _norm01(StateSpec.get(obs, "frame_advantage_estimate"), -1.0, 1.0), # 10
+            float(np.clip(StateSpec.get(obs, "opponent_damage_pct"), 0.0, 1.0)), # 10
         ],
         dtype=np.float32,
     )

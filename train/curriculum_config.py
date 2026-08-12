@@ -15,7 +15,19 @@ from train.curriculum_goals import (
     extract_curriculum_goal_features,
     normalize_goal_type,
 )
+from action_space import Action
 from train.llc_stage_common import StageSpec
+
+
+#: Locomotion + PICKUP. The weapon phase should not be swinging.
+WEAPON_PHASE_ACTIONS: tuple[int, ...] = tuple(
+    int(a) for a in (
+        Action.NOOP, Action.MOVE_TOWARD, Action.MOVE_AWAY,
+        Action.FAST_FALL, Action.FAST_FALL_TOWARD, Action.FAST_FALL_AWAY,
+        Action.JUMP, Action.JUMP_TOWARD, Action.JUMP_AWAY,
+        Action.PICKUP,
+    )
+)
 
 
 TargetSampler = Callable[[np.ndarray], np.ndarray]
@@ -140,12 +152,20 @@ def _sampler_spacing(_: np.ndarray) -> np.ndarray:
     return clip_goal_target(t)
 
 
-def _sampler_combat(_: np.ndarray) -> np.ndarray:
-    """Combat goal: enter strike range with a favourable frame advantage."""
+def _sampler_combat(obs: np.ndarray) -> np.ndarray:
+    """Combat goal: enter strike range and raise the opponent's damage.
+
+    The target is the opponent's *current* damage plus an increment, so the goal
+    is "deal this much more", grounded in a UI measurement rather than in an
+    estimate of hidden frame data.
+    """
     t = _base_target()
     t[GOAL_INDEX["in_strike_range"]] = 1.0
-    # normalised frame advantage in [0.55, 0.90] == slight-to-strong advantage
-    t[GOAL_INDEX["frame_advantage_estimate"]] = float(np.random.uniform(0.55, 0.90))
+    try:
+        current = float(np.clip(StateSpec.get(np.asarray(obs, dtype=np.float32), "opponent_damage_pct"), 0.0, 1.0))
+    except Exception:
+        current = 0.0
+    t[GOAL_INDEX["opponent_damage_pct"]] = float(np.clip(current + np.random.uniform(0.03, 0.10), 0.0, 1.0))
     return clip_goal_target(t)
 
 
@@ -186,7 +206,7 @@ def _sample_all_skills(_: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
         )
     return (
         _sampler_combat(_),
-        _mask_for(("in_strike_range", 1.0), ("frame_advantage_estimate", 0.8)),
+        _mask_for(("in_strike_range", 1.0), ("opponent_damage_pct", 0.8)),
         normalize_goal_type("combat"),
     )
 
@@ -270,8 +290,14 @@ def build_phase_spec(
             success_threshold=0.1,
             success_bonus=1.0,
             reward_from_goal_progress=False,
-            player_has_weapon_bonus=0.1,
+            # Strictly BELOW step_penalty. Holding should be better than not holding,
+            # but never better than nothing: at +0.1 against a 0.05 step penalty,
+            # standing still while armed earned +0.05/step indefinitely, which over a
+            # 140-step episode beats the +1.0 success bonus roughly sixfold. The agent
+            # would learn to grab one weapon and then stop.
+            player_has_weapon_bonus=0.02,
             weapon_pickup_bonus=2.0,
+            weapon_pickup_bonus_once_per_episode=True,
             step_penalty=0.05,
             offstage_penalty_scale=0.1,
             proximity_scale=0.0,
@@ -281,10 +307,13 @@ def build_phase_spec(
             death_penalty=float(death_penalty),
             reward_clip=10,
             disable_attack=False,
-            allowed_attack_actions=(0, 3),
+            # Weapon phase: locomotion plus the grab/throw input only.
+            allowed_actions=WEAPON_PHASE_ACTIONS,
             disable_dodge=False,
             disable_jump=False,
-            agent_weapon_drop_penalty=1.0,
+            # Must exceed weapon_pickup_bonus so a pickup/drop cycle can never be
+            # net-positive even if the once-per-episode guard is disabled.
+            agent_weapon_drop_penalty=2.5,
             drop_weapon_key="num5",
             terminate_on_death=bool(terminate_on_death),
         )
@@ -319,7 +348,7 @@ def build_phase_spec(
             goal_type=normalize_goal_type("combat"),
             mask=_mask_for(
                 ("in_strike_range", 1.0),
-                ("frame_advantage_estimate", 0.8),
+                ("opponent_damage_pct", 0.8),
             ),
             target_sampler=_sampler_combat,
             feature_names=list(CURRICULUM_GOAL_FEATURES),

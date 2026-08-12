@@ -1,6 +1,23 @@
 #!/usr/bin/env python
 from __future__ import annotations
 
+
+
+
+# Acquire the screen duplicator before torch loads. On hybrid graphics importing
+# torch moves the process to the discrete GPU, and DXGI duplication of the
+# integrated-GPU display output then becomes impossible. Must stay above every
+# import that pulls in torch (ultralytics, stable_baselines3, env, ...).
+#
+# The sys.path bootstrap has to come first: running this file directly puts its
+# own directory on sys.path, not the repo root, so capture_first is not
+# importable without it. sys and pathlib are safe -- neither loads torch.
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
+import capture_first  # noqa: E402,F401  (import order is load-bearing)
+
 import argparse
 import sys
 from pathlib import Path
@@ -16,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env import BrawlDeepEnv, EnvConfig
 from feature_extractor.film_extractor import StageGoalFiLMExtractor
+from action_space import ACTION_DIM
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goals import extract_goal_features
 from train.curriculum_config import PHASES, build_phase_spec
@@ -151,20 +169,21 @@ def _align_demo_lengths(
 
 
 def _resolve_actions_for_ppo(data: np.lib.npyio.NpzFile) -> np.ndarray:
-    raw_actions = np.asarray(data["actions"])
+    """Demo actions are single indices into the 27-action space.
 
-    if "actions_multidiscrete" in data:
-        actions = np.asarray(data["actions_multidiscrete"], dtype=np.int64)
-    elif raw_actions.ndim == 2 and raw_actions.shape[1] == 4:
-        actions = raw_actions.astype(np.int64)
-    else:
+    Archives recorded under the old MultiDiscrete([4,2,2,4]) encoding are rejected
+    rather than reinterpreted: the two spaces are not convertible, since the old one
+    could not express direction-modified attacks at all.
+    """
+    actions = np.asarray(data["actions"], dtype=np.int64).reshape(-1)
+
+    if actions.ndim != 1:
+        raise ValueError(f"Expected discrete actions of shape (N,), got {actions.shape}")
+    if actions.size and (actions.max() >= ACTION_DIM or actions.min() < 0):
         raise ValueError(
-            "Demo actions must be MultiDiscrete with shape (N,4). "
-            "Please recollect demos with the current PPO-only collector."
+            f"Demo actions fall outside the {ACTION_DIM}-action space "
+            f"(range {actions.min()}..{actions.max()}). Recollect with the current collector."
         )
-
-    if actions.ndim != 2 or actions.shape[1] != 4:
-        raise ValueError(f"Expected PPO actions shape (N,4), got {actions.shape}")
     return actions
 
 
@@ -349,7 +368,10 @@ def main() -> None:
 
     spec = build_phase_spec(resolved_phase, death_penalty=1.0, terminate_on_death=True)
     goal_dim = int(len(spec.feature_names)) if spec.feature_names is not None else int(np.asarray(spec.mask, dtype=np.float32).shape[0])
-    expected_obs_dim = int(StateSpec.dim() + (2 * goal_dim))
+    # Demos are recorded from StageGoalEnv, whose observation is the stacked env
+    # observation plus goal target and mask. StateSpec.dim() alone is the
+    # single-frame width and would under-count by the whole history window.
+    expected_obs_dim = int(StateSpec.observation_dim(EnvConfig().history_offsets) + (2 * goal_dim))
     if int(obs_np.shape[1]) != expected_obs_dim:
         raise ValueError(
             f"Demo observation dim mismatch for phase='{resolved_phase}': file dim={obs_np.shape[1]}, "
@@ -459,7 +481,7 @@ def main() -> None:
 
     device = model.policy.device
     obs_all = th.as_tensor(obs_np, dtype=th.float32, device=device)
-    act_all = th.as_tensor(act_np, dtype=th.long, device=device)
+    act_all = th.as_tensor(act_np, dtype=th.long, device=device).reshape(-1)
 
     print("=" * 68)
     print(f"BC PRETRAIN - {resolved_phase.upper()} PPO")
@@ -501,8 +523,9 @@ def main() -> None:
         with th.no_grad():
             ppo_policy = cast(Any, model).policy
             pred = ppo_policy._predict(obs_all, deterministic=True)
-            exact = (pred == act_all).all(dim=1).float().mean().item()
-            per_dim = (pred == act_all).float().mean(dim=0).cpu().numpy()
+            pred = pred.reshape(-1)
+            exact = (pred == act_all).float().mean().item()
+            per_dim = np.array([exact])
             print(
                 f"epoch {epoch:02d}/{args.epochs} loss={np.mean(losses):.4f} "
                 f"entropy={np.mean(entropies):.4f} exact_acc={exact:.3f} "

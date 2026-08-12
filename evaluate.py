@@ -1,6 +1,23 @@
 #!/usr/bin/env python
 from __future__ import annotations
 
+
+
+
+# Acquire the screen duplicator before torch loads. On hybrid graphics importing
+# torch moves the process to the discrete GPU, and DXGI duplication of the
+# integrated-GPU display output then becomes impossible. Must stay above every
+# import that pulls in torch (ultralytics, stable_baselines3, env, ...).
+#
+# The sys.path bootstrap has to come first: running this file directly puts its
+# own directory on sys.path, not the repo root, so capture_first is not
+# importable without it. sys and pathlib are safe -- neither loads torch.
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+
+import capture_first  # noqa: E402,F401  (import order is load-bearing)
+
 import argparse
 import ctypes
 import sys

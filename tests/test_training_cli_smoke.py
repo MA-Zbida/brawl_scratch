@@ -22,12 +22,15 @@ def test_demo_collection_cli_accepts_current_phase_names(monkeypatch) -> None:
             "1",
             "--max-episode-steps",
             "10",
+            "--teacher",
+            "heuristic",
         ],
     )
 
     args = parse_args()
     assert args.phase == "combat_execution"
     assert args.episodes == 1
+    assert args.teacher == "heuristic"
 
 
 def test_bc_pretrain_cli_accepts_current_phase_names(monkeypatch) -> None:
@@ -54,4 +57,3 @@ def test_bc_pretrain_cli_accepts_current_phase_names(monkeypatch) -> None:
     args = parse_args()
     assert args.phase == "movement_fluency"
     assert args.epochs == 1
-

@@ -10,375 +10,37 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
+# MUST precede the Extract import below: that pulls in ultralytics -> torch, and
+# loading torch's CUDA libraries makes DXGI duplication impossible on this hardware.
+# See capture_first's docstring for the measurement.
+import capture_first
+
+from capture import DxcamFrameProvider, MssFrameProvider, create_frame_provider
 from config import UI_REGIONS
+from control.input import KeySet, NullInputController, PyDirectInputController
+from reward.providers import NullRewardProvider
+from reward.ui_probe import PixelStocksHealthProvider
+from action_space import (
+    ACTION_DIM,
+    TAP_KEYS,
+    Action,
+    components as action_components,
+    describe as describe_action,
+    legal_action_mask,
+    sanitize,
+    to_keys,
+)
+from feature_extractor.memory.canonicalize import (
+    mirror_dynamic_block,
+    mirror_state_vector,
+    should_mirror,
+)
 from feature_extractor.memory.structured_memory import Memory
 from feature_extractor.memory.state_spec import StateSpec
 from feature_extractor.yolo.extract import Extract
 from reward.extract_rgb import get_rgb
 from reward.rgb_to_dmg import get_dmg
 from reward.stock import get_stock
-
-
-KeySet = Iterable[str]
-
-
-class NullInputController:
-    def set_pressed(self, keys: KeySet) -> None:
-        return
-
-    def tap(self, keys: KeySet) -> None:
-        return
-
-    def reset(self) -> None:
-        return
-
-
-class NullRewardProvider:
-    """Reward for training-mode vs easy bot.
-
-    Components (8 total):
-        1. dmg_dealt      – positive per opponent HP lost
-        2. ko_reward       – bonus per opponent stock taken
-        3. ko_penalty      – penalty per self stock lost
-        4. game_win        – large terminal bonus
-        5. game_loss       – large terminal penalty
-        6. weapon_held     – small per-step bonus for holding a weapon
-        7. approach        – continuous proximity shaping
-        8. proximity_bonus – per-step reward for being in strike range
-        9. edge            – mild penalty for being off-platform
-
-    NOTE: dmg_taken removed — it made the agent scared/avoidant.
-    KO penalty already punishes dying; per-hit pain caused camping.
-    """
-
-    # ── tuneable constants ─────────────────────────────────────────
-    DMG_DEALT_COEFF: float = 0.15        # per raw-HP point dealt
-    KO_REWARD: float = 15.0              # per opponent stock lost
-    KO_PENALTY: float = -5.0             # per self stock lost (softened: less risk-averse)
-    GAME_WIN_REWARD: float = 30.0        # terminal: opponent loses last stock
-    GAME_LOSS_PENALTY: float = -15.0     # terminal: self loses last stock
-    WEAPON_HELD_BONUS: float = 0.005     # per step while holding a weapon
-    APPROACH_COEFF: float = 0.05         # continuous proximity: -dist * coeff (stronger pull)
-    PROXIMITY_BONUS: float = 0.02        # per step while in strike range
-    STRIKE_RANGE: float = 0.18           # normalised distance threshold
-
-    # ── edge penalty (mild, prevents running to blast zone) ────────
-    #   Platform: x∈[0.323, 0.674]  y∈[0.570, 0.808]
-    EDGE_X_MIN: float = 0.30
-    EDGE_X_MAX: float = 0.70
-    EDGE_Y_MAX: float = 0.83
-    EDGE_COEFF: float = -0.05            # gentle nudge back on stage
-
-    def __init__(self) -> None:
-        pass
-
-    def reset(self) -> None:
-        """Reset per-episode state (called at env.reset)."""
-        pass
-
-    def get_reward_breakdown(self, state, memory: Memory) -> dict[str, float]:
-        # ── positions & distances ──────────────────────────────────
-        # Use pre-calculated values from memory instead of math.hypot
-        curr_dist = float(memory.rel_distance) if (memory.player.exists and memory.opponent.exists) else 0.5
-        px, py = memory.player.x, memory.player.y
-        ox, oy = memory.opponent.x, memory.opponent.y
-
-        both_exist = memory.player.exists and memory.opponent.exists
-
-        # ── stock changes ─────────────────────────────────────────
-        op_stock_lost = max(0.0, memory.prev_op_stocks_left - memory.op_stocks_left)
-        self_stock_lost = max(0.0, memory.prev_self_stocks_left - memory.self_stocks_left)
-
-        # ═══ 1. DAMAGE DEALT ══════════════════════════════════════
-        dmg_dealt = self.DMG_DEALT_COEFF * float(memory.op_delta_damage)
-
-        # ═══ 2. KO EVENTS ═════════════════════════════════════════
-        ko_reward = self.KO_REWARD * op_stock_lost
-        ko_penalty = self.KO_PENALTY * self_stock_lost
-
-        # ═══ 3. GAME WIN / LOSS (terminal) ════════════════════════
-        game_win = self.GAME_WIN_REWARD if (memory.op_stocks_left <= 0.0 and op_stock_lost > 0.0) else 0.0
-        game_loss = self.GAME_LOSS_PENALTY if (memory.self_stocks_left <= 0.0 and self_stock_lost > 0.0) else 0.0
-
-        # ═══ 4. WEAPON HELD ═══════════════════════════════════════
-        weapon_held = self.WEAPON_HELD_BONUS if memory.player.weapon_state > 0.0 else 0.0
-
-        # ═══ 5. APPROACH (continuous proximity) ═══════════════════
-        approach = 0.0
-        if both_exist:
-            approach = -self.APPROACH_COEFF * curr_dist
-
-        # ═══ 6. PROXIMITY BONUS (in strike range) ════════════════
-        proximity_bonus = 0.0
-        if both_exist and curr_dist < self.STRIKE_RANGE:
-            proximity_bonus = self.PROXIMITY_BONUS
-
-        # ═══ 7. EDGE PENALTY (mild off-platform nudge) ═══════════
-        edge = 0.0
-        if memory.player.exists:
-            overshoot = 0.0
-            if px < self.EDGE_X_MIN:
-                overshoot = max(overshoot, (self.EDGE_X_MIN - px) / max(self.EDGE_X_MIN, 1e-6))
-            elif px > self.EDGE_X_MAX:
-                overshoot = max(overshoot, (px - self.EDGE_X_MAX) / max(1.0 - self.EDGE_X_MAX, 1e-6))
-            if py > self.EDGE_Y_MAX:
-                overshoot = max(overshoot, (py - self.EDGE_Y_MAX) / max(1.0 - self.EDGE_Y_MAX, 1e-6))
-            edge = self.EDGE_COEFF * min(overshoot, 1.0)
-
-        # ═══ TOTAL ════════════════════════════════════════════════
-        total = (
-            dmg_dealt
-            + ko_reward + ko_penalty
-            + game_win + game_loss
-            + weapon_held
-            + approach + proximity_bonus
-            + edge
-        )
-
-        return {
-            "dmg_dealt": float(dmg_dealt),
-            "ko_reward": float(ko_reward),
-            "ko_penalty": float(ko_penalty),
-            "game_win": float(game_win),
-            "game_loss": float(game_loss),
-            "weapon_held": float(weapon_held),
-            "approach": float(approach),
-            "proximity_bonus": float(proximity_bonus),
-            "edge": float(edge),
-            "total_reward": float(total),
-        }
-    
-    def get_reward(self, state, memory: Memory) -> float:
-        reward_dict = self.get_reward_breakdown(state, memory)
-        return float(reward_dict["total_reward"])
-
-    def update_memory(self, frame, memory: Memory,) -> None:
-        return
-
-
-class DxcamFrameProvider:
-    def __init__(self, region: Optional[Tuple[int, int, int, int]] = None,
-                 output_idx: int = 0, target_fps: int = 60):
-        try:
-            import dxcam
-        except Exception as exc:
-            raise RuntimeError("dxcam is required for DxcamFrameProvider") from exc
-
-        self._camera = dxcam.create(output_idx=output_idx, output_color="BGR")
-        # Prefer non-blocking capture mode when available: it returns the latest
-        # frame immediately (possibly duplicate) instead of waiting for a fresh one.
-        # This is critical for RL control loops where policy steps can be faster
-        # than the capture thread.
-        if region is None:
-            try:
-                self._camera.start(target_fps=target_fps, video_mode=True)
-            except TypeError:
-                self._camera.start(target_fps=target_fps)
-        else:
-            try:
-                self._camera.start(region=region, target_fps=target_fps, video_mode=True)
-            except TypeError:
-                self._camera.start(region=region, target_fps=target_fps)
-        self._last_good_frame = None
-
-    def get_frame(self):
-        """Return latest frame, falling back to the last good one if DXCam has no new frame."""
-        frame = self._camera.get_latest_frame()
-        if frame is not None:
-            self._last_good_frame = frame
-            return frame
-        return self._last_good_frame
-
-    def close(self) -> None:
-        self._camera.stop()
-
-
-class PyDirectInputController:
-    _HOLDABLE_KEYS: frozenset[str] = frozenset({"a", "d", "s"})
-
-    def __init__(self):
-        try:
-            import pydirectinput
-        except Exception as exc:
-            raise RuntimeError("pydirectinput is required for PyDirectInputController") from exc
-        self._pydirectinput = pydirectinput
-        # Add explicit numpad aliases so actions can target numpad-only keys.
-        mapping = getattr(self._pydirectinput, "KEYBOARD_MAPPING", None)
-        if isinstance(mapping, dict):
-            mapping.setdefault("num4", 0x4B)
-            mapping.setdefault("num5", 0x4C)
-            mapping.setdefault("num6", 0x4D)
-            mapping.setdefault("num_4", mapping["num4"])
-            mapping.setdefault("num_5", mapping["num5"])
-            mapping.setdefault("num_6", mapping["num6"])
-        if hasattr(self._pydirectinput, "PAUSE"):
-            self._pydirectinput.PAUSE = 0
-        if hasattr(self._pydirectinput, "FAILSAFE"):
-            self._pydirectinput.FAILSAFE = False
-        if hasattr(self._pydirectinput, "MINIMUM_DURATION"):
-            setattr(self._pydirectinput, "MINIMUM_DURATION", 0)
-        if hasattr(self._pydirectinput, "MINIMUM_SLEEP"):
-            setattr(self._pydirectinput, "MINIMUM_SLEEP", 0)
-        if hasattr(self._pydirectinput, "DARWIN_CATCH_UP_TIME"):
-            setattr(self._pydirectinput, "DARWIN_CATCH_UP_TIME", 0)
-        self._pressed: set[str] = set()
-
-    def set_pressed(self, keys: KeySet) -> None:
-        target = set(keys)
-
-        # Release holdable keys only when they are currently pressed.
-        # Avoiding redundant keyUp() calls significantly reduces input overhead.
-        for key in self._HOLDABLE_KEYS:
-            if key not in target and key in self._pressed:
-                self._pydirectinput.keyUp(key)
-                self._pressed.discard(key)
-
-        # Release any other tracked key not in target
-        for key in list(self._pressed):
-            if key not in target and key not in self._HOLDABLE_KEYS:
-                self._pydirectinput.keyUp(key)
-                self._pressed.discard(key)
-
-        # Press keys that should be held
-        for key in target:
-            if key not in self._pressed:
-                self._pydirectinput.keyDown(key)
-                self._pressed.add(key)
-
-    def tap(self, keys: KeySet) -> None:
-        for key in keys:
-            self._pydirectinput.keyDown(key)
-        for key in keys:
-            self._pydirectinput.keyUp(key)
-
-    def reset(self) -> None:
-        for key in list(self._pressed):
-            self._pydirectinput.keyUp(key)
-        for key in self._HOLDABLE_KEYS:
-            self._pydirectinput.keyUp(key)
-        self._pressed.clear()
-
-
-class PixelStocksHealthProvider:
-    def __init__(
-        self,
-        ui_regions: dict,
-        max_health: float = 351.0,
-        self_stocks: float = 3.0,
-        op_stocks: float = 3.0,
-        stock_confirm_frames: int = 2,
-        stock_event_cooldown_sec: float = 0.8,
-        stock_event_lock_sec: float = 4.7,
-    ):
-        self.ui_regions = ui_regions
-        self.max_health = max_health
-        self._initial_self_stocks = self_stocks
-        self._initial_op_stocks = op_stocks
-        self.self_stocks_left = self_stocks
-        self.op_stocks_left = op_stocks
-        self._last_stock_signal = 0
-        self._stable_stock_signal = 0
-        self._stable_stock_frames = 0
-        self._stock_confirm_frames = stock_confirm_frames
-        self._stock_event_cooldown_sec = stock_event_cooldown_sec
-        self._stock_event_lock_sec = float(max(0.0, stock_event_lock_sec))
-        self._last_stock_event_time = 0.0
-        self._neutral_frames = 0
-        self._armed_for_event = True
-        self._self_event_lock_until = 0.0
-        self._op_event_lock_until = 0.0
-
-    def reset(self, preserve_match_state: bool = True) -> None:
-        if not bool(preserve_match_state):
-            self.self_stocks_left = float(self._initial_self_stocks)
-            self.op_stocks_left = float(self._initial_op_stocks)
-        self._last_stock_signal = 0
-        self._stable_stock_signal = 0
-        self._stable_stock_frames = 0
-        self._last_stock_event_time = 0.0
-        self._neutral_frames = 0
-        self._armed_for_event = True
-        # Keep per-side stock event locks across env resets to avoid
-        # re-counting the same red/cyan flash when episodes restart quickly.
-
-    def _read_pixel(self, frame, coord: Tuple[int, int]) -> Optional[np.ndarray]:
-        if frame is None:
-            return None
-        x, y = coord
-        if y < 0 or x < 0 or y >= frame.shape[0] or x >= frame.shape[1]:
-            return None
-        return frame[y, x]
-
-    def __call__(self, frame, detections):
-        stock_coord = self.ui_regions.get("stock")
-        op_coord = self.ui_regions.get("op")
-        agent_coord = self.ui_regions.get("agent")
-
-        if stock_coord is not None:
-            stock_pixel = self._read_pixel(frame, stock_coord)
-            if stock_pixel is not None:
-                stock_rgb = np.asarray(get_rgb(stock_pixel), dtype=np.float32)
-                stock_signal = int(get_stock(stock_rgb))
-                if stock_signal == self._stable_stock_signal:
-                    self._stable_stock_frames += 1
-                else:
-                    self._stable_stock_signal = stock_signal
-                    self._stable_stock_frames = 1
-
-                if stock_signal == 0:
-                    self._neutral_frames += 1
-                else:
-                    self._neutral_frames = 0
-
-                if self._neutral_frames >= max(1, int(self._stock_confirm_frames)):
-                    self._armed_for_event = True
-
-                now = time.perf_counter()
-                stable_confirmed = self._stable_stock_frames >= max(1, int(self._stock_confirm_frames))
-                cooldown_ready = (now - self._last_stock_event_time) >= float(self._stock_event_cooldown_sec)
-
-                if stable_confirmed and stock_signal != 0 and stock_signal != self._last_stock_signal and cooldown_ready and self._armed_for_event:
-                    accepted = False
-                    if stock_signal < 0:
-                        if now >= self._self_event_lock_until:
-                            self.self_stocks_left = max(0.0, self.self_stocks_left - 1.0)
-                            self._self_event_lock_until = now + self._stock_event_lock_sec
-                            accepted = True
-                    else:
-                        if now >= self._op_event_lock_until:
-                            self.op_stocks_left = max(0.0, self.op_stocks_left - 1.0)
-                            self._op_event_lock_until = now + self._stock_event_lock_sec
-                            accepted = True
-                    if accepted:
-                        self._last_stock_event_time = now
-                    self._last_stock_signal = stock_signal
-                    self._armed_for_event = False
-                if stock_signal == 0:
-                    self._last_stock_signal = 0
-            else:
-                self._last_stock_signal = 0
-                self._stable_stock_signal = 0
-                self._stable_stock_frames = 0
-                self._neutral_frames = 0
-
-        self_health = None
-        op_health = None
-
-        if agent_coord is not None:
-            agent_pixel = self._read_pixel(frame, agent_coord)
-            if agent_pixel is not None:
-                agent_rgb = np.asarray(get_rgb(agent_pixel), dtype=np.float32)
-                dmg = float(get_dmg(agent_rgb))
-                self_health = max(0.0, self.max_health - dmg)
-
-        if op_coord is not None:
-            op_pixel = self._read_pixel(frame, op_coord)
-            if op_pixel is not None:
-                op_rgb = np.asarray(get_rgb(op_pixel), dtype=np.float32)
-                dmg = float(get_dmg(op_rgb))
-                op_health = max(0.0, self.max_health - dmg)
-
-        return self.self_stocks_left, self.op_stocks_left, self_health, op_health
 
 
 @dataclass
@@ -389,10 +51,26 @@ class EnvConfig:
     yolo_max_det: int = 8
     yolo_conf: float = 0.25
     yolo_verbose: bool = False
-    yolo_infer_width: int = 640
-    yolo_infer_height: int = 360
-    temporal_stack_size: int = 1  # 1 = single frame (LSTM handles time)
-    temporal_offsets: tuple[int, ...] = (0,)  # only t-0; LSTM does the rest
+    # Must correspond to the detector's TRAINING resolution. A 960-trained model
+    # fed at 640 shrinks the self-indicator below what the P2 head learned to find.
+    yolo_infer_width: int = 960
+    yolo_infer_height: int = 540
+    yolo_imgsz: int = 960
+    # Temporal window. The policy is a plain MLP, so history is supplied by
+    # stacking rather than recurrence: recurrent PPO is markedly more
+    # sample-hungry, and this setup is bounded by wall-clock, not by compute.
+    # Only the DYNAMIC block is stacked; slow context is carried once.
+    history_offsets: tuple[int, ...] = (2, 4, 8)
+    # Capture backend. Default is "dxcam" and it RAISES rather than degrading:
+    # DXGI duplication sustains 60+ fps while GDI manages roughly 10-30 at 1080p,
+    # and this project is bounded by control rate. A silent fallback would quietly
+    # halve the step rate that every design decision here is built around, so the
+    # GDI path is opt-in only ("mss"), never automatic.
+    capture_backend: str = "dxcam"
+    # Horizontally mirror the observation so the opponent is always on the same
+    # side. Roughly halves the state space the policy must cover.
+    canonicalize_observation: bool = True
+    canonicalize_deadband: float = 0.03
     profile_step_timing: bool = False
     profile_window_size: int = 120
     emit_detailed_info: bool = False
@@ -421,14 +99,28 @@ class BrawlDeepEnv(gym.Env):
         super().__init__()
 
         self.config = config or EnvConfig()
+
+        # ORDER MATTERS: capture must be created BEFORE the detector.
+        #
+        # On a hybrid-graphics laptop the display output belongs to the Intel iGPU
+        # while CUDA runs on the NVIDIA dGPU. Initialising CUDA/TensorRT first binds
+        # the process to the NVIDIA adapter, after which duplicating the Intel-owned
+        # output fails with DXGI_ERROR_UNSUPPORTED (0x887A0004) -- reported only as
+        # "device interface or feature level is not supported", which reads like a
+        # driver problem rather than an ordering one. Grabbing the duplicator first
+        # avoids it entirely; CUDA initialises fine afterwards.
+        self.frame_provider = frame_provider or create_frame_provider(
+            prefer=self.config.capture_backend
+        )
+
         self.extractor = extractor or Extract(
             max_det=self.config.yolo_max_det,
             verbose=self.config.yolo_verbose,
             conf=self.config.yolo_conf,
             infer_width=self.config.yolo_infer_width,
             infer_height=self.config.yolo_infer_height,
+            imgsz=self.config.yolo_imgsz,
         )
-        self.frame_provider = frame_provider or DxcamFrameProvider()
         self.input_controller = input_controller or PyDirectInputController()
         self.reward_provider = reward_provider or NullRewardProvider()
         self.ground_contact_provider = ground_contact_provider
@@ -447,24 +139,29 @@ class BrawlDeepEnv(gym.Env):
         self._last_detections: list = []
         self._step_time_sum = 0.0
         self._step_time_count = 0
-        self._tap_latch_remaining = {"space": 0, "e": 0, "num4": 0, "num6": 0, "num5": 0}
+        self._tap_latch_remaining = {key: 0 for key in sorted(TAP_KEYS)}
         self._last_obs: Optional[np.ndarray] = None  # cached for None-frame fallback
-        self._last_movement: int = 3     # last movement index (3 = idle)
+        self._last_movement: int = 0     # last horizontal direction (0 = neutral)
         self._movement_hold_count: int = 0  # consecutive steps with same movement
         self._max_movement_hold: int = 20   # force release+re-press after this many
 
-        self.action_space = spaces.MultiDiscrete([4, 2, 2, 4])
+        # One categorical head over the full control grammar. A factorised space
+        # would model direction and attack as independent, which they are not: the
+        # direction IS part of the move. See action_space.py.
+        self.action_space = spaces.Discrete(ACTION_DIM)
 
-        offsets = tuple(int(v) for v in self.config.temporal_offsets)
-        if len(offsets) == 0:
-            offsets = (0,)
-        offsets = tuple(max(0, v) for v in offsets)
-        self._temporal_offsets = offsets
-        offsets = tuple(max(0, v) for v in offsets)
-        self._temporal_offsets = offsets
-        self._history_len = max(self._temporal_offsets) + 1
+        # Temporal window over the dynamic block only.
+        offsets = tuple(sorted({max(1, int(v)) for v in self.config.history_offsets}))
+        self._history_offsets = offsets
+        self._history_len = (max(offsets) + 1) if offsets else 1
+        self._dynamic_dim = StateSpec.dynamic_dim()
         self._state_history: deque[np.ndarray] = deque(maxlen=self._history_len)
         self._reward_sig_cache: dict[str, list[str]] = {}
+
+        # Canonicalisation state. `_mirrored` is sticky across steps so the
+        # decision has hysteresis and the observation cannot chatter.
+        self._canonicalize = bool(self.config.canonicalize_observation)
+        self._mirrored = False
 
         # Fine-grained step profiler (enabled when profile_step_timing=True).
         self._perf_inner_frames = 0
@@ -477,9 +174,10 @@ class BrawlDeepEnv(gym.Env):
         self._perf_inner_total_sum = 0.0
         self._perf_inner_report_every = 500
 
-        # Obs dim from StateSpec (single source of truth)
-        base_dim = StateSpec.dim()
-        obs_dim = base_dim * len(self._temporal_offsets)
+        # Obs dim from StateSpec (single source of truth):
+        # [ core(t) | dynamic(t-k) for each history offset ]
+        obs_dim = StateSpec.observation_dim(self._history_offsets)
+        self._obs_buffer = np.zeros((obs_dim,), dtype=np.float32)
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
@@ -493,19 +191,7 @@ class BrawlDeepEnv(gym.Env):
         return StateSpec.names()
 
     def get_observation_spec(self) -> list[str]:
-        base = self._observation_feature_names()
-        names: list[str] = []
-        for offset in self._temporal_offsets:
-            t_name = "t" if offset == 0 else f"t-{offset}"
-            for feature in base:
-                names.append(f"{t_name}_{feature}")
-        return names
-
-    def _sanitize_action(self, action: Sequence[int]) -> tuple[int, int, int, int]:
-        movement = int(np.clip(int(action[0]), 0, 3))
-        jump = int(np.clip(int(action[1]), 0, 1))
-        dodge = int(np.clip(int(action[2]), 0, 1))
-        attack = int(np.clip(int(action[3]), 0, 3))
+        return StateSpec.observation_names(self._history_offsets)
 
         # Illegal combo mask approximation: no simultaneous dodge + attack
         if dodge == 1 and attack != 0:
@@ -513,49 +199,69 @@ class BrawlDeepEnv(gym.Env):
 
         return movement, jump, dodge, attack
 
-    def _apply_action(self, action: Sequence[int], *, emit_tap_actions: bool = True) -> None:
-        movement, jump, dodge, attack = action
+    def _apply_action(self, action: int, *, emit_tap_actions: bool = True) -> None:
+        """Translate a canonical action into physical key state.
 
-        movement_keys = set()
-        if movement == 0:
-            movement_keys.add("a")
-        elif movement == 1:
-            movement_keys.add("d")
-        elif movement == 2:
-            movement_keys.add("s")
-
-        self.input_controller.set_pressed(movement_keys)
+        `to_keys` is the single place the mirror touches the action path: the policy
+        chose in canonical (toward/away) space, and this converts to left/right.
+        """
+        held, tapped = to_keys(int(action), mirrored=self._mirrored)
+        self.input_controller.set_pressed(held)
 
         if emit_tap_actions:
-            tap_keys = set()
-            if jump == 1:
-                tap_keys.add("space")
-            if dodge == 1:
-                tap_keys.add("e")
-
-            if attack == 1:
-                tap_keys.add("num4")
-            elif attack == 2:
-                tap_keys.add("num6")
-            elif attack == 3:
-                tap_keys.add("num5")
-
             latch_steps = max(1, int(self.config.tap_latch_steps))
-            for key in tap_keys:
+            for key in tapped:
                 self._tap_latch_remaining[key] = max(self._tap_latch_remaining.get(key, 0), latch_steps)
 
-        latched_tap_keys = set()
+        # Hold each tap key down for its whole latch window, then release it.
+        # A press-release pair inside one step lasts well under the game's ~16.7ms
+        # input poll and is often dropped entirely.
         for key in list(self._tap_latch_remaining.keys()):
             remaining = self._tap_latch_remaining[key]
             if remaining > 0:
-                latched_tap_keys.add(key)
+                self.input_controller.key_down(key)
                 self._tap_latch_remaining[key] = remaining - 1
+            else:
+                self.input_controller.key_up(key)
 
-        if latched_tap_keys:
-            self.input_controller.tap(latched_tap_keys)
+    def _release_all_inputs(self) -> None:
+        """Release movement holds and any tap key still inside its hold window.
 
-    def _get_effective_action(self, action: Sequence[int]) -> tuple[int, int, int, int]:
-        return self._sanitize_action(action)
+        Used when the agent is not in control (no frame, dead, respawning), so a
+        latched tap cannot stay physically held down across the gap.
+        """
+        self.input_controller.set_pressed(set())
+        for key in list(self._tap_latch_remaining.keys()):
+            self._tap_latch_remaining[key] = 0
+            self.input_controller.key_up(key)
+
+    def _get_effective_action(self, action) -> int:
+        """Coerce the policy output into a valid action index.
+
+        Unlike the old factorised space there is nothing to un-mirror here: actions
+        are canonical, and the physical conversion happens in `_apply_action`.
+        """
+        return sanitize(action)
+
+    def action_masks(self) -> np.ndarray:
+        """Legal-action mask, in the convention masking-aware algorithms expect.
+
+        The game already ignores impossible inputs, so this is not needed for
+        correctness. Its value is exploration: with one categorical head the illegal
+        logits can be zeroed before the softmax instead of being sampled and wasted.
+        """
+        mem = self.memory
+        weapon_in_range = bool(
+            mem.weapon.exists
+            and mem.closest_weapon_distance <= mem.physics.pickup_distance_norm
+        )
+        return legal_action_mask(
+            dodge_available=bool(mem.player.dodge_available),
+            jumps_left=float(mem.player.jumps_left),
+            weapon_in_range=weapon_in_range,
+            has_weapon=bool(mem.player.weapon_state > 0.0),
+            grounded=bool(mem.player.grounded),
+        )
 
     def _sample_action_repeat_steps(self) -> int:
         fixed_steps = int(getattr(self.config, "action_repeat_steps", 0))
@@ -574,22 +280,51 @@ class BrawlDeepEnv(gym.Env):
         self._last_detections = self.extractor.predict(frame)
         return self._last_detections
 
+    def _update_mirror_decision(self, state: np.ndarray) -> None:
+        """Refresh the sticky mirror decision from the current world-frame state."""
+        if not self._canonicalize:
+            self._mirrored = False
+            return
+
+        self._mirrored = should_mirror(
+            rel_dx=StateSpec.get(state, "rel_dx"),
+            opponent_exists=StateSpec.get(state, "opponent_exists") > 0.5,
+            signed_dx_to_stage_center=StateSpec.get(state, "signed_dx_to_stage_center"),
+            previous=self._mirrored,
+            deadband=float(self.config.canonicalize_deadband),
+        )
+
     def _get_obs(self) -> np.ndarray:
-        base_state = self.memory.to_vector()  # already float32
+        # Memory emits the world frame; canonicalise before anything stores it so
+        # the history window is entirely in one frame of reference.
+        world_state = self.memory.to_vector()
+        self._update_mirror_decision(world_state)
 
-        # Fast path: single-frame obs (LSTM handles temporality)
-        if self._history_len <= 1:
-            return base_state
-
-        # Multi-frame path (kept for experimentation)
-        self._state_history.append(base_state)
+        # History is retained in the WORLD frame and mirrored at assembly time.
+        # Storing it pre-mirrored would mix slices canonicalised under an older
+        # decision with the current one whenever the mirror flips mid-episode.
+        world_dynamic = world_state[: self._dynamic_dim].copy()
+        self._state_history.append(world_dynamic)
         while len(self._state_history) < self._history_len:
-            self._state_history.appendleft(base_state)
+            self._state_history.appendleft(world_dynamic)
+
+        state = mirror_state_vector(world_state) if self._mirrored else world_state.copy()
+
+        buf = self._obs_buffer
+        core_dim = StateSpec.dim()
+        buf[:core_dim] = state
 
         history = list(self._state_history)
-        current_idx = len(history) - 1
-        selected = [history[max(0, current_idx - off)] for off in self._temporal_offsets]
-        return np.concatenate(selected, dtype=np.float32)
+        newest = len(history) - 1
+        cursor = core_dim
+        for offset in self._history_offsets:
+            past = history[max(0, newest - offset)]
+            if self._mirrored:
+                past = mirror_dynamic_block(past)
+            buf[cursor : cursor + self._dynamic_dim] = past
+            cursor += self._dynamic_dim
+
+        return buf
 
     def _distance_player_to_weapon(self) -> float:
         """Fast lookup from relational features."""
@@ -744,10 +479,11 @@ class BrawlDeepEnv(gym.Env):
         self._last_detections = []
         self._step_time_sum = 0.0
         self._step_time_count = 0
-        self._tap_latch_remaining = {"space": 0, "e": 0, "num4": 0, "num6": 0, "num5": 0}
-        self._last_movement = 3
+        self._tap_latch_remaining = {key: 0 for key in sorted(TAP_KEYS)}
+        self._last_movement = 0
         self._movement_hold_count = 0
         self._state_history.clear()
+        self._mirrored = False
         self._last_frame = self.frame_provider.get_frame()
         detections = self._get_detections(self._last_frame, force_infer=True)
 
@@ -801,6 +537,8 @@ class BrawlDeepEnv(gym.Env):
         self._last_obs = obs.copy()
         info = {
             "detections": detections,
+            "canon_mirrored": float(1.0 if self._mirrored else 0.0),
+            "action_mask": self.action_masks(),
             "player_exists": float(1.0 if self.memory.player.exists else 0.0),
             "player_respawn_timer": float(self.memory.player_respawn_timer),
             "self_stock_lost_step": 0.0,
@@ -813,9 +551,10 @@ class BrawlDeepEnv(gym.Env):
         effective_action = self._get_effective_action(action)
         repeat_steps = self._sample_action_repeat_steps()
 
-        action_jump = bool(effective_action[1] == 1)
-        action_dodge = bool(effective_action[2] == 1)
-        action_pick_throw = bool(effective_action[3] == 3)
+        comp = action_components(effective_action)
+        action_jump = bool(comp.jump)
+        action_dodge = bool(comp.dodge)
+        action_pick_throw = bool(comp.interact)
 
         reward = 0.0
         reward_breakdown_total: dict[str, float] = {}
@@ -836,7 +575,7 @@ class BrawlDeepEnv(gym.Env):
             self._last_frame = self.frame_provider.get_frame()
             frame_grab_dt = time.perf_counter() - t0
             if self._last_frame is None:
-                self.input_controller.set_pressed(set())
+                self._release_all_inputs()
                 obs = self._last_obs if self._last_obs is not None else self._get_obs()
                 null_breakdown = {k: 0.0 for k in (
                     "dmg_dealt", "ko_reward", "ko_penalty",
@@ -846,14 +585,14 @@ class BrawlDeepEnv(gym.Env):
                 )}
                 return obs, 0.0, False, False, {
                     "detections": [],
-                    "effective_action": [0, 0, 0, 0],
+                    "effective_action": int(Action.NOOP),
                     "op_stock_lost_step": 0.0,
                     "self_stock_lost_step": 0.0,
                     "reward_breakdown": null_breakdown,
                 }
 
-            movement_idx = int(effective_action[0])
-            if movement_idx == self._last_movement and movement_idx != 3:
+            movement_idx = int(comp.hdir)
+            if movement_idx == self._last_movement and movement_idx != 0:
                 self._movement_hold_count += 1
             else:
                 self._movement_hold_count = 0
@@ -887,7 +626,7 @@ class BrawlDeepEnv(gym.Env):
             self._update_game_logic(detections, action_jump=frame_jump, action_dodge=frame_dodge)
 
             if not self.memory.player.exists or self.memory.player_respawn_timer > 0.0:
-                self.input_controller.set_pressed(set())
+                self._release_all_inputs()
             logic_dt = time.perf_counter() - t0
 
             t0 = time.perf_counter()
@@ -953,12 +692,10 @@ class BrawlDeepEnv(gym.Env):
         self_stock_lost_step = float(max(0.0, self.memory.prev_self_stocks_left - self.memory.self_stocks_left))
         info: dict[str, Any] = {
             "detections": detections,
-            "effective_action": [
-                int(effective_action[0]),
-                int(effective_action[1]),
-                int(effective_action[2]),
-                int(effective_action[3]),
-            ],
+            "effective_action": int(effective_action),
+            "action_name": describe_action(effective_action),
+            "canon_mirrored": float(1.0 if self._mirrored else 0.0),
+            "action_mask": self.action_masks(),
             "op_stock_lost_step": op_stock_lost_step,
             "self_stock_lost_step": self_stock_lost_step,
             "player_exists": float(1.0 if self.memory.player.exists else 0.0),
@@ -1004,3 +741,18 @@ class BrawlDeepEnv(gym.Env):
         if callable(close_fn):
             close_fn()
         self.input_controller.reset()
+
+
+# Re-exported so existing imports keep working after the split.
+__all__ = [
+    "BrawlDeepEnv",
+    "EnvConfig",
+    "KeySet",
+    "NullInputController",
+    "PyDirectInputController",
+    "NullRewardProvider",
+    "PixelStocksHealthProvider",
+    "DxcamFrameProvider",
+    "MssFrameProvider",
+    "create_frame_provider",
+]

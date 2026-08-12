@@ -13,6 +13,17 @@ def bbox_center(det) -> Tuple[float, float]:
 
     return (float(x), float(y))
 
+def bbox_size(det) -> Tuple[float, float]:
+    """Normalised (width, height) of a detection box.
+
+    The detector already produces these; using only the centre discards the
+    silhouette, which is the closest thing to animation state available without
+    reading game memory.
+    """
+    x, y, w, h = det['bbox']
+
+    return (float(w), float(h))
+
 def euclidean(a, b) -> float:
     return euclidian(a, b)
 

@@ -30,7 +30,7 @@ GOAL_TO_STATE_SPEC = {
     "grounded": "player_grounded",
     "offstage": "player_is_offstage",
     "rel_distance": "rel_distance",
-    "frame_advantage": "frame_advantage_estimate",
+    "frame_advantage": "opponent_damage_pct",
 }
 
 GOAL_STATE_SPEC_NAMES = [GOAL_TO_STATE_SPEC[n] for n in GOAL_FEATURE_NAMES]
@@ -85,7 +85,7 @@ def extract_goal_features(obs: np.ndarray) -> np.ndarray:
             float(np.clip(StateSpec.get(obs, "player_grounded"), 0.0, 1.0)),
             float(np.clip(StateSpec.get(obs, "player_is_offstage"), 0.0, 1.0)),
             _norm01(StateSpec.get(obs, "rel_distance"), 0.0, 2.0),
-            _norm01(StateSpec.get(obs, "frame_advantage_estimate"), -1.0, 1.0),
+            _norm01(StateSpec.get(obs, "opponent_damage_pct"), 0.0, 1.0),
         ],
         dtype=np.float32,
     )

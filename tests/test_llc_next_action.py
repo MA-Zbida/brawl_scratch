@@ -6,6 +6,9 @@ import json
 
 import numpy as np
 
+from action_space import ACTION_DIM, Action
+from feature_extractor.memory.state_spec import StateSpec
+
 from tools.llc_next_action import build_advice
 
 
@@ -34,14 +37,12 @@ def _args(tmp_path, **overrides) -> argparse.Namespace:
 def _write_demo(models_dir, phase: str, *, idle: bool = False) -> None:
     models_dir.mkdir(parents=True, exist_ok=True)
     n = 120
-    obs = np.zeros((n, 32), dtype=np.float32)
-    actions = np.zeros((n, 4), dtype=np.int64)
+    obs = np.zeros((n, StateSpec.observation_dim((2, 4, 8)) + 22), dtype=np.float32)
+    actions = np.zeros((n,), dtype=np.int64)
     if idle:
-        actions[:, 0] = 3
+        actions[:] = int(Action.NOOP)
     else:
-        actions[:, 0] = np.arange(n) % 4
-        actions[:, 1] = np.arange(n) % 2
-        actions[:, 3] = (np.arange(n) // 7) % 4
+        actions[:] = np.arange(n) % ACTION_DIM
     dones = np.zeros((n,), dtype=bool)
     dones[-1] = True
     goal_mask = np.ones((n, 11), dtype=np.float32)
@@ -49,7 +50,7 @@ def _write_demo(models_dir, phase: str, *, idle: bool = False) -> None:
         models_dir / f"{phase}_demos.npz",
         obs=obs,
         actions=actions,
-        actions_multidiscrete=actions,
+        actions_discrete=actions,
         dones=dones,
         goal_mask=goal_mask,
         phase=np.asarray([phase]),

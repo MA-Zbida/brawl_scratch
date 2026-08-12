@@ -22,12 +22,15 @@ than real time. None of that is available here:
 | No memory access | Every state variable must be recovered from pixels |
 | No emulator / no pause | The environment runs in wall-clock real time and cannot be stepped |
 | Cannot reset the match | Episode boundaries are logical, not physical — the world keeps going |
-| Single environment | No parallelism; ~40 control steps/second is the hard ceiling |
+| Single environment | No parallelism; **27.5 control steps/second measured**, detector-bound |
 | 4 GB VRAM | Detector and policy must share one small GPU |
 
-That ceiling is the central design constraint of the project: **~40 steps/s ≈ 3.4 M environment
+That ceiling is the central design constraint of the project: **27.5 steps/s ≈ 2.4 M environment
 steps per day of continuous play.** Every architectural decision here exists to buy sample
 efficiency, because wall-clock time cannot be bought.
+
+Profiled on an RTX 3050 Ti, detection is **93%** of each step (33.7 ms of 36.4 ms) while all
+the Python combined is under 1%. See [`docs/performance.md`](docs/performance.md).
 
 ---
 
@@ -41,7 +44,7 @@ flowchart LR
     C --> D[StateSpec<br/>observation vector]
     D --> E[Goal augmentation<br/>target + mask]
     E --> F[FiLM extractor<br/>goal-conditioned]
-    F --> G[PPO policy<br/>MultiDiscrete]
+    F --> G[PPO policy<br/>Discrete-27]
     G --> H[pydirectinput<br/>keyboard injection]
     H --> A
 ```

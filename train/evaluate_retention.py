@@ -28,6 +28,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from action_space import Action, components as action_components
 from train.retention import (
     load_best_scores,
     parse_phase_list,
@@ -161,12 +162,12 @@ def evaluate_phase(model: Any, args: argparse.Namespace, phase: str) -> dict[str
                 ep_goal_success += succ
                 ep_had_success = bool(ep_had_success or succ > 0.5 or float(info.get("terminal_success", 0.0)) > 0.5)
 
-                stage_action = np.asarray(info.get("stage_action", env_action), dtype=np.int64).reshape(-1)
-                movement = int(stage_action[0]) if stage_action.shape[0] > 0 else 3
-                jump = int(stage_action[1]) if stage_action.shape[0] > 1 else 0
-                dodge = int(stage_action[2]) if stage_action.shape[0] > 2 else 0
-                attack = int(stage_action[3]) if stage_action.shape[0] > 3 else 0
-                ep_idle += int(movement == 3 and jump == 0 and dodge == 0 and attack == 0)
+                # `stage_action` is a single index into the 27-action space. The
+                # semantic components come from info, not from channel positions.
+                comp = action_components(int(info.get("stage_action", int(Action.NOOP))))
+                movement, jump, dodge = comp.hdir, comp.jump, comp.dodge
+                attack = int(comp.light or comp.heavy)
+                ep_idle += int(int(info.get('stage_action', 0)) == int(Action.NOOP))
                 ep_attacks += int(attack != 0)
                 ep_hits += int(op_delta > 1e-6)
                 ep_whiffs += int(attack != 0 and op_delta <= 1e-6)

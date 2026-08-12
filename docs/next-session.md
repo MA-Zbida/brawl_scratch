@@ -12,7 +12,12 @@ Steps 1 and 2 need the game running. Steps 3 onward do not.
 
 ---
 
-## 1. Profile the step loop — the measurement everything else waits on
+## 1. ~~Profile the step loop~~ — DONE, see docs/performance.md
+
+Measured: `detect=33.72ms` of `total=36.36ms` (27.5 Hz). Detection is 93% of the
+step. Next action is the detector benchmark, not more profiling.
+
+## 1b. Original profiling instructions (kept for reference)
 
 **Game open, character idle on the platform.** ~500 steps is enough.
 

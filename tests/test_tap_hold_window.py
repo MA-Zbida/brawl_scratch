@@ -139,3 +139,47 @@ def test_null_controller_supports_key_down_up():
     controller.key_up("num5")
     controller.set_pressed({"a"})
     controller.reset()
+
+
+def test_inputs_are_released_before_the_optimiser_runs():
+    """The env is not stepped during a PPO update, but the game keeps running.
+
+    Without this, the last action's keys stay physically held for the whole
+    optimiser pass -- seconds of holding a direction while the agent cannot react.
+    """
+    from train.llc_stage_common import ReleaseInputsOnRolloutEnd
+
+    calls = []
+
+    class FakeVecEnv:
+        def env_method(self, name, *args, **kwargs):
+            calls.append(name)
+            return [None]
+
+    class FakeModel:
+        # BaseCallback.training_env is a read-only property over model.get_env().
+        def get_env(self):
+            return FakeVecEnv()
+
+    cb = ReleaseInputsOnRolloutEnd()
+    cb.model = FakeModel()
+    cb._on_rollout_end()
+
+    assert calls == ["_release_all_inputs"]
+
+
+def test_release_failure_does_not_break_training():
+    """A stuck key is bad; a crashed multi-hour run is worse."""
+    from train.llc_stage_common import ReleaseInputsOnRolloutEnd
+
+    class ExplodingVecEnv:
+        def env_method(self, *args, **kwargs):
+            raise RuntimeError("vec env does not support env_method")
+
+    class FakeModel:
+        def get_env(self):
+            return ExplodingVecEnv()
+
+    cb = ReleaseInputsOnRolloutEnd()
+    cb.model = FakeModel()
+    cb._on_rollout_end()   # must not raise

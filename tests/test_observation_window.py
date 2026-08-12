@@ -221,3 +221,54 @@ def test_identity_provenance_is_observable():
     extractor.detections = [det("character", 0.41, 0.60), det("character", 0.60, 0.60)]
     obs, *_ = env.step(0)
     assert StateSpec.get(obs, "identity_observed") == 0.0
+
+
+# ── detector input path ─────────────────────────────────────────────────────
+
+def test_detector_receives_the_raw_frame_by_default():
+    """No pre-resize: Ultralytics letterboxes internally, so doing it here too
+    resamples the frame twice and costs the most expensive interpolation OpenCV
+    has on a full 1920x1080 image."""
+    from feature_extractor.yolo.extract import Extract
+    import inspect
+
+    params = inspect.signature(Extract.__init__).parameters
+    assert params["infer_width"].default == 0
+    assert params["infer_height"].default == 0
+
+
+def test_env_does_not_pre_resize_by_default():
+    config = EnvConfig()
+    assert config.yolo_infer_width == 0
+    assert config.yolo_infer_height == 0
+    assert config.yolo_imgsz == 960, "must match the detector's training resolution"
+
+
+def test_ui_probes_read_the_raw_frame_not_the_detector_input():
+    """Stock and damage pixel coordinates are calibrated against the full-resolution
+    capture, so they must never see a resized frame."""
+    import numpy as np
+
+    seen = {}
+
+    class RecordingProbe:
+        def __call__(self, frame, detections):
+            seen["shape"] = None if frame is None else frame.shape
+            return 3.0, 3.0, 351.0, 351.0
+
+        def reset(self, preserve_match_state=True):
+            pass
+
+    extractor = StubExtractor()
+    env = BrawlDeepEnv(
+        extractor=extractor,
+        frame_provider=StubFrames(),
+        input_controller=NullInputController(),
+        stocks_health_provider=RecordingProbe(),
+        config=EnvConfig(),
+    )
+    env.reset()
+
+    assert seen["shape"] == (1080, 1920, 3), (
+        f"UI probes saw {seen['shape']}; they must receive the full-resolution capture"
+    )

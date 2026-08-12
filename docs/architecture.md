@@ -84,27 +84,36 @@ This is a UVFA: one network conditioned on a goal, rather than one network per s
 
 ## Action space
 
-`MultiDiscrete([4, 2, 2, 4])`:
+`Discrete(27)` — a single categorical head over whole moves, defined in [`action_space.py`](../action_space.py):
 
-| Channel | Values | Semantics |
+| Group | Count | Members |
 |---|---|---|
-| movement | `A` / `D` / `S` / idle | held until changed |
-| jump | 0 / 1 | tap |
-| dodge | 0 / 1 | tap |
-| attack | none / NUM4 / NUM6 / NUM5 | tap |
+| locomotion | 9 | `NOOP`, `MOVE_{TOWARD,AWAY}`, `FAST_FALL{,_TOWARD,_AWAY}`, `JUMP{,_TOWARD,_AWAY}` |
+| dodge / dash | 9 | `DODGE_SPOT`, `DODGE_{TOWARD,AWAY,UP,DOWN}`, `DODGE_{UP,DOWN}_{TOWARD,AWAY}` |
+| light attacks | 4 | `LIGHT_{NEUTRAL,TOWARD,AWAY,DOWN}` |
+| heavy attacks | 4 | `HEAVY_{NEUTRAL,TOWARD,AWAY,DOWN}` |
+| interaction | 1 | `PICKUP` |
 
-Tap-type inputs are **held** across a multi-step latch window rather than pulsed. A press-release
-pair inside one step is shorter than the game's ~16.7 ms input poll and is frequently dropped.
+Directions are **canonical**, not absolute: `TOWARD` means toward the opponent. Ground and air
+context is supplied by the game, not the action — `DODGE_TOWARD` is a dash on the ground and a
+directional air-dodge off it, and `HEAVY_TOWARD` is a side signature or a recovery depending on the
+same bit. One id therefore covers two moves, which is what keeps the space at 27 rather than ~50.
 
-Movement is expressed in the canonical frame, so it is flipped back before injection whenever the
-observation was mirrored.
+**Why one head and not four.** A factorised `MultiDiscrete([4, 2, 2, 4])` treats direction and
+attack as independent, and they are not: down-light and side-light are different moves with
+different startup, range and knockback angle. A factorised policy can only reach the joint
+distribution as a product of marginals, so it cannot represent "side-light often, down-light
+rarely, and never while holding away" — and it can sample combinations that are not legal moves at
+all. The single head models the joint directly.
 
-Dodge and attack are mutually exclusive (`_sanitize_action`). Stage specs can further restrict the
-attack channel via `disable_attack` or `allowed_attack_actions`.
+`to_keys(action, mirrored)` is the only place the canonical frame is converted back to physical
+keys, so the mirror touches the action path exactly once. Tap-type inputs are **held** across a
+multi-step latch window rather than pulsed: a press-release pair inside one step is shorter than
+the game's ~16.7 ms input poll and is frequently dropped.
 
-**Limitation.** There is no direction modifier on attacks, so side, down, up and aerial variants —
-most of the Brawlhalla moveset — cannot be expressed. The agent can only throw neutral lights and
-heavies.
+Stage specs restrict the space per phase through `allowed_actions`. `legal_action_mask()` computes
+a per-step mask (no `PICKUP` without a weapon in reach, no double-jump without jumps left); it is
+exposed via `action_masks()` and in `info`, and takes effect once training moves to `MaskablePPO`.
 
 ## Training algorithm
 

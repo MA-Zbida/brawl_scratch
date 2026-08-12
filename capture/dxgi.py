@@ -36,7 +36,9 @@ class DxcamFrameProvider:
         if self._camera is None:
             self._camera = self._create_camera(dxcam, device_idx, output_idx)
         else:
-            print(f"[dxcam] using pre-acquired duplicator ({capture_first.status()})")
+            # status() is read BEFORE take_camera() pops it, otherwise it reports
+            # "NOT HELD" for the camera we just successfully took.
+            print("[dxcam] using duplicator acquired before torch was imported")
         # Prefer non-blocking capture mode when available: it returns the latest
         # frame immediately (possibly duplicate) instead of waiting for a fresh one.
         # This is critical for RL control loops where policy steps can be faster

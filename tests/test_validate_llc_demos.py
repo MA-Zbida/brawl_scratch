@@ -2,30 +2,28 @@ from __future__ import annotations
 
 import numpy as np
 
+from action_space import ACTION_DIM, Action
+from feature_extractor.memory.state_spec import StateSpec
+
 from tools.validate_llc_demos import split_paths, validate_demo_archive
 
 
+#: StageGoalEnv observation = stacked env observation + goal target + goal mask.
+_DEMO_OBS_DIM = StateSpec.observation_dim((2, 4, 8)) + (2 * 11)
+
+
 def _write_demo(path, *, phase: str = "movement_fluency", samples: int = 12, idle: bool = False) -> None:
-    obs = np.ones((samples, 77), dtype=np.float32)
+    obs = np.ones((samples, _DEMO_OBS_DIM), dtype=np.float32)
     if idle:
-        actions = np.tile(np.array([[3, 0, 0, 0]], dtype=np.int64), (samples, 1))
+        actions = np.full((samples,), int(Action.NOOP), dtype=np.int64)
     else:
-        pattern = np.array(
-            [
-                [0, 0, 0, 0],
-                [1, 1, 0, 0],
-                [2, 0, 1, 0],
-                [3, 0, 0, 1],
-            ],
-            dtype=np.int64,
-        )
-        actions = np.vstack([pattern[i % len(pattern)] for i in range(samples)]).astype(np.int64)
+        actions = (np.arange(samples) % ACTION_DIM).astype(np.int64)
     goal_mask = np.ones((samples, 11), dtype=np.float32)
     np.savez_compressed(
         path,
         obs=obs,
         actions=actions,
-        actions_multidiscrete=actions,
+        actions_discrete=actions,
         goal_mask=goal_mask,
         episodes_collected=np.asarray([3], dtype=np.int64),
         phase=np.asarray([phase]),
@@ -51,8 +49,8 @@ def test_validate_demo_archive_passes_well_formed_demo(tmp_path) -> None:
 
     assert result["status"] == "PASS"
     assert result["samples"] == 12
-    assert result["obs_dim"] == 77
-    assert result["action_dim"] == 4
+    assert result["obs_dim"] == _DEMO_OBS_DIM
+    assert result["action_dim"] == ACTION_DIM
     assert result["goal_active_ratio"] == 1.0
 
 
@@ -64,6 +62,45 @@ def test_validate_demo_archive_fails_phase_mismatch(tmp_path) -> None:
 
     assert result["status"] == "FAIL"
     assert any("phase metadata mismatch" in err for err in result["errors"])
+
+
+def test_validate_demo_archive_rejects_legacy_multidiscrete_actions(tmp_path) -> None:
+    """An (N,4) archive is from MultiDiscrete([4,2,2,4]) and cannot be converted.
+
+    That space had no way to express a direction-modified attack, so there is no
+    id in the 27-action space to map its rows onto. Silently reinterpreting the
+    columns would train BC on labels that never matched the demonstrator.
+    """
+    path = tmp_path / "movement_fluency_demos.npz"
+    samples = 12
+    np.savez_compressed(
+        path,
+        obs=np.ones((samples, _DEMO_OBS_DIM), dtype=np.float32),
+        actions=np.zeros((samples, 4), dtype=np.int64),
+        goal_mask=np.ones((samples, 11), dtype=np.float32),
+        episodes_collected=np.asarray([3], dtype=np.int64),
+        phase=np.asarray(["movement_fluency"]),
+    )
+
+    result = validate_demo_archive(path, expected_phase="movement_fluency", min_samples=8)
+
+    assert result["status"] == "FAIL"
+    assert any("Recollect" in err for err in result["errors"])
+
+
+def test_validate_demo_archive_rejects_actions_outside_the_space(tmp_path) -> None:
+    path = tmp_path / "movement_fluency_demos.npz"
+    _write_demo(path)
+    with np.load(path) as data:
+        payload = {key: data[key] for key in data.files}
+    payload["actions"] = np.full((12,), ACTION_DIM, dtype=np.int64)
+    payload["actions_discrete"] = payload["actions"]
+    np.savez_compressed(path, **payload)
+
+    result = validate_demo_archive(path, expected_phase="movement_fluency", min_samples=8)
+
+    assert result["status"] == "FAIL"
+    assert any("outside the" in err for err in result["errors"])
 
 
 def test_validate_demo_archive_warns_on_idle_action_collapse(tmp_path) -> None:

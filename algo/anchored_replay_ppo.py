@@ -480,9 +480,16 @@ class AnchoredReplayPPO(PPO):
             return th.zeros((), device=observations.device, dtype=th.float32)
 
         anchor_policy = random.choice(list(self._anchor_pool))
+
+        # Both policies live on self.device -- anchors are deep copies of self.policy --
+        # so evaluate there rather than trusting the caller's tensors to match. During
+        # training they do; this is the only site that runs a *copied* policy, and a
+        # mismatch would otherwise surface as an addmm device error mid-optimisation.
+        model_obs = observations if observations.device == self.device else observations.to(self.device)
+
         with th.no_grad():
-            anchor_distribution = anchor_policy.get_distribution(observations)
-        current_distribution = self.policy.get_distribution(observations)
+            anchor_distribution = anchor_policy.get_distribution(model_obs)
+        current_distribution = self.policy.get_distribution(model_obs)
 
         kl_loss = self._mean_distribution_kl(anchor_distribution, current_distribution)
         if kl_loss.device != observations.device:

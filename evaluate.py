@@ -22,7 +22,7 @@ import argparse
 import ctypes
 import sys
 from pathlib import Path
-from typing import Any, Sequence, cast
+from typing import Any, cast
 
 import gymnasium as gym
 import numpy as np
@@ -30,6 +30,7 @@ from stable_baselines3 import PPO
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from action_space import ACTION_DIM
 from env import BrawlDeepEnv, EnvConfig
 from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv
@@ -159,11 +160,22 @@ def _resolve_outcome(self_stocks: float, op_stocks: float, truncated: bool) -> s
     return "UNRESOLVED"
 
 
-def _to_env_action(action: Any) -> Sequence[int]:
+def _to_env_action(action: Any) -> int:
+    """Reduce a policy prediction to a single action id.
+
+    `predict` returns a 0-d array, a (1,) array or a plain int depending on
+    whether the model was wrapped in a vec env, so normalise before indexing.
+    """
     arr = np.asarray(action, dtype=np.int64).reshape(-1)
-    if arr.shape[0] < 4:
-        raise ValueError(f"Predicted action must have 4 components, got shape {arr.shape}")
-    return [int(arr[0]), int(arr[1]), int(arr[2]), int(arr[3])]
+    if arr.shape[0] != 1:
+        raise ValueError(
+            f"Expected a single action id from the {ACTION_DIM}-action space, got shape {arr.shape}. "
+            "A 4-component prediction means the checkpoint predates the Discrete migration."
+        )
+    value = int(arr[0])
+    if not 0 <= value < ACTION_DIM:
+        raise ValueError(f"Action id {value} outside the {ACTION_DIM}-action space")
+    return value
 
 
 def _get_base_env(env) -> BrawlDeepEnv:

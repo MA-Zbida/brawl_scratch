@@ -11,8 +11,8 @@ class Extract:
         max_det: int = 5,
         verbose: bool = False,
         conf: float = 0.25,
-        infer_width: int = 960,
-        infer_height: int = 540,
+        infer_width: int = 0,
+        infer_height: int = 0,
         imgsz: int = 960,
         grayscale: bool = False,
         class_names: Optional[List[str]] = None,
@@ -21,10 +21,21 @@ class Extract:
         self.max_det = max_det
         self.verbose = verbose
         self.conf = conf
-        # Pre-resize preserving 16:9, then let the model letterbox to a square.
-        # These must correspond to the resolution the detector was TRAINED at:
-        # feeding a 960-trained model at 640 shrinks the self-indicator below the
-        # size the P2 head was trained to find, and nothing reports the mismatch.
+        # Optional pre-resize, DISABLED by default (0 = pass the frame through).
+        #
+        # Ultralytics letterboxes the input to `imgsz` itself, so resizing here first
+        # means resampling twice -- and the old default used INTER_AREA on a full
+        # 1920x1080 frame, which is the most expensive interpolation OpenCV offers.
+        # Passing the raw frame straight through does the work once, in the model's
+        # own pipeline.
+        #
+        # Two things this does not affect. Detections come back as `xywhn`, which
+        # Ultralytics scales to the ORIGINAL image shape before normalising, so
+        # coordinates are unchanged. And the UI stock/damage probes read the raw
+        # captured frame, never this input, so their pixel coordinates still hold.
+        #
+        # One resample instead of two also preserves more of the self-indicator,
+        # which is roughly 15 px at imgsz=960 and is what agent identity depends on.
         self.infer_width = int(infer_width)
         self.infer_height = int(infer_height)
         self.imgsz = int(imgsz)
@@ -90,19 +101,38 @@ class Extract:
         return str(cls_id)
 
     def _results_to_detections(self, results) -> List[Dict]:
-        detections = []
-        if results:
-            for res in results:
-                names_from_result = getattr(res, "names", None)
-                for box in res.boxes:
-                    cls_id = int(box.cls)
-                    class_name = self._resolve_class_name(cls_id, names_from_result)
+        """Convert model output to plain dicts with a fixed number of GPU transfers.
 
-                    detections.append({
-                        'class_name': class_name,
-                        'bbox': box.xywhn[0].cpu().numpy().tolist(),
-                        'confidence': float(box.conf)
-                    })
+        Iterating ``res.boxes`` and reading ``box.cls`` / ``box.xywhn`` / ``box.conf``
+        per box costs THREE device-to-host synchronisations per detection: each one
+        stalls the pipeline until the GPU drains. With five objects on screen that is
+        fifteen stalls per frame, and it scales with how busy the scene is -- so the
+        cost grows exactly when the game gets interesting.
+
+        Pulling each tensor across once for the whole result makes it three transfers
+        regardless of detection count.
+        """
+        detections: List[Dict] = []
+        if not results:
+            return detections
+
+        for res in results:
+            names_from_result = getattr(res, "names", None)
+            boxes = getattr(res, "boxes", None)
+            if boxes is None or len(boxes) == 0:
+                continue
+
+            # Three transfers total, not three per box.
+            xywhn = boxes.xywhn.cpu().numpy()
+            cls_ids = boxes.cls.cpu().numpy().astype(int)
+            confidences = boxes.conf.cpu().numpy()
+
+            for row, cls_id, confidence in zip(xywhn, cls_ids, confidences):
+                detections.append({
+                    'class_name': self._resolve_class_name(int(cls_id), names_from_result),
+                    'bbox': row.tolist(),
+                    'confidence': float(confidence),
+                })
         return detections
 
     def predict(self, frame) -> List[Dict]:

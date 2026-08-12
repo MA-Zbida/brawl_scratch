@@ -80,7 +80,6 @@ def command_for_phase(args: argparse.Namespace, phase: str) -> list[str]:
         str(max(0.0, float(args.delay))),
         "--output",
         str(output_path),
-        "--no-move-mouse-to-goal",
     ]
     if int(args.max_collection_attempts) > 0:
         cmd.extend(["--max-collection-attempts", str(int(args.max_collection_attempts))])

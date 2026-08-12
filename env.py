@@ -51,10 +51,14 @@ class EnvConfig:
     yolo_max_det: int = 8
     yolo_conf: float = 0.25
     yolo_verbose: bool = False
-    # Must correspond to the detector's TRAINING resolution. A 960-trained model
-    # fed at 640 shrinks the self-indicator below what the P2 head learned to find.
-    yolo_infer_width: int = 960
-    yolo_infer_height: int = 540
+    # Optional pre-resize before the detector. 0 disables it, which is the default:
+    # Ultralytics letterboxes to `yolo_imgsz` itself, so resizing here first resamples
+    # the frame twice for nothing. Set only if a specific pre-scale is needed.
+    yolo_infer_width: int = 0
+    yolo_infer_height: int = 0
+    # Must match the detector's TRAINING resolution. A 960-trained model fed at 640
+    # shrinks the self-indicator below what the P2 head learned to find, and nothing
+    # in the pipeline reports the mismatch.
     yolo_imgsz: int = 960
     # Temporal window. The policy is a plain MLP, so history is supplied by
     # stacking rather than recurrence: recurrent PPO is markedly more

@@ -833,6 +833,32 @@ class StageGoalEnv(gym.Wrapper):
         return aug_obs, reward, terminated, truncated, info
 
 
+class ReleaseInputsOnRolloutEnd(BaseCallback):
+    """Let go of every key before the optimiser runs.
+
+    The environment is not stepped during a PPO update, but the game keeps running
+    and the last action's keys stay physically pressed the whole time. At 30 Hz a
+    2048-step rollout is 68 seconds of play followed by a multi-second optimiser
+    pass during which the agent is holding a direction -- which usually means
+    walking off the stage, or eating an uncontested combo.
+
+    Those frames are also outside the rollout, so nothing records that the agent was
+    not in control: the next rollout simply resumes in a much worse state for no
+    reason the policy can observe.
+    """
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_rollout_end(self) -> None:
+        try:
+            self.training_env.env_method("_release_all_inputs")
+        except Exception:
+            # Never let input cleanup break training; a stuck key is bad, a crashed
+            # run is worse.
+            pass
+
+
 class StageDashboardCallback(BaseCallback):
     """Informative stage dashboard for learning diagnostics.
 
@@ -1181,12 +1207,11 @@ class StageDashboardCallback(BaseCallback):
             op_delta = float(info.get("op_delta_damage", 0.0))
             self_delta = float(info.get("self_delta_damage", 0.0))
             damage_trade = float(op_delta - self_delta)
-            stage_action = np.asarray(info.get("stage_action", [3, 0, 0, 0]), dtype=np.int64).reshape(-1)
-            movement = int(stage_action[0]) if stage_action.shape[0] > 0 else 3
-            jump = int(stage_action[1]) if stage_action.shape[0] > 1 else 0
-            dodge = int(stage_action[2]) if stage_action.shape[0] > 2 else 0
-            attack = int(stage_action[3]) if stage_action.shape[0] > 3 else 0
-            idle = 1.0 if movement == 3 and jump == 0 and dodge == 0 and attack == 0 else 0.0
+            # `stage_action` is a single index into the 27-action space now.
+            comp = action_components(int(info.get("stage_action", int(Action.NOOP))))
+            movement, jump, dodge = comp.hdir, comp.jump, comp.dodge
+            attack = int(comp.light or comp.heavy)
+            idle = 1.0 if int(info.get("stage_action", 0)) == int(Action.NOOP) else 0.0
             hit = 1.0 if op_delta > 1e-6 else 0.0
             whiff = 1.0 if attack != 0 and hit <= 0.0 else 0.0
             death_event = float(info.get("death_event", 0.0))
@@ -1739,12 +1764,12 @@ class PeriodicEvalCallback(BaseCallback):
                 ep_goal_success_sum += goal_success
                 ep_had_success = bool(ep_had_success or goal_success > 0.5 or float(info.get("terminal_success", 0.0)) > 0.5)
 
-                stage_action = np.asarray(info.get("stage_action", env_action), dtype=np.int64).reshape(-1)
-                movement = int(stage_action[0]) if stage_action.shape[0] > 0 else 3
-                jump = int(stage_action[1]) if stage_action.shape[0] > 1 else 0
-                dodge = int(stage_action[2]) if stage_action.shape[0] > 2 else 0
-                attack = int(stage_action[3]) if stage_action.shape[0] > 3 else 0
-                ep_idle_steps += int(movement == 3 and jump == 0 and dodge == 0 and attack == 0)
+                # `stage_action` is a single index into the 27-action space. The
+                # semantic components come from info, not from channel positions.
+                comp = action_components(int(info.get("stage_action", int(Action.NOOP))))
+                movement, jump, dodge = comp.hdir, comp.jump, comp.dodge
+                attack = int(comp.light or comp.heavy)
+                ep_idle_steps += int(int(info.get('stage_action', 0)) == int(Action.NOOP))
                 ep_attack_steps += int(attack != 0)
                 ep_hit_steps += int(op_delta > 1e-6)
                 ep_whiff_steps += int(attack != 0 and op_delta <= 1e-6)
@@ -1971,7 +1996,11 @@ def parse_train_args(default_name: str, default_steps: int) -> argparse.Namespac
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--device", type=str, default="cpu")
-    p.add_argument("--n-steps", type=int, default=2048)
+    # 512 rather than 2048: the optimiser pass freezes the agent while the game keeps
+    # running, and freeze duration scales with rollout size. Four short pauses cost the
+    # same total time as one long one but are far more survivable -- a one-second stall
+    # is recoverable, an eight-second stall usually is not.
+    p.add_argument("--n-steps", type=int, default=512)
     p.add_argument("--gae-lambda", type=float, default=0.95)
     p.add_argument("--clip-range", type=float, default=0.15)
     p.add_argument("--ent-coef", type=float, default=0.01)
@@ -2058,7 +2087,8 @@ def train_stage_model(
         enable_csv=bool(getattr(args, "log_csv", False)),
         enable_plot=int(getattr(args, "plot_every", 0)) > 0,
     )
-    callbacks_list: list[BaseCallback] = [dashboard_cb]
+    # Input release goes first so keys are up before anything else runs.
+    callbacks_list: list[BaseCallback] = [ReleaseInputsOnRolloutEnd(), dashboard_cb]
     diag_every = int(getattr(args, "diag_report_every", 0))
     if diag_every > 0:
         callbacks_list.append(DiagnosticCallback(report_every=diag_every))

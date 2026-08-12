@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from env import BrawlDeepEnv, EnvConfig, NullInputController
 from feature_extractor.memory.state_spec import StateSpec
 from train.curriculum_config import PHASES, build_phase_spec
-from action_space import Action
+from action_space import ACTION_DIM, Action, components, describe
 from train.heuristic_teachers import heuristic_action
 from train.llc_stage_common import StageGoalEnv
 
@@ -281,6 +281,26 @@ def _prepare_weapon_episode_start(
     return obs, info, not _obs_has_weapon(obs), warmup_steps
 
 
+def resolve_allowed_actions(spec) -> list[int]:
+    """Actions this phase may execute, as indices into the 27-action space.
+
+    StageGoalEnv is what actually enforces the restriction; the collector derives it
+    only to report a run's constraints. Kept at module scope so it can be tested
+    without standing up a live environment -- the previous version read
+    `spec.allowed_attack_actions`, a field that no longer exists, and nothing caught
+    it because no test ever ran the collector past argument parsing.
+    """
+    if spec.allowed_actions is not None:
+        return sorted({int(v) for v in spec.allowed_actions})
+
+    return [
+        a for a in range(ACTION_DIM)
+        if not (spec.disable_attack and (components(a).light or components(a).heavy))
+        and not (spec.disable_dodge and components(a).dodge)
+        and not (spec.disable_jump and components(a).jump)
+    ]
+
+
 def main() -> None:
     args = parse_args()
     out_path = _resolve_output_path(args)
@@ -310,36 +330,29 @@ def main() -> None:
 
     env = _build_env(args)
     spec = env.stage_spec
-    if spec.disable_attack:
-        allowed_attack_values = {0}
-    elif spec.allowed_attack_actions is None:
-        allowed_attack_values = {0, 1, 2, 3}
-    else:
-        allowed_attack_values = {int(v) for v in spec.allowed_attack_actions if 0 <= int(v) <= 3}
-        if not allowed_attack_values:
-            allowed_attack_values = {0}
-        allowed_attack_values.add(0)
+    allowed_actions = resolve_allowed_actions(spec)
 
-    mouse_guidance_enabled = bool(args.move_mouse_to_goal)
+    # Movement is the one phase whose goal is an absolute screen position, so the
+    # cursor is the only way to see where the target actually is while collecting.
+    # Forced on regardless of the flag: a movement run without it is not reviewable,
+    # and a bad movement dataset is invisible until BC has already learned it.
+    mouse_guidance_required = phase_lower == "movement_fluency"
+    mouse_guidance_enabled = bool(args.move_mouse_to_goal or mouse_guidance_required)
     if mouse_guidance_enabled and not _phase_uses_player_xy_goal(spec):
+        if mouse_guidance_required:
+            raise RuntimeError(
+                "movement_fluency requires mouse guidance, but its goal does not use "
+                "player_x/player_y. The phase spec and the collector disagree."
+            )
         mouse_guidance_enabled = False
 
-    attack_keys_map = {1: "NUM4", 2: "NUM6", 3: "NUM5"}
-    active_attack_keys = [attack_keys_map[v] for v in sorted(allowed_attack_values) if v in attack_keys_map]
 
     print("=" * 68)
     print(f"BC DEMO COLLECTION - {args.phase.upper()}")
-    print("Action encoding target: MultiDiscrete([4,2,2,4])")
-    if args.teacher == "heuristic":
-        print("Action source: heuristic teacher -> MultiDiscrete([4,2,2,4])")
-        print("Input mode: heuristic controls Brawlhalla through env key injection")
-    else:
-        print("Action source: keyboard -> MultiDiscrete([4,2,2,4])")
-        print("Input mode: manual only (env key injection disabled)")
-        if active_attack_keys:
-            print(f"Controls: A/D/S, Space, E, {'/'.join(active_attack_keys)}")
-        else:
-            print("Controls: A/D/S, Space, E (attacks disabled by phase)")
+    print(f"Action space: Discrete({ACTION_DIM}) -- canonical TOWARD/AWAY")
+    print(f"Allowed this phase ({len(allowed_actions)}): {', '.join(describe(a) for a in allowed_actions[:8])}{' ...' if len(allowed_actions) > 8 else ''}")
+    print("Action source: scripted teacher")
+    print("Input mode: the teacher drives Brawlhalla through env key injection")
     print(f"Target episodes (accepted): {target_episodes} | Output: {out_path}")
     print(f"Collection attempt budget: {max_collection_attempts}")
     eff_max_steps = int(args.max_episode_steps)
@@ -703,7 +716,7 @@ def main() -> None:
         str(out_path),
         obs=obs_arr,
         actions=act_arr,
-        actions_multidiscrete=act_multi_arr,
+        actions_discrete=act_multi_arr,
         action_encoding=np.asarray([action_encoding]),
         dones=done_arr,
         goal_xy=goal_xy_arr,
@@ -733,7 +746,7 @@ def main() -> None:
     print(f"  path   : {out_path}")
     print(f"  obs    : {obs_arr.shape}")
     print(f"  actions(saved): {act_arr.shape} [{action_encoding}]")
-    print(f"  actions_multidiscrete: {act_multi_arr.shape}")
+    print(f"  action range: {int(act_multi_arr.min())}..{int(act_multi_arr.max())} of {ACTION_DIM}")
     if enforce_recovery_sequence:
         step1_count = int(sequential_step1_transition_arr.sum())
         step2_term_count = int(sequential_terminal_success_arr.sum())

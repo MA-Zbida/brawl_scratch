@@ -14,6 +14,7 @@ from train.phase_action_policy import (
     PhaseMaskedActorCriticPolicy,
     masked_policy_custom_objects,
     phase_allowed_action_ids,
+    set_model_phase_action_mask,
 )
 
 
@@ -91,6 +92,31 @@ def test_masked_policy_never_samples_or_credits_disallowed_actions() -> None:
     assert th.count_nonzero(probs[:, illegal]).item() == 0
     assert set(samples.reshape(-1).tolist()).issubset(set(allowed))
     assert th.isneginf(distribution.log_prob(th.full((32,), int(Action.HEAVY_NEUTRAL)))).all()
+
+
+def test_retention_can_retarget_one_checkpoint_to_each_evaluated_phase() -> None:
+    model = PPO(
+        PhaseMaskedActorCriticPolicy,
+        _TinyEnv(),
+        n_steps=8,
+        batch_size=4,
+        policy_kwargs=_policy_kwargs(tuple(range(ACTION_DIM))),
+        seed=7,
+        device="cpu",
+    )
+    obs = th.zeros((2, 4), dtype=th.float32)
+
+    set_model_phase_action_mask(model, "weapon_acquisition")
+    weapon_probs = model.policy.get_distribution(obs).distribution.probs
+    assert model.policy.allowed_action_ids == phase_allowed_action_ids(
+        build_phase_spec("weapon_acquisition")
+    )
+    assert th.count_nonzero(weapon_probs[:, int(Action.DODGE_SPOT):]).item() == 0
+
+    set_model_phase_action_mask(model, "combat_execution")
+    combat_probs = model.policy.get_distribution(obs).distribution.probs
+    assert model.policy.allowed_action_ids == tuple(range(ACTION_DIM))
+    assert th.all(combat_probs > 0.0)
 
 
 def test_legacy_checkpoint_converts_without_changing_network_weights(tmp_path: Path) -> None:

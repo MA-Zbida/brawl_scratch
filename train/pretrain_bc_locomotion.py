@@ -31,14 +31,19 @@ from torch.nn.utils import clip_grad_norm_
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from action_space import ACTION_DIM
 from env import BrawlDeepEnv, EnvConfig
 from feature_extractor.film_extractor import StageGoalFiLMExtractor
-from action_space import ACTION_DIM
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goals import extract_goal_features
-from train.curriculum_config import PHASES, build_phase_spec
 from train.checkpoint_roles import metadata_for_skill_model, save_typed_checkpoint
+from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv
+from train.phase_action_policy import (
+    PhaseMaskedActorCriticPolicy,
+    masked_policy_custom_objects,
+    phase_allowed_action_ids,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -435,6 +440,7 @@ def main() -> None:
             features_dim=256,
         ),
         net_arch=dict(pi=[128], vf=[128]),
+        allowed_action_ids=phase_allowed_action_ids(spec),
     )
 
     resume_path = str(args.resume).strip()
@@ -444,6 +450,7 @@ def main() -> None:
             model = PPO.load(
                 resume_path,
                 env=vec_env,
+                custom_objects=masked_policy_custom_objects(ppo_policy_kwargs),
                 learning_rate=float(args.learning_rate),
                 n_steps=2048,
                 batch_size=256,
@@ -463,7 +470,7 @@ def main() -> None:
             ) from exc
     else:
         model = PPO(
-            "MlpPolicy",
+            PhaseMaskedActorCriticPolicy,
             vec_env,
             learning_rate=float(args.learning_rate),
             n_steps=2048,

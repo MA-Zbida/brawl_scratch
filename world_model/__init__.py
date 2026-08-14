@@ -1,8 +1,8 @@
 """World-model components.
 
-Currently the persistent transition log only. The log is written now, before any
-model exists, because real interaction at 30 Hz is the project's scarce resource
-and data not captured today cannot be recovered later.
+Currently the persistent transition log only. Entry points attach it explicitly
+for world-model data sessions because real interaction at 30 Hz is scarce, while
+ordinary policy runs avoid its compression and disk-write cost.
 """
 
 from world_model.replay_log import (

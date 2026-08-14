@@ -638,13 +638,13 @@ class StageGoalEnv(gym.Wrapper):
         return self._augment(obs), info
 
     def step(self, action: Sequence[int]):
-        action_id = int(np.asarray(action).reshape(-1)[0])
-        action_id = int(np.clip(action_id, 0, ACTION_DIM - 1))
+        requested_action_id = int(np.asarray(action).reshape(-1)[0])
+        action_id = int(np.clip(requested_action_id, 0, ACTION_DIM - 1))
         comp = action_components(action_id)
 
-        # Phase restrictions used to zero individual channels. With one categorical
-        # head the equivalent is refusing the action outright and falling back to
-        # NOOP, which keeps the executed action consistent with what gets recorded.
+        # The phase-masked policy prevents this path during PPO.  Keep the wrapper
+        # guard for manual/external callers, but report both values: silently
+        # crediting the requested action for a NOOP transition corrupts PPO data.
         if self.stage_spec.disable_attack and (comp.light or comp.heavy):
             action_id = int(Action.NOOP)
         elif self._allowed_actions is not None and action_id not in self._allowed_actions:
@@ -980,6 +980,7 @@ class StageGoalEnv(gym.Wrapper):
             np.abs(curr_feats - self._active_goal_target) * self._active_mask
         ).astype(np.float32)
         info["stage_action"] = int(action_id)
+        info["stage_action_requested"] = int(requested_action_id)
         info["stage_action_hdir"] = int(comp.hdir)
         info["stage_action_jump"] = int(comp.jump)
         info["stage_action_dodge"] = int(comp.dodge)
@@ -2378,6 +2379,12 @@ def train_stage_model(
             dashboard_cb._on_training_end()
         except Exception:
             pass
+        # World replay keeps one partial shard in memory.  Closing the vector env
+        # flushes it on normal completion, Ctrl+C, and training exceptions.
+        try:
+            vec_env.close()
+        except Exception:
+            pass
 
     _save_skill_checkpoint()
     print(f"[{args.model_name}] Saved model to {final_model}")
@@ -2415,6 +2422,12 @@ def _require_complete_bc_anchor(
 
 def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     """Build or resume a PPO model."""
+    from train.phase_action_policy import (
+        PhaseMaskedActorCriticPolicy,
+        masked_policy_custom_objects,
+        phase_allowed_action_ids,
+    )
+
     replay_ratio = float(np.clip(getattr(args, "replay_ratio", 0.30), 0.0, 0.95))
     replay_capacity = int(max(1, getattr(args, "replay_capacity", 262_144)))
     replay_warmup_updates = int(max(0, getattr(args, "replay_warmup_updates", 1)))
@@ -2427,6 +2440,25 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     bc_batch_size = int(max(1, getattr(args, "bc_batch_size", 128)))
     bc_demos_path = getattr(args, "bc_demos_path", None)
     enable_pcgrad = bool(getattr(args, "pcgrad", True))
+
+    if stage_spec is not None:
+        goal_feature_names = GOAL_STATE_SPEC_NAMES
+        if stage_spec.feature_names is not None:
+            goal_feature_names = list(stage_spec.feature_names)
+        policy_kwargs = dict(
+            features_extractor_class=FiLMClass,
+            features_extractor_kwargs=dict(
+                goal_feature_names=goal_feature_names,
+                features_dim=256,
+            ),
+            net_arch=dict(pi=[128], vf=[128]),
+            allowed_action_ids=phase_allowed_action_ids(stage_spec),
+        )
+    else:
+        policy_kwargs = dict(
+            net_arch=dict(pi=[256, 256], vf=[256, 256]),
+            allowed_action_ids=tuple(range(ACTION_DIM)),
+        )
 
     if not bc_demos_path:
         candidates: list[Path] = []
@@ -2466,6 +2498,7 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
             model = AnchoredReplayPPO.load(
                 args.resume,
                 env=vec_env,
+                custom_objects=masked_policy_custom_objects(policy_kwargs),
                 learning_rate=args.learning_rate,
                 clip_range=args.clip_range,
                 n_steps=args.n_steps,
@@ -2504,23 +2537,8 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
         )
         return model
 
-    if stage_spec is not None:
-        goal_feature_names = GOAL_STATE_SPEC_NAMES
-        if stage_spec.feature_names is not None:
-            goal_feature_names = list(stage_spec.feature_names)
-        policy_kwargs = dict(
-            features_extractor_class=FiLMClass,
-            features_extractor_kwargs=dict(
-                goal_feature_names=goal_feature_names,
-                features_dim=256,
-            ),
-            net_arch=dict(pi=[128], vf=[128]),
-        )
-    else:
-        policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
-
     model = AnchoredReplayPPO(
-        "MlpPolicy",
+        PhaseMaskedActorCriticPolicy,
         vec_env,
         learning_rate=args.learning_rate,
         n_steps=args.n_steps,

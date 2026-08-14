@@ -115,16 +115,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--world-replay",
         type=str,
-        default="data/world_replay",
-        help="Directory for the persistent transition log. Every stepped transition is "
-             "recorded here, including episodes this collector rejects.",
+        default="",
+        help="Opt in to persistent transition logging by supplying its output root.",
     )
     p.add_argument(
         "--no-world-replay",
         dest="world_replay",
         action="store_const",
         const="",
-        help="Disable the persistent transition log for this run.",
+        help="Explicitly disable transition logging (the default).",
     )
     return p.parse_args()
 

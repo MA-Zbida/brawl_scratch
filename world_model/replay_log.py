@@ -1,11 +1,9 @@
 """Persistent transition log — the permanent record of every real interaction.
 
 Real interaction is this project's scarce resource. At 30 Hz a full curriculum is
-~21 hours of gameplay, and every hour run before this log exists is an hour that
-cannot be recovered. So the log is written unconditionally alongside whatever else
-a session is doing: demo collection, BC, PPO, evaluation. It costs one wrapper and
-some disk, and it is the difference between starting a world model with a dataset
-and starting it at zero.
+~21 hours of gameplay, so deliberate world-model sessions should retain every usable
+transition. Recording is nevertheless opt-in at entry points: compression and disk
+writes consume resources that ordinary policy-training runs should not pay for.
 
 Design constraints that shaped this:
 

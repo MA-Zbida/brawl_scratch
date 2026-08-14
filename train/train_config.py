@@ -73,6 +73,11 @@ class TrainConfig:
     terminate_on_death: bool = True
     move_mouse_to_goal: bool = False
     yolo_every: int = 1
+    # Transition recording is opt-in because compression and disk writes compete
+    # with the real-time loop; reserve it for deliberate world-model sessions.
+    world_replay: str = ""
+    world_replay_shard_size: int = 4096
+    opponent_setup: str = ""
 
 
 # Phase-specific overrides applied on top of defaults.
@@ -195,6 +200,21 @@ def parse_args() -> TrainConfig:
     p.add_argument("--no-terminate-on-death", action="store_true")
     p.add_argument("--move-mouse-to-goal", action="store_true", default=None)
     p.add_argument("--no-move-mouse-to-goal", dest="move_mouse_to_goal", action="store_false")
+    p.add_argument(
+        "--world-replay",
+        type=str,
+        help="Opt in to transition recording by supplying its output root.",
+    )
+    p.add_argument(
+        "--world-replay-shard-size",
+        type=int,
+        help="Rows per compressed replay shard (default: 4096).",
+    )
+    p.add_argument(
+        "--opponent-setup",
+        type=str,
+        help="Replay provenance label, e.g. static, moving_non_attacking, or easy.",
+    )
 
     args = p.parse_args()
     kw = {k: v for k, v in vars(args).items()

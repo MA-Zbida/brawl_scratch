@@ -125,3 +125,9 @@ def test_legacy_checkpoint_converts_without_changing_network_weights(tmp_path: P
     obs = th.zeros((4, 4), dtype=th.float32)
     probs = converted.policy.get_distribution(obs).distribution.probs
     assert th.count_nonzero(probs[:, 2:]).item() == 0
+
+    masked_checkpoint = tmp_path / "masked.zip"
+    converted.save(masked_checkpoint)
+    reloaded = PPO.load(masked_checkpoint, env=_TinyEnv(), device="cpu")
+    assert isinstance(reloaded.policy, PhaseMaskedActorCriticPolicy)
+    assert reloaded.policy.allowed_action_ids == allowed

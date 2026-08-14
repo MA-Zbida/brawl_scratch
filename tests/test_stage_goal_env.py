@@ -152,7 +152,9 @@ def test_recovery_executes_allowed_heavy_and_rejects_other_attacks() -> None:
     _, _, _, _, blocked_info = blocked_env.step(int(Action.LIGHT_TOWARD))
 
     assert allowed_info["stage_action"] == int(Action.HEAVY_TOWARD)
+    assert allowed_info["stage_action_requested"] == int(Action.HEAVY_TOWARD)
     assert blocked_info["stage_action"] == int(Action.NOOP)
+    assert blocked_info["stage_action_requested"] == int(Action.LIGHT_TOWARD)
 
 
 def test_reset_perturbation_emits_discrete_actions_and_preserves_jump(monkeypatch) -> None:

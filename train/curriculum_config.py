@@ -20,6 +20,9 @@ from train.llc_stage_common import StageSpec
 from train.phase_registry import PHASE_ORDER
 
 
+#: Pure movement phases use locomotion and dodge/dash, never combat or pickup.
+LOCOMOTION_DODGE_ACTIONS: tuple[int, ...] = tuple(range(int(Action.LIGHT_NEUTRAL)))
+
 #: Locomotion + PICKUP. The weapon phase should not be swinging.
 WEAPON_PHASE_ACTIONS: tuple[int, ...] = tuple(
     int(a) for a in (
@@ -296,7 +299,7 @@ def build_phase_spec(
             vertical_velocity_penalty_scale=0.10,
             death_penalty=float(death_penalty),
             reward_clip=3.0,
-            disable_attack=True,
+            allowed_actions=LOCOMOTION_DODGE_ACTIONS,
             disable_dodge=False,
             disable_jump=False,
             step_penalty=0.1,
@@ -363,7 +366,7 @@ def build_phase_spec(
             progress_scale=2.0,
             death_penalty=float(death_penalty),
             reward_clip=3.0,
-            disable_attack=True,
+            allowed_actions=LOCOMOTION_DODGE_ACTIONS,
             disable_dodge=False,
             disable_jump=False,
             step_penalty=0.05,

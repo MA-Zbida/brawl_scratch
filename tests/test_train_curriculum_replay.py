@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import gymnasium as gym
+import numpy as np
+from stable_baselines3.common.vec_env import DummyVecEnv
+
 from train.curriculum_config import build_phase_spec
 from train.train_config import make_config
+import train.train_curriculum as train_curriculum
 from train.train_curriculum import _maybe_wrap_world_replay
 from world_model import WorldReplayRecorder
 
@@ -15,14 +20,36 @@ class _FakeEnv:
         self.closed = True
 
 
-def test_world_replay_is_zero_cost_and_off_by_default(tmp_path) -> None:
+class _GymFakeEnv(gym.Env):
+    observation_space = gym.spaces.Box(-1.0, 1.0, shape=(3,), dtype=np.float32)
+    action_space = gym.spaces.Discrete(27)
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        return np.zeros(3, dtype=np.float32), {}
+
+    def step(self, action):
+        return (
+            np.ones(3, dtype=np.float32),
+            1.0,
+            False,
+            True,
+            {"effective_action": int(action)},
+        )
+
+
+def test_world_replay_is_zero_cost_and_off_by_default(monkeypatch) -> None:
     env = _FakeEnv()
     cfg = make_config("movement_fluency")
+    monkeypatch.setattr(
+        train_curriculum,
+        "WorldReplayWriter",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("writer constructed")),
+    )
 
     wrapped = _maybe_wrap_world_replay(env, cfg, build_phase_spec(cfg.phase))
 
     assert wrapped is env
-    assert not tmp_path.exists()
 
 
 def test_world_replay_is_created_only_when_cli_path_is_supplied(tmp_path) -> None:
@@ -43,3 +70,27 @@ def test_world_replay_is_created_only_when_cli_path_is_supplied(tmp_path) -> Non
     assert wrapped.writer.extra_metadata["opponent_setup"] == "moving_non_attacking"
     assert wrapped.writer.dir.parent == tmp_path
     wrapped.close()
+
+
+def test_opt_in_recorder_is_accepted_and_flushed_by_sb3_vec_env(tmp_path) -> None:
+    cfg = replace(
+        make_config("movement_fluency"),
+        world_replay=str(tmp_path),
+        world_replay_shard_size=17,
+    )
+    spec = build_phase_spec(cfg.phase)
+    holder = {}
+
+    def make_env():
+        wrapped = _maybe_wrap_world_replay(_GymFakeEnv(), cfg, spec)
+        holder["writer"] = wrapped.writer
+        return wrapped
+
+    vec_env = DummyVecEnv([make_env])
+    vec_env.reset()
+    vec_env.step(np.asarray([1], dtype=np.int64))
+    vec_env.close()
+
+    writer = holder["writer"]
+    assert (writer.dir / "manifest.json").exists()
+    assert list(writer.dir.glob("shard_*.npz")), "the final partial shard was not flushed"

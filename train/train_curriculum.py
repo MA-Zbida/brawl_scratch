@@ -22,6 +22,7 @@ import ctypes
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -33,6 +34,33 @@ from feature_extractor.memory.canonicalize import mirror_goal_target
 from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv, train_stage_model
 from train.train_config import parse_args, TrainConfig
+from world_model import WorldReplayRecorder, WorldReplayWriter
+
+
+class _GymWorldReplayRecorder(WorldReplayRecorder, gym.Env):
+    """Make the dependency-light recorder visible as a Gymnasium env to SB3."""
+
+
+def _maybe_wrap_world_replay(env: Any, cfg: TrainConfig, spec) -> Any:
+    """Attach transition recording only for an explicitly requested session."""
+    replay_root = str(cfg.world_replay or "").strip()
+    if not replay_root:
+        return env
+
+    writer = WorldReplayWriter(
+        replay_root,
+        shard_size=int(cfg.world_replay_shard_size),
+        phase=str(cfg.phase),
+        metadata={
+            "source": "train_curriculum",
+            "model_name": str(cfg.model_name),
+            "opponent_setup": str(cfg.opponent_setup or "unspecified"),
+            "goal_conditioned": True,
+            "goal_dim": len(spec.feature_names or ()),
+        },
+    )
+    print(f"[train_curriculum] World replay enabled: {writer.dir}")
+    return _GymWorldReplayRecorder(env, writer)
 
 
 class GoalMouseTrackerWrapper(gym.Wrapper):
@@ -134,7 +162,7 @@ def _make_env(cfg: TrainConfig, spec) -> gym.Env:
     env = StageGoalEnv(base, spec)
     if cfg.move_mouse_to_goal:
         env = GoalMouseTrackerWrapper(env)
-    return env
+    return _maybe_wrap_world_replay(env, cfg, spec)
 
 
 def _make_eval_env(cfg: TrainConfig, spec) -> gym.Env:

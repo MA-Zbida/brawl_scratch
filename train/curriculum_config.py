@@ -17,6 +17,7 @@ from train.curriculum_goals import (
 )
 from action_space import Action
 from train.llc_stage_common import StageSpec
+from train.phase_registry import PHASE_ORDER
 
 
 #: Locomotion + PICKUP. The weapon phase should not be swinging.
@@ -29,17 +30,38 @@ WEAPON_PHASE_ACTIONS: tuple[int, ...] = tuple(
     )
 )
 
+# Recovery needs the whole movement/dodge toolkit plus Brawlhalla's two upward
+# aerial-heavy recoveries. Other attacks and PICKUP would add unrelated behaviour.
+RECOVERY_PHASE_ACTIONS: tuple[int, ...] = tuple(
+    int(action)
+    for action in (
+        Action.NOOP,
+        Action.MOVE_TOWARD,
+        Action.MOVE_AWAY,
+        Action.FAST_FALL,
+        Action.FAST_FALL_TOWARD,
+        Action.FAST_FALL_AWAY,
+        Action.JUMP,
+        Action.JUMP_TOWARD,
+        Action.JUMP_AWAY,
+        Action.DODGE_SPOT,
+        Action.DODGE_TOWARD,
+        Action.DODGE_AWAY,
+        Action.DODGE_UP,
+        Action.DODGE_DOWN,
+        Action.DODGE_UP_TOWARD,
+        Action.DODGE_UP_AWAY,
+        Action.DODGE_DOWN_TOWARD,
+        Action.DODGE_DOWN_AWAY,
+        Action.HEAVY_NEUTRAL,
+        Action.HEAVY_TOWARD,
+    )
+)
+
 
 TargetSampler = Callable[[np.ndarray], np.ndarray]
 
-PHASES = (
-    "recovery_mastery",
-    "movement_fluency",
-    "weapon_acquisition",
-    "spacing_neutral",
-    "combat_execution",
-    "all_skills_llc",
-)
+PHASES = PHASE_ORDER
 
 LOCO_PLATFORM_X_MARGIN = 0.03
 LOCO_GROUNDED_Y_EPS = 0.015
@@ -243,11 +265,19 @@ def build_phase_spec(
             offstage_penalty_scale=0.0,
             death_penalty=float(death_penalty),
             reward_clip=4.0,
-            disable_attack=True,
+            allowed_actions=RECOVERY_PHASE_ACTIONS,
+            disable_attack=False,
             disable_dodge=False,
             disable_jump=False,
             step_penalty=0.05,
             terminate_on_death=bool(terminate_on_death),
+            # Recovery is an event sequence, not an instantaneous position goal:
+            # leave the playable top, then return and land near the ledge.
+            sequential_goal_enabled=True,
+            sequential_target_sampler=_sampler_recovery,
+            sequential_require_offstage_first=True,
+            sequential_require_onstage_second=True,
+            sequential_require_grounded_second=True,
         )
 
     if phase == "movement_fluency":
@@ -268,7 +298,7 @@ def build_phase_spec(
             death_penalty=float(death_penalty),
             reward_clip=3.0,
             disable_attack=True,
-            disable_dodge=True,
+            disable_dodge=False,
             disable_jump=False,
             step_penalty=0.1,
             terminate_on_death=bool(terminate_on_death),

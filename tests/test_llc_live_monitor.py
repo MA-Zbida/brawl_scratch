@@ -113,7 +113,7 @@ def test_monitor_alerts_on_episode_collapse_metrics(tmp_path) -> None:
 def test_monitor_alerts_on_eval_gate_failure(tmp_path) -> None:
     models_dir = tmp_path / "models"
     _write_csv(
-        models_dir / "llc_movement_fluency_eval.csv",
+        models_dir / "llc_weapon_acquisition_eval.csv",
         [
             "phase",
             "skill_score",
@@ -126,7 +126,7 @@ def test_monitor_alerts_on_eval_gate_failure(tmp_path) -> None:
         ],
         [
             {
-                "phase": "recovery_mastery",
+                "phase": "movement_fluency",
                 "skill_score": 0.60,
                 "best_skill_score": 0.80,
                 "retention": 0.75,
@@ -136,7 +136,7 @@ def test_monitor_alerts_on_eval_gate_failure(tmp_path) -> None:
                 "mean_damage_trade": 0.0,
             },
             {
-                "phase": "movement_fluency",
+                "phase": "weapon_acquisition",
                 "skill_score": 0.70,
                 "best_skill_score": 0.70,
                 "retention": 1.0,
@@ -148,8 +148,8 @@ def test_monitor_alerts_on_eval_gate_failure(tmp_path) -> None:
         ],
     )
 
-    snapshot, alerts = build_snapshot(_args(tmp_path, phase="movement_fluency"))
+    snapshot, alerts = build_snapshot(_args(tmp_path, phase="weapon_acquisition"))
 
-    assert any("recovery_mastery" in item and "amnesia" in item for item in alerts)
+    assert any("movement_fluency" in item and "amnesia" in item for item in alerts)
     assert "Eval latest" in snapshot
-    assert "recovery_mastery" in snapshot
+    assert "movement_fluency" in snapshot

@@ -1,8 +1,28 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from argparse import Namespace
+from pathlib import Path
 
 from train.collect_heuristic_curriculum_demos import PHASES, command_for_phase, parse_phase_list
+
+
+def test_direct_script_help_resolves_repo_imports() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "train" / "collect_heuristic_curriculum_demos.py"),
+            "--help",
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _args(**overrides) -> Namespace:
@@ -12,6 +32,7 @@ def _args(**overrides) -> Namespace:
         "output_dir": "train/models",
         "delay": 0.0,
         "max_collection_attempts": 0,
+        "min_episode_steps": 4,
         "weapon_hold_steps": 20,
         "weapon_reset_max_steps": 30,
         "weapon_drop_grace_steps": 3,
@@ -22,6 +43,17 @@ def _args(**overrides) -> Namespace:
 
 def test_parse_phase_list_all_returns_curriculum_phases() -> None:
     assert parse_phase_list("all") == list(PHASES)
+
+
+def test_default_collection_order_defers_recovery_until_after_combat() -> None:
+    assert PHASES == (
+        "movement_fluency",
+        "weapon_acquisition",
+        "spacing_neutral",
+        "combat_execution",
+        "recovery_mastery",
+        "all_skills_llc",
+    )
 
 
 def test_parse_phase_list_core_skips_consolidation_phase() -> None:
@@ -49,6 +81,7 @@ def test_command_for_phase_runs_heuristic_single_phase_collector() -> None:
     assert "--weapon-hold-steps 20" in joined
     assert "--weapon-reset-max-steps 30" in joined
     assert "--weapon-drop-grace-steps 3" in joined
+    assert "--min-episode-steps 4" in joined
 
 
 def test_command_for_phase_can_add_attempt_budget() -> None:

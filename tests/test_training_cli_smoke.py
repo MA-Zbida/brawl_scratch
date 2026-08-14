@@ -31,6 +31,25 @@ def test_demo_collection_cli_accepts_current_phase_names(monkeypatch) -> None:
     assert args.phase == "combat_execution"
     assert args.episodes == 1
     assert args.teacher == "heuristic"
+    assert args.min_episode_steps == 4
+
+
+def test_recovery_collection_sequence_gate_defaults_on(monkeypatch) -> None:
+    pytest.importorskip("gymnasium")
+    pytest.importorskip("ultralytics")
+
+    from train.collect_bc_locomotion_demos import parse_args
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["collect_bc_locomotion_demos", "--phase", "recovery_mastery"],
+    )
+
+    args = parse_args()
+
+    assert args.enforce_recovery_sequence is True
+    assert args.min_episode_steps == 4
 
 
 def test_bc_pretrain_cli_accepts_current_phase_names(monkeypatch) -> None:

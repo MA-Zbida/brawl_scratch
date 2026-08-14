@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "experiment_id": "easy_bot_v0",
+  "frozen_at": "2026-08-13",
+  "source": {
+    "git_commit": "6b05852c8b62ac1853f64dc923fe6f481be5bdbc",
+    "worktree_dirty": true,
+    "note": "The commit alone does not identify this source state. Make a deliberate source checkpoint before the first live PPO run."
+  },
+  "data_contract": {
+    "observation_dim": 168,
+    "action_encoding": "discrete27",
+    "action_dim": 27,
+    "goal_dim": 11
+  },
+  "demo_archives": [
+    {
+      "phase": "movement_fluency",
+      "path": "train/models/recollected/movement_fluency_demos.npz",
+      "sha256": "8c1d548e2b3853ed8b7d6bf58a86a4b1b73e019ac1a2c907025dada9677943bd",
+      "size_bytes": 206202,
+      "samples": 1596,
+      "episodes": 50,
+      "action_entropy": 0.715,
+      "idle_rate": 0.03,
+      "attack_rate": 0.0,
+      "goal_active_ratio": 1.0,
+      "validator_status": "PASS"
+    },
+    {
+      "phase": "weapon_acquisition",
+      "path": "train/models/recollected/weapon_acquisition_demos.npz",
+      "sha256": "1aaffe0faa3f426e5bc87e65a5ea500f350d50289b154b455192f62c763cebf3",
+      "size_bytes": 406314,
+      "samples": 3366,
+      "episodes": 50,
+      "action_entropy": 0.671,
+      "idle_rate": 0.037,
+      "attack_rate": 0.0,
+      "goal_active_ratio": 1.0,
+      "validator_status": "PASS"
+    },
+    {
+      "phase": "spacing_neutral",
+      "path": "train/models/recollected/spacing_neutral_demos_v2.npz",
+      "sha256": "ff04966da5f6ba5cd5c8ebb4aa542e3af0fca40dccadfe489920f77245a5cfcb",
+      "size_bytes": 148053,
+      "samples": 1230,
+      "episodes": 50,
+      "action_entropy": 0.732,
+      "idle_rate": 0.0,
+      "attack_rate": 0.0,
+      "goal_active_ratio": 1.0,
+      "validator_status": "PASS"
+    },
+    {
+      "phase": "combat_execution",
+      "path": "train/models/recollected/combat_execution_demos.npz",
+      "sha256": "da5b0bfe344abd087e219ad7298178148e17fbf34b4b520b91c01cdffda86192",
+      "size_bytes": 226211,
+      "samples": 1746,
+      "episodes": 50,
+      "action_entropy": 0.844,
+      "idle_rate": 0.0,
+      "attack_rate": 0.359,
+      "goal_active_ratio": 1.0,
+      "validator_status": "PASS"
+    }
+  ],
+  "aggregate": {
+    "samples": 7938,
+    "episodes": 200,
+    "size_bytes": 986780
+  },
+  "artifacts": [
+    {
+      "role": "experiment_config",
+      "path": "experiments/easy_bot_v0/config.json",
+      "sha256": "48ad4bc158b5539b18e8b19047ef8a093271e2123e1a258de9320a66cb6e5527",
+      "size_bytes": 2011
+    },
+    {
+      "role": "movement_bc_initialization",
+      "path": "train/models/llc_movement_fluency_bc_init.zip",
+      "sha256": "dcdcf2ab974238ec9e33bd10034ee63f0f48cc6712d77636f6c34080682d036f",
+      "size_bytes": 3774104
+    },
+    {
+      "role": "detector_engine",
+      "path": "feature_extractor/yolo/best.engine",
+      "sha256": "becdbec2eb857a8f718b22b9ebf15b7ac0ef303be495c18ac5b8b9bd6976827b",
+      "size_bytes": 214916671
+    },
+    {
+      "role": "detector_source_checkpoint",
+      "path": "feature_extractor/yolo/best.pt",
+      "sha256": "22832204858c8f017e9bfd1ce13964e67bd513534ca084c96a65c332f7f32e93",
+      "size_bytes": 20276539
+    }
+  ]
+}

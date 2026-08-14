@@ -4,15 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-
-PHASE_ORDER: tuple[str, ...] = (
-    "recovery_mastery",
-    "movement_fluency",
-    "weapon_acquisition",
-    "spacing_neutral",
-    "combat_execution",
-    "all_skills_llc",
-)
+from train.phase_registry import PHASE_ORDER
 
 PHASE_SCORE_THRESHOLDS: dict[str, float] = {
     "recovery_mastery": 0.65,

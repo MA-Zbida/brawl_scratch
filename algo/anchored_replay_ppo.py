@@ -321,17 +321,36 @@ class AnchoredReplayPPO(PPO):
 
         self.enable_pcgrad = bool(enable_pcgrad)
 
-        self._replay_store = _TensorReplayStore(self.replay_capacity)
-        self._anchor_pool: deque[Any] = deque(maxlen=self.anchor_pool_size)
         self._updates_since_anchor = 0
         self._train_calls = 0
         self._bc_warning_printed = False
+        self._rebuild_transient_stores()
 
+    def _rebuild_transient_stores(self) -> None:
+        """Recreate runtime-only stores from the effective loaded configuration."""
+        self._replay_store = _TensorReplayStore(self.replay_capacity)
+        self._anchor_pool: deque[Any] = deque(maxlen=self.anchor_pool_size)
+        self._updates_since_anchor = 0
+        self._bc_warning_printed = False
         self._bc_store: Optional[_BehaviorCloneStore] = None
         obs_shape = getattr(self.observation_space, "shape", None)
         expected_obs_dim = int(obs_shape[0]) if obs_shape is not None and len(obs_shape) > 0 else -1
         if self.bc_loss_coef > 0.0 and self.bc_demos_path:
             self._bc_store = _BehaviorCloneStore(self.bc_demos_path, self.action_space, expected_obs_dim)
+
+    @classmethod
+    def load(cls, *args, **kwargs):
+        """Load parameters, then restore stores intentionally excluded from ZIPs.
+
+        Stable-Baselines3 applies load-time keyword overrides only after calling
+        ``__init__``. Building the BC store in ``__init__`` therefore sees neither
+        the resumed run's demo paths nor its loss coefficient. Rebuild after SB3
+        has overlaid the saved data and overrides so resumed training cannot
+        silently drop its demonstration anchor.
+        """
+        model = super().load(*args, **kwargs)
+        model._rebuild_transient_stores()
+        return model
 
     def _excluded_save_params(self) -> list[str]:
         return super()._excluded_save_params() + ["_replay_store", "_anchor_pool", "_bc_store"]

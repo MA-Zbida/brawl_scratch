@@ -6,14 +6,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-PHASES: tuple[str, ...] = (
-    "combat_execution",
-    "movement_fluency",
-    "weapon_acquisition",
-    "spacing_neutral",
-    "recovery_mastery",
-    "all_skills_llc",
-)
+# Direct script execution places ``train/`` rather than the repository root on
+# sys.path. Keep the documented ``python train\... --help`` entrypoint working.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from train.phase_registry import PHASE_ORDER
+
+
+PHASES = PHASE_ORDER
 CORE_PHASES: tuple[str, ...] = tuple(phase for phase in PHASES if phase != "all_skills_llc")
 
 DEFAULT_MAX_STEPS: dict[str, int] = {
@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--python", type=str, default=sys.executable or "python")
     p.add_argument("--max-collection-attempts", type=int, default=0)
+    p.add_argument("--min-episode-steps", type=int, default=4)
     p.add_argument("--weapon-hold-steps", type=int, default=20)
     p.add_argument("--weapon-reset-max-steps", type=int, default=30)
     p.add_argument("--weapon-drop-grace-steps", type=int, default=3)
@@ -76,6 +77,8 @@ def command_for_phase(args: argparse.Namespace, phase: str) -> list[str]:
         str(max(1, int(args.episodes_per_phase))),
         "--max-episode-steps",
         str(DEFAULT_MAX_STEPS[phase]),
+        "--min-episode-steps",
+        str(max(1, int(args.min_episode_steps))),
         "--delay",
         str(max(0.0, float(args.delay))),
         "--output",
@@ -105,6 +108,7 @@ def main() -> int:
     print("HEURISTIC CURRICULUM DEMO COLLECTION")
     print(f"Phases: {', '.join(phases)}")
     print(f"Episodes per phase: {max(1, int(args.episodes_per_phase))}")
+    print(f"Minimum episode steps: {max(1, int(args.min_episode_steps))}")
     print(f"Output dir: {Path(str(args.output_dir)).as_posix()}")
     print("=" * 72)
 

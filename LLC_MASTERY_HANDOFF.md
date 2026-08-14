@@ -1,5 +1,9 @@
 # Brawlhalla LLC Mastery Handoff
 
+> **Superseded run order.** This document describes the earlier recovery-first
+> ladder. Use `experiments/easy_bot_v0/protocol.md` for the current bounded pilot;
+> the tested canonical order now defers recovery until after combat.
+
 This branch turns the LLC into a measured skill ladder with anti-collapse tooling. It does not claim the agent is already a master; live training still has to be run by you in Brawlhalla, then judged by metrics and by your own visual approval.
 
 ## What Changed

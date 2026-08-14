@@ -31,16 +31,40 @@ def test_middle_phase_commands_include_previous_resume_and_demo_chain() -> None:
     assert "--demos train/models/weapon_acquisition_demos.npz" in commands[1]
     assert "--resume train/models/llc_weapon_acquisition_bc_init.zip" in commands[2]
     assert (
-        '--bc-demos-path "train/models/recovery_mastery_demos.npz;'
-        "train/models/movement_fluency_demos.npz;"
+        '--bc-demos-path "train/models/movement_fluency_demos.npz;'
         'train/models/weapon_acquisition_demos.npz"'
     ) in commands[2]
-    assert "--phases recovery_mastery,movement_fluency,weapon_acquisition" in commands[3]
+    assert "--phases movement_fluency,weapon_acquisition" in commands[3]
     assert "tools/check_llc_phase_gate.py" in joined
     assert "tools/plot_llc_diagnostics.py" in joined
     assert "tools/summarize_llc_run.py" in joined
     assert "--out outputs/llc_weapon_acquisition_run_report.md" in joined
     assert "tools/record_llc_observation.py --phase weapon_acquisition --approved yes" in joined
+
+
+def test_first_phase_starts_without_a_recovery_checkpoint() -> None:
+    commands = commands_for_phase(_args(), "movement_fluency")
+
+    assert "--resume" not in commands[1]
+    assert (
+        '--bc-demos-path "train/models/movement_fluency_demos.npz"'
+        in commands[2]
+    )
+    assert "--phases movement_fluency" in commands[3]
+
+
+def test_deferred_recovery_resumes_combat_and_replays_all_core_demos() -> None:
+    commands = commands_for_phase(_args(), "recovery_mastery")
+
+    assert "--resume train/models/llc_combat_execution.zip" in commands[1]
+    assert "--demos train/models/recovery_mastery_demos.npz" in commands[1]
+    assert (
+        '--bc-demos-path "train/models/movement_fluency_demos.npz;'
+        "train/models/weapon_acquisition_demos.npz;"
+        "train/models/spacing_neutral_demos.npz;"
+        "train/models/combat_execution_demos.npz;"
+        'train/models/recovery_mastery_demos.npz"'
+    ) in commands[2]
 
 
 def test_all_skills_commands_skip_bc_pretrain_and_use_all_demos() -> None:
@@ -50,7 +74,7 @@ def test_all_skills_commands_skip_bc_pretrain_and_use_all_demos() -> None:
     assert not any("pretrain_bc_locomotion" in command for command in commands)
     assert commands[0] == "python tools/validate_llc_demos.py --phase all --min-samples 100"
     assert commands[1].startswith("python -m train.train_curriculum --phase all_skills_llc")
-    assert "--resume train/models/llc_combat_execution.zip" in commands[1]
+    assert "--resume train/models/llc_recovery_mastery.zip" in commands[1]
     assert "--eval-phases all" in commands[1]
     assert "--phases all" in commands[2]
     assert "--phases all" in commands[3]

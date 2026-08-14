@@ -706,6 +706,16 @@ class BrawlDeepEnv(gym.Env):
             "player_respawn_timer": float(self.memory.player_respawn_timer),
             "self_delta_damage": float(self.memory.self_delta_damage),
             "op_delta_damage": float(self.memory.op_delta_damage),
+            # Raw match state as the memory holds it when the observation is
+            # assembled. The deltas above are computed inside the inner frame loop
+            # while the observation is built once at the end, so a health reading
+            # that recovers before assembly produces reward with no visible state
+            # change. Logging both makes that divergence measurable instead of
+            # inferred -- see docs/tasks/damage-observation.md.
+            "op_health": float(self.memory.op_health),
+            "self_health": float(self.memory.self_health),
+            "op_stocks_left": float(self.memory.op_stocks_left),
+            "self_stocks_left": float(self.memory.self_stocks_left),
             "player_weapon_state": float(self.memory.player.weapon_state),
             "weapon_visible_this_frame": float(1.0 if self.memory.weapon_visible_this_frame else 0.0),
             "weapon_pickup_action": float(1.0 if self.memory.weapon_pickup_action_this_frame else 0.0),

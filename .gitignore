@@ -55,3 +55,6 @@ assets/figures/
 
 # Downloaded/exported result archives
 *.zip
+
+# Dataset sources for world model and weapon classifier
+data

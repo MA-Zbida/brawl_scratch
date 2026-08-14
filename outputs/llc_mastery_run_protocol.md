@@ -1,5 +1,9 @@
 # LLC Mastery Run Protocol
 
+> **Legacy full-budget protocol.** Do not use these recovery-first commands for
+> the Easy-bot v0 pilot. The current, artifact-pinned sequence is
+> `experiments/easy_bot_v0/protocol.md`.
+
 Use one fixed setup until LLC retention is stable: same legend, map/platform, bot difficulty, 1920x1080 layout, and calibrated UI/perception. Do not start HSP until all LLC phases pass the retention gate.
 
 For the goal-by-goal metric and plot checklist, use `outputs/llc_goal_evaluation_matrix.md`.

@@ -245,6 +245,31 @@ def validate_demo_archive(
                 )
             if not np.all(np.isfinite(obs[:n])):
                 errors.append("obs contains NaN/Inf")
+            if "goal_mask" in data.files and "goal_target" in data.files:
+                goal_mask = np.asarray(data["goal_mask"], dtype=np.float32)
+                goal_target = np.asarray(data["goal_target"], dtype=np.float32)
+                if (
+                    goal_mask.ndim != 2
+                    or goal_target.ndim != 2
+                    or goal_mask.shape != goal_target.shape
+                    or goal_mask.shape[0] != n
+                ):
+                    errors.append(
+                        "goal_mask/goal_target must be matching [N,G] arrays; "
+                        f"got {goal_mask.shape} and {goal_target.shape} for N={n}"
+                    )
+                else:
+                    active_rows = np.any(goal_mask > 1e-6, axis=1)
+                    zero_target_rows = np.all(
+                        np.isclose(goal_target, 0.0, atol=1e-6),
+                        axis=1,
+                    )
+                    invalid_count = int(np.count_nonzero(active_rows & zero_target_rows))
+                    if invalid_count:
+                        errors.append(
+                            f"{invalid_count} rows have an active goal mask with an "
+                            "all-zero target (inactive/death frames must not be recorded)"
+                        )
             if result["goal_active_ratio"] <= 0.0:
                 warnings.append("goal_mask missing or never active")
             if result["action_entropy"] < float(min_action_entropy):

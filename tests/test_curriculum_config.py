@@ -9,6 +9,11 @@ pytest.importorskip("ultralytics")
 
 from train.curriculum_config import PHASES, build_phase_spec
 from train.curriculum_goals import GOAL_INDEX
+from train.retention import PHASE_ORDER
+
+
+def test_phase_registry_and_retention_use_the_same_order() -> None:
+    assert PHASES == PHASE_ORDER
 
 
 def test_all_skills_phase_is_available() -> None:
@@ -37,4 +42,3 @@ def test_all_skills_sampler_returns_dynamic_family_masks() -> None:
     assert any(mask[GOAL_INDEX["player_x"]] > 0.0 for mask in masks)
     assert any(mask[GOAL_INDEX["player_has_weapon"]] > 0.0 for mask in masks)
     assert any(mask[GOAL_INDEX["in_strike_range"]] > 0.0 for mask in masks)
-

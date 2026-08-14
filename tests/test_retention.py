@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from train.retention import (
+    PHASE_ORDER,
     parse_phase_list,
     phase_score_threshold,
     previous_phases,
@@ -8,6 +9,17 @@ from train.retention import (
     skill_score_for_phase,
     update_best_scores,
 )
+
+
+def test_curriculum_defers_recovery_until_after_combat() -> None:
+    assert PHASE_ORDER == (
+        "movement_fluency",
+        "weapon_acquisition",
+        "spacing_neutral",
+        "combat_execution",
+        "recovery_mastery",
+        "all_skills_llc",
+    )
 
 
 def test_retention_and_amnesia_are_ratio_based() -> None:
@@ -24,17 +36,17 @@ def test_best_scores_only_increase() -> None:
 
 def test_phase_list_can_expand_previous_phases() -> None:
     phases = parse_phase_list("", "weapon_acquisition", include_previous=True)
-    assert phases == ["recovery_mastery", "movement_fluency", "weapon_acquisition"]
+    assert phases == ["movement_fluency", "weapon_acquisition"]
 
 
 def test_all_skills_previous_phases_can_exclude_current() -> None:
     phases = previous_phases("all_skills_llc", include_current=False)
     assert phases == [
-        "recovery_mastery",
         "movement_fluency",
         "weapon_acquisition",
         "spacing_neutral",
         "combat_execution",
+        "recovery_mastery",
     ]
 
 

@@ -11,17 +11,12 @@ from pathlib import Path
 
 import numpy as np
 
+from train.phase_registry import PHASE_ORDER
+
 MODELS_DIR = Path("train/models")
 FIGURES_DIR = Path("assets/figures")
 
-PHASES: tuple[str, ...] = (
-    "recovery_mastery",
-    "movement_fluency",
-    "weapon_acquisition",
-    "spacing_neutral",
-    "combat_execution",
-    "all_skills_llc",
-)
+PHASES = PHASE_ORDER
 
 
 def read_csv(path: Path) -> dict[str, np.ndarray]:

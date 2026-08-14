@@ -124,8 +124,7 @@ def commands_for_phase(args: argparse.Namespace, phase: str) -> list[str]:
         prev_model = _previous_final_model(models_dir, phase)
         if prev_model:
             pretrain_parts.append(f"--resume {prev_model}")
-        if phase != "recovery_mastery":
-            pretrain_parts.append(f"--demos {_demo_path(models_dir, phase)}")
+        pretrain_parts.append(f"--demos {_demo_path(models_dir, phase)}")
         pretrain_parts.extend(
             [
                 f"--epochs {int(args.bc_epochs)}",

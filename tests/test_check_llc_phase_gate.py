@@ -44,7 +44,7 @@ def test_phase_gate_passes_when_retention_and_collapse_metrics_pass(tmp_path) ->
         csv_path,
         [
             {
-                "phase": "recovery_mastery",
+                "phase": "movement_fluency",
                 "skill_score": 0.78,
                 "best_skill_score": 0.80,
                 "retention": 0.975,
@@ -54,7 +54,7 @@ def test_phase_gate_passes_when_retention_and_collapse_metrics_pass(tmp_path) ->
                 "mean_damage_trade": 0.0,
             },
             {
-                "phase": "movement_fluency",
+                "phase": "weapon_acquisition",
                 "skill_score": 0.70,
                 "best_skill_score": 0.70,
                 "retention": 1.0,
@@ -66,7 +66,7 @@ def test_phase_gate_passes_when_retention_and_collapse_metrics_pass(tmp_path) ->
         ],
     )
 
-    passed, failures, table = evaluate_gate(_args(csv_path, "movement_fluency"))
+    passed, failures, table = evaluate_gate(_args(csv_path, "weapon_acquisition"))
 
     assert passed
     assert failures == []
@@ -79,7 +79,7 @@ def test_phase_gate_fails_on_previous_phase_amnesia(tmp_path) -> None:
         csv_path,
         [
             {
-                "phase": "recovery_mastery",
+                "phase": "movement_fluency",
                 "skill_score": 0.60,
                 "best_skill_score": 0.80,
                 "retention": 0.75,
@@ -89,7 +89,7 @@ def test_phase_gate_fails_on_previous_phase_amnesia(tmp_path) -> None:
                 "mean_damage_trade": 0.0,
             },
             {
-                "phase": "movement_fluency",
+                "phase": "weapon_acquisition",
                 "skill_score": 0.70,
                 "best_skill_score": 0.70,
                 "retention": 1.0,
@@ -101,13 +101,13 @@ def test_phase_gate_fails_on_previous_phase_amnesia(tmp_path) -> None:
         ],
     )
 
-    passed, failures, _ = evaluate_gate(_args(csv_path, "movement_fluency"))
+    passed, failures, _ = evaluate_gate(_args(csv_path, "weapon_acquisition"))
 
     assert not passed
-    assert any("recovery_mastery" in failure and "amnesia" in failure for failure in failures)
+    assert any("movement_fluency" in failure and "amnesia" in failure for failure in failures)
 
-    _, _, table = evaluate_gate(_args(csv_path, "movement_fluency"))
-    actions = recommend_actions(failures, table, current_phase="movement_fluency")
+    _, _, table = evaluate_gate(_args(csv_path, "weapon_acquisition"))
+    actions = recommend_actions(failures, table, current_phase="weapon_acquisition")
     assert any("Skill collapse detected" in action for action in actions)
     assert any("--bc-demos-path" in action for action in actions)
 

@@ -10,15 +10,9 @@ import argparse
 from dataclasses import dataclass
 from typing import Optional
 
+from train.phase_registry import PHASE_ORDER
 
-PHASE_CHOICES: tuple[str, ...] = (
-    "recovery_mastery",
-    "movement_fluency",
-    "weapon_acquisition",
-    "spacing_neutral",
-    "combat_execution",
-    "all_skills_llc",
-)
+PHASE_CHOICES = PHASE_ORDER
 
 
 @dataclass
@@ -26,7 +20,7 @@ class TrainConfig:
     """All training hyperparameters in one place."""
 
     # Core
-    phase: str = "recovery_mastery"
+    phase: str = PHASE_ORDER[0]
     timesteps: int = 500_000
     max_episode_steps: int = 200
     save_dir: str = "train/models"

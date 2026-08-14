@@ -74,12 +74,16 @@ measured explicitly by retention and amnesia scores.
 
 | Phase | Goal features | Success signal |
 |---|---|---|
-| `recovery_mastery` | `signed_dx_to_ledge`, `dy_to_ledge` | offstage → onstage |
 | `movement_fluency` | `player_x`, `player_y` | reach target position |
 | `weapon_acquisition` | `player_has_weapon`, `weapon_dx`, `weapon_dy` | pick up and hold |
 | `spacing_neutral` | `rel_distance`, `rel_dy` | hold a target neutral distance |
 | `combat_execution` | `in_strike_range`, `opponent_damage_pct` | land hits, trade favourably |
+| `recovery_mastery` | `signed_dx_to_ledge`, `dy_to_ledge` | offstage → onstage |
 | `all_skills_llc` | all families | consolidation without collapse |
+
+The first Easy-bot integration pilot defers recovery until after combat because its
+starting-state setup is expensive and unreliable; this changes training order, not
+the recovery skill definition.
 
 Retention across phases is scored as `retention = current_score / best_score_so_far`, with
 `amnesia = max(0, 1 - retention)`. Advancing a phase requires previous phases to hold

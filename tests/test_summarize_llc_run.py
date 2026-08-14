@@ -78,7 +78,7 @@ def test_run_report_includes_failure_recommendations(tmp_path) -> None:
         eval_csv,
         [
             {
-                "phase": "recovery_mastery",
+                "phase": "movement_fluency",
                 "skill_score": 0.6,
                 "best_skill_score": 0.8,
                 "retention": 0.75,
@@ -88,7 +88,7 @@ def test_run_report_includes_failure_recommendations(tmp_path) -> None:
                 "mean_damage_trade": 0.0,
             },
             {
-                "phase": "movement_fluency",
+                "phase": "weapon_acquisition",
                 "skill_score": 0.7,
                 "best_skill_score": 0.7,
                 "retention": 1.0,
@@ -100,8 +100,8 @@ def test_run_report_includes_failure_recommendations(tmp_path) -> None:
         ],
     )
 
-    report = build_report(_args(tmp_path, "movement_fluency", eval_csv))
+    report = build_report(_args(tmp_path, "weapon_acquisition", eval_csv))
 
     assert "Gate: **STOP**" in report
     assert "Skill collapse detected" in report
-    assert "recovery_mastery: amnesia" in report
+    assert "movement_fluency: amnesia" in report

@@ -22,7 +22,7 @@ import argparse
 import ctypes
 import sys
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import keyboard
@@ -34,13 +34,14 @@ from env import BrawlDeepEnv, EnvConfig, NullInputController
 from feature_extractor.memory.state_spec import StateSpec
 from train.curriculum_config import PHASES, build_phase_spec
 from action_space import ACTION_DIM, Action, components, describe
-from train.heuristic_teachers import heuristic_action
+from train.heuristic_teachers import HeuristicTeacher, RecoverySetupController
 from train.llc_stage_common import StageGoalEnv
+from world_model import WorldReplayRecorder, WorldReplayWriter
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Collect expert demos for BC (all curriculum phases)")
-    p.add_argument("--phase", type=str, default="recovery_mastery", choices=list(PHASES))
+    p.add_argument("--phase", type=str, default=PHASES[0], choices=list(PHASES))
     p.add_argument("--episodes", type=int, default=30)
     p.add_argument(
         "--max-collection-attempts",
@@ -49,6 +50,12 @@ def parse_args() -> argparse.Namespace:
         help="Max attempted episodes to gather target accepted demos (0 = auto)",
     )
     p.add_argument("--max-episode-steps", type=int, default=100)
+    p.add_argument(
+        "--min-episode-steps",
+        type=int,
+        default=4,
+        help="Reject successful demonstrations with fewer recorded transitions",
+    )
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--output", type=str, default="")
     p.add_argument(
@@ -73,7 +80,6 @@ def parse_args() -> argparse.Namespace:
         "--enforce-recovery-sequence",
         dest="enforce_recovery_sequence",
         action="store_true",
-        default=False,
         help="Only keep episodes that complete a configured sequential recovery objective",
     )
     p.add_argument(
@@ -81,6 +87,7 @@ def parse_args() -> argparse.Namespace:
         dest="enforce_recovery_sequence",
         action="store_false",
     )
+    p.set_defaults(enforce_recovery_sequence=True)
     p.add_argument(
         "--weapon-hold-steps",
         type=int,
@@ -105,6 +112,20 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="After pickup, reject the weapon episode only after this many consecutive unarmed observations.",
     )
+    p.add_argument(
+        "--world-replay",
+        type=str,
+        default="data/world_replay",
+        help="Directory for the persistent transition log. Every stepped transition is "
+             "recorded here, including episodes this collector rejects.",
+    )
+    p.add_argument(
+        "--no-world-replay",
+        dest="world_replay",
+        action="store_const",
+        const="",
+        help="Disable the persistent transition log for this run.",
+    )
     return p.parse_args()
 
 
@@ -112,6 +133,7 @@ _COMBAT_PHASES = frozenset({"combat_execution", "all_skills_llc"})
 _WEAPON_PHASE = "weapon_acquisition"
 _WEAPON_IDLE_ACTION = int(Action.NOOP)
 _WEAPON_DROP_ACTION = int(Action.PICKUP)
+_GOAL_RESAMPLE_RETRIES = 8
 
 _DEFAULT_MAX_STEPS = {
     # Locomotion / weapon: short episodes suffice.
@@ -148,7 +170,25 @@ def _build_env(args: argparse.Namespace) -> StageGoalEnv:
     )
     input_controller = NullInputController() if str(args.teacher) == "manual" else None
     base = BrawlDeepEnv(config=config, input_controller=input_controller)
-    return StageGoalEnv(base, spec)
+    env = StageGoalEnv(base, spec)
+
+    replay_root = str(getattr(args, "world_replay", "") or "").strip()
+    if replay_root:
+        # Wrap outside StageGoalEnv so the logged observation is the one the policy
+        # actually consumes, goal channels included.
+        #
+        # This records every transition the env produces, including episodes the
+        # collector goes on to reject. That is deliberate: a failed recovery is
+        # exactly as informative about physics as a successful one, and demo
+        # acceptance is a statement about teacher quality, not about dynamics.
+        writer = WorldReplayWriter(
+            replay_root,
+            phase=str(args.phase),
+            metadata={"source": "collect_bc_locomotion_demos", "teacher": str(args.teacher)},
+        )
+        print(f"World replay log: {writer.dir}")
+        return WorldReplayRecorder(env, writer)  # type: ignore[return-value]
+    return env
 
 
 def _screen_size_from_env(env: StageGoalEnv) -> tuple[int, int]:
@@ -253,6 +293,94 @@ def _obs_has_weapon(obs: np.ndarray) -> bool:
         return False
 
 
+@dataclass
+class CollectionRejections:
+    """Rejection counters that are persisted with the demonstration archive."""
+
+    episodes_rejected_trivial: int = 0
+
+    def reject_trivial(self) -> None:
+        self.episodes_rejected_trivial += 1
+
+    def as_metadata(self) -> dict[str, np.ndarray]:
+        return {
+            "episodes_rejected_trivial": np.asarray(
+                [self.episodes_rejected_trivial],
+                dtype=np.int64,
+            )
+        }
+
+
+@dataclass
+class RecoveryArming:
+    """Keep spawn/onstage and death/respawn transitions out of recovery demos."""
+
+    required: bool
+    armed: bool = False
+
+    def should_record(self, obs: np.ndarray, info: dict) -> bool:
+        if not self.required:
+            return True
+        if not self.armed:
+            offstage = bool(
+                StateSpec.get(np.asarray(obs, dtype=np.float32), "player_is_offstage")
+                > 0.5
+            )
+            # Position memory intentionally survives short detector gaps, including
+            # death/respawn. An offstage bit alone can therefore describe a stale
+            # pre-death location while the wrapper has no active goal. Fail closed
+            # so every recorded row has a real, controllable recovery state.
+            self.armed = bool(offstage and _recording_state_ready(info))
+        return self.armed
+
+
+def _recording_state_ready(info: dict) -> bool:
+    """Return whether a transition has both a real goal and a controllable player."""
+    goal_active = float(info.get("goal_active", 0.0)) > 0.5
+    player_exists = float(info.get("player_exists", 0.0)) > 0.5
+    respawn_complete = (
+        float(info.get("player_respawn_timer", float("inf"))) <= 1e-6
+    )
+    return bool(goal_active and player_exists and respawn_complete)
+
+
+def wait_for_recording_ready(
+    env: StageGoalEnv,
+    obs: np.ndarray,
+    info: dict,
+    *,
+    max_steps: int,
+) -> tuple[np.ndarray, dict, bool, int]:
+    """Discard reset/respawn frames until the wrapper publishes an active goal."""
+    warmup_steps = 0
+    while not _recording_state_ready(info) and warmup_steps < max(0, int(max_steps)):
+        # The all-zero target is an inactive sentinel, not a training goal. NOOP is
+        # safest while the player cannot act, and none of these transitions belong
+        # in the behaviour-cloning archive.
+        obs, _reward, terminated, truncated, info = env.step(int(Action.NOOP))
+        warmup_steps += 1
+        if terminated or truncated:
+            break
+    return obs, info, _recording_state_ready(info), warmup_steps
+
+
+def prepare_nontrivial_goal(
+    env: StageGoalEnv,
+    obs: np.ndarray,
+    info: dict,
+    *,
+    max_retries: int = _GOAL_RESAMPLE_RETRIES,
+) -> tuple[np.ndarray, dict, bool, int]:
+    """Resample a reset-time target until the current state is outside success."""
+    retries = 0
+    while env.goal_error(obs, info) < float(env.stage_spec.success_threshold):
+        if retries >= max(0, int(max_retries)):
+            return obs, info, False, retries
+        obs, info = env.resample_goal(obs, info)
+        retries += 1
+    return obs, info, True, retries
+
+
 def _prepare_weapon_episode_start(
     env: StageGoalEnv,
     args: argparse.Namespace,
@@ -309,6 +437,7 @@ def main() -> None:
     is_damage = phase_lower in _COMBAT_PHASES
     is_weapon_acquisition = phase_lower == _WEAPON_PHASE
     enforce_recovery_sequence = bool(args.enforce_recovery_sequence and phase_lower == "recovery_mastery")
+    min_episode_steps = max(1, int(args.min_episode_steps))
     weapon_hold_steps_required = max(1, int(args.weapon_hold_steps))
     weapon_drop_grace_steps = max(0, int(args.weapon_drop_grace_steps))
 
@@ -368,6 +497,12 @@ def main() -> None:
         print(f"Episode end action: stop on first hit (op_delta_damage >= {hit_damage_threshold:.4f})")
     if enforce_recovery_sequence:
         print("Recovery quality gate: ON (keep only offstage->onstage sequence-complete episodes)")
+    elif phase_lower == "recovery_mastery":
+        print(
+            "WARNING: recovery sequence enforcement is disabled. The resulting archive "
+            "can contain spawn-success episodes that never demonstrate recovery."
+        )
+    print(f"Minimum recorded episode steps: {min_episode_steps}")
     if is_weapon_acquisition:
         print(
             "Weapon quality gate: start unarmed -> pickup transition -> "
@@ -400,6 +535,7 @@ def main() -> None:
     episodes_attempted = 0
     episodes_rejected_recovery = 0
     episodes_rejected_weapon = 0
+    rejections = CollectionRejections()
     weapon_reset_failures = 0
     episodes_with_hit = 0
     episodes_ended_on_first_hit = 0
@@ -408,8 +544,26 @@ def main() -> None:
         while episodes_collected < target_episodes and episodes_attempted < max_collection_attempts:
             attempt_id = episodes_attempted + 1
             obs, info = env.reset()
+            obs, info, recording_ready, readiness_steps = wait_for_recording_ready(
+                env,
+                obs,
+                info,
+                max_steps=eff_max_steps,
+            )
+            step_total += readiness_steps
+            if not recording_ready:
+                episodes_attempted += 1
+                print(
+                    f"Attempt {attempt_id}/{max_collection_attempts} -> accepted=0 "
+                    f"accepted_total={episodes_collected}/{target_episodes} "
+                    f"steps=0 reason=goal_never_activated "
+                    f"warmup_steps={readiness_steps}"
+                )
+                continue
+
             if is_weapon_acquisition:
                 obs, info, weapon_start_ready, weapon_warmup_steps = _prepare_weapon_episode_start(env, args, obs, info)
+                step_total += weapon_warmup_steps
                 if not weapon_start_ready:
                     episodes_attempted += 1
                     episodes_rejected_weapon += 1
@@ -420,6 +574,48 @@ def main() -> None:
                         f"steps=0 reason=weapon_reset_failed warmup_steps={weapon_warmup_steps}"
                     )
                     continue
+                # Dropping a weapon resets the wrapped environment; that reset may
+                # itself land inside a death/respawn window and clear the goal.
+                obs, info, recording_ready, readiness_steps = wait_for_recording_ready(
+                    env,
+                    obs,
+                    info,
+                    max_steps=eff_max_steps,
+                )
+                step_total += readiness_steps
+                if not recording_ready:
+                    episodes_attempted += 1
+                    episodes_rejected_weapon += 1
+                    print(
+                        f"Attempt {attempt_id}/{max_collection_attempts} -> accepted=0 "
+                        f"accepted_total={episodes_collected}/{target_episodes} "
+                        f"steps=0 reason=goal_never_activated_after_weapon_reset "
+                        f"warmup_steps={readiness_steps}"
+                    )
+                    continue
+
+            teacher = HeuristicTeacher()
+            recovery_setup = RecoverySetupController()
+
+            # Recovery has a later recording boundary: the episode starts only once
+            # the player is offstage. Its arming gate is therefore the non-vacuity
+            # check; resampling the fixed ledge target at spawn would reject forever.
+            if phase_lower != "recovery_mastery":
+                obs, info, goal_ready, goal_retries = prepare_nontrivial_goal(
+                    env,
+                    obs,
+                    info,
+                )
+                if not goal_ready:
+                    episodes_attempted += 1
+                    rejections.reject_trivial()
+                    print(
+                        f"Attempt {attempt_id}/{max_collection_attempts} -> accepted=0 "
+                        f"accepted_total={episodes_collected}/{target_episodes} "
+                        f"steps=0 reason=goal_satisfied_at_reset "
+                        f"resample_retries={goal_retries}"
+                    )
+                    continue
 
             done = False
             ep_steps = 0
@@ -427,6 +623,8 @@ def main() -> None:
             end_reason = "unknown"
             ep_step1_transition_seen = False
             ep_terminal_success_seen = False
+            recovery_arming = RecoveryArming(required=enforce_recovery_sequence)
+            recovery_arm_transition_pending = False
             ep_weapon_started_unarmed = bool(not _obs_has_weapon(obs))
             ep_weapon_prev_has_weapon = bool(_obs_has_weapon(obs))
             ep_weapon_pickup_seen = False
@@ -451,6 +649,42 @@ def main() -> None:
 
             goal_target = np.asarray(info.get("goal_target", np.zeros(2, dtype=np.float32)), dtype=np.float32)
             goal_mask = np.asarray(info.get("goal_mask", np.zeros_like(goal_target)), dtype=np.float32)
+
+            if enforce_recovery_sequence:
+                recovery_arming.should_record(obs, info)
+                if recovery_arming.armed:
+                    ep_step1_transition_seen = True
+                    recovery_arm_transition_pending = True
+
+                # Ignore reset-time goal success while arming. The ledge target is
+                # intentionally already satisfied onstage, and these transitions are
+                # never written to the archive.
+                while not recovery_arming.armed and ep_steps < eff_max_steps:
+                    action_id = recovery_setup.action(obs)
+                    next_obs, _reward, terminated, _truncated, info = env.step(action_id)
+                    obs = next_obs
+                    ep_steps += 1
+                    step_total += 1
+                    if recovery_arming.should_record(obs, info):
+                        ep_step1_transition_seen = True
+                        recovery_arm_transition_pending = True
+                        break
+                    if terminated:
+                        end_reason = "terminated_before_offstage"
+                        break
+
+                if not recovery_arming.armed:
+                    episodes_attempted += 1
+                    episodes_rejected_recovery += 1
+                    print(
+                        f"Attempt {attempt_id}/{max_collection_attempts} -> accepted=0 "
+                        f"accepted_total={episodes_collected}/{target_episodes} "
+                        f"steps=0 reason=never_offstage arming_steps={ep_steps}"
+                    )
+                    continue
+
+                goal_target = np.asarray(info.get("goal_target", goal_target), dtype=np.float32)
+                goal_mask = np.asarray(info.get("goal_mask", goal_mask), dtype=np.float32)
             if mouse_guidance_enabled:
                 _set_mouse_to_goal(env, goal_target, goal_mask)
 
@@ -460,7 +694,7 @@ def main() -> None:
                 # window with idle frames, and since only successful episodes are
                 # saved, those became a behaviour-cloning anchor that taught the agent
                 # to freeze after every pickup.
-                action = heuristic_action(args.phase, obs, info)
+                action = teacher.action(args.phase, obs, info)
                 action_id = int(action)
 
                 ep_obs_buf.append(np.asarray(obs, dtype=np.float32).copy())
@@ -503,6 +737,19 @@ def main() -> None:
                     float(info.get("terminal_success", 0.0)) > 0.5
                     and seq_phase == 2
                 )
+                if enforce_recovery_sequence:
+                    player_onstage = bool(
+                        StateSpec.get(np.asarray(next_obs, dtype=np.float32), "player_is_offstage")
+                        <= 0.5
+                    )
+                    seq_phase = 2
+                    seq_step1_transition = recovery_arm_transition_pending
+                    seq_step1_completed = True
+                    seq_terminal_success = bool(
+                        player_onstage
+                        and float(info.get("goal_success", 0.0)) > 0.5
+                    )
+                    recovery_arm_transition_pending = False
                 ep_seq_phase_buf.append(seq_phase)
                 ep_seq_step1_transition_buf.append(seq_step1_transition)
                 ep_seq_step1_completed_buf.append(seq_step1_completed)
@@ -513,6 +760,10 @@ def main() -> None:
                 terminated_by_hit = bool(end_episode_on_first_hit and hit_event)
                 if is_weapon_acquisition:
                     done = bool(terminated or ep_weapon_hold_success or ep_weapon_dropped_after_pickup)
+                elif enforce_recovery_sequence:
+                    # Goal success near the ledge is common while still offstage. It
+                    # becomes terminal only after the return to stage is observed.
+                    done = bool(terminated or seq_terminal_success)
                 else:
                     done = bool(terminated or truncated or terminated_by_hit)
                 ep_done_buf.append(done)
@@ -583,6 +834,12 @@ def main() -> None:
                 if not accept_episode:
                     episodes_rejected_recovery += 1
 
+            recorded_steps = len(ep_obs_buf)
+            rejected_as_trivial = recorded_steps < min_episode_steps
+            if rejected_as_trivial:
+                accept_episode = False
+                rejections.reject_trivial()
+
             if accept_episode and len(ep_obs_buf) > 0:
                 obs_buf.extend(ep_obs_buf)
                 act_multi_buf.extend(ep_act_multi_buf)
@@ -603,7 +860,8 @@ def main() -> None:
                 f"Attempt {attempt_id}/{max_collection_attempts} -> "
                 f"accepted={int(accept_episode)} "
                 f"accepted_total={episodes_collected}/{target_episodes} "
-                f"steps={ep_steps} reason={end_reason} had_hit={int(ep_had_hit)}"
+                f"steps={recorded_steps} env_steps={ep_steps} reason={end_reason} "
+                f"had_hit={int(ep_had_hit)} trivial={int(rejected_as_trivial)}"
                 + (
                     f" seq(step1={int(ep_step1_transition_seen)}, step2={int(ep_terminal_success_seen)})"
                     if enforce_recovery_sequence
@@ -654,6 +912,11 @@ def main() -> None:
             f"hold_steps_required={weapon_hold_steps_required}, "
             f"drop_grace_steps={weapon_drop_grace_steps}"
         )
+    print(
+        "Trivial episode summary: "
+        f"rejected={rejections.episodes_rejected_trivial}, "
+        f"minimum_recorded_steps={min_episode_steps}"
+    )
 
     if len(obs_buf) == 0:
         print("No samples collected; nothing to save.")
@@ -735,6 +998,7 @@ def main() -> None:
         episodes_collected=np.asarray([episodes_collected], dtype=np.int64),
         episodes_rejected=np.asarray([episodes_rejected_recovery], dtype=np.int64),
         episodes_rejected_weapon=np.asarray([episodes_rejected_weapon], dtype=np.int64),
+        **rejections.as_metadata(),
         weapon_reset_failures=np.asarray([weapon_reset_failures], dtype=np.int64),
         weapon_hold_steps_required=np.asarray([weapon_hold_steps_required], dtype=np.int64),
         weapon_drop_grace_steps=np.asarray([weapon_drop_grace_steps], dtype=np.int64),

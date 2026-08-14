@@ -120,25 +120,25 @@ def test_advisor_starts_with_perception_when_no_demos_exist(tmp_path) -> None:
     assert "debug_observation_overlay.py" in advice.command
     assert "pip install -r requirements-llc.txt" in "\n".join(advice.details)
     assert "llc_preflight.py --device cuda" in "\n".join(advice.details)
-    assert "collect_bc_locomotion_demos --phase recovery_mastery" in "\n".join(advice.details)
+    assert "collect_bc_locomotion_demos --phase movement_fluency" in "\n".join(advice.details)
 
 
 def test_advisor_sends_valid_demo_to_bc_pretrain(tmp_path) -> None:
     models_dir = tmp_path / "models"
-    _write_demo(models_dir, "recovery_mastery")
+    _write_demo(models_dir, "movement_fluency")
 
-    advice = build_advice(_args(tmp_path, phase="recovery_mastery"))
+    advice = build_advice(_args(tmp_path, phase="movement_fluency"))
 
     assert advice.next_kind == "bc_pretrain"
     assert "train.pretrain_bc_locomotion" in advice.command
-    assert "--phase recovery_mastery" in advice.command
+    assert "--phase movement_fluency" in advice.command
 
 
 def test_advisor_stops_on_demo_warning_by_default(tmp_path) -> None:
     models_dir = tmp_path / "models"
-    _write_demo(models_dir, "recovery_mastery", idle=True)
+    _write_demo(models_dir, "movement_fluency", idle=True)
 
-    advice = build_advice(_args(tmp_path, phase="recovery_mastery"))
+    advice = build_advice(_args(tmp_path, phase="movement_fluency"))
 
     assert advice.next_kind == "validate_demos"
     assert advice.exit_code == 2
@@ -147,15 +147,15 @@ def test_advisor_stops_on_demo_warning_by_default(tmp_path) -> None:
 
 def test_advisor_stops_on_failed_gate(tmp_path) -> None:
     models_dir = tmp_path / "models"
-    _write_demo(models_dir, "recovery_mastery")
-    (models_dir / "llc_recovery_mastery_bc_init.zip").write_bytes(b"fake")
-    (models_dir / "llc_recovery_mastery.zip").write_bytes(b"fake")
+    _write_demo(models_dir, "movement_fluency")
+    (models_dir / "llc_movement_fluency_bc_init.zip").write_bytes(b"fake")
+    (models_dir / "llc_movement_fluency.zip").write_bytes(b"fake")
     _write_eval(
         models_dir,
-        "recovery_mastery",
+        "movement_fluency",
         [
             {
-                "phase": "recovery_mastery",
+                "phase": "movement_fluency",
                 "skill_score": 0.40,
                 "best_skill_score": 0.40,
                 "retention": 1.0,
@@ -167,7 +167,7 @@ def test_advisor_stops_on_failed_gate(tmp_path) -> None:
         ],
     )
 
-    advice = build_advice(_args(tmp_path, phase="recovery_mastery"))
+    advice = build_advice(_args(tmp_path, phase="movement_fluency"))
 
     assert advice.next_kind == "gate_failed"
     assert advice.exit_code == 2
@@ -176,27 +176,27 @@ def test_advisor_stops_on_failed_gate(tmp_path) -> None:
 
 def test_advisor_includes_monitor_hint_for_ppo_training(tmp_path) -> None:
     models_dir = tmp_path / "models"
-    _write_demo(models_dir, "recovery_mastery")
-    (models_dir / "llc_recovery_mastery_bc_init.zip").write_bytes(b"fake")
+    _write_demo(models_dir, "movement_fluency")
+    (models_dir / "llc_movement_fluency_bc_init.zip").write_bytes(b"fake")
 
-    advice = build_advice(_args(tmp_path, phase="recovery_mastery"))
+    advice = build_advice(_args(tmp_path, phase="movement_fluency"))
 
     assert advice.next_kind == "ppo_train"
     assert "train.train_curriculum" in advice.command
-    assert any("llc_live_monitor.py --phase recovery_mastery" in item for item in advice.details)
+    assert any("llc_live_monitor.py --phase movement_fluency" in item for item in advice.details)
 
 
 def test_advisor_requests_plots_then_report_after_gate_passes(tmp_path) -> None:
     models_dir = tmp_path / "models"
-    _write_demo(models_dir, "recovery_mastery")
-    (models_dir / "llc_recovery_mastery_bc_init.zip").write_bytes(b"fake")
-    (models_dir / "llc_recovery_mastery.zip").write_bytes(b"fake")
+    _write_demo(models_dir, "movement_fluency")
+    (models_dir / "llc_movement_fluency_bc_init.zip").write_bytes(b"fake")
+    (models_dir / "llc_movement_fluency.zip").write_bytes(b"fake")
     _write_eval(
         models_dir,
-        "recovery_mastery",
+        "movement_fluency",
         [
             {
-                "phase": "recovery_mastery",
+                "phase": "movement_fluency",
                 "skill_score": 0.80,
                 "best_skill_score": 0.80,
                 "retention": 1.0,
@@ -208,17 +208,17 @@ def test_advisor_requests_plots_then_report_after_gate_passes(tmp_path) -> None:
         ],
     )
 
-    advice = build_advice(_args(tmp_path, phase="recovery_mastery"))
+    advice = build_advice(_args(tmp_path, phase="movement_fluency"))
     assert advice.next_kind == "plot"
     assert "plot_llc_diagnostics.py" in advice.command
 
-    _write_plot_set(models_dir, "recovery_mastery")
-    advice = build_advice(_args(tmp_path, phase="recovery_mastery"))
+    _write_plot_set(models_dir, "movement_fluency")
+    advice = build_advice(_args(tmp_path, phase="movement_fluency"))
     assert advice.next_kind == "report"
     assert "summarize_llc_run.py" in advice.command
 
-    _write_report(tmp_path / "outputs", "recovery_mastery")
-    advice = build_advice(_args(tmp_path, phase="recovery_mastery"))
+    _write_report(tmp_path / "outputs", "movement_fluency")
+    advice = build_advice(_args(tmp_path, phase="movement_fluency"))
     assert advice.next_kind == "manual_observation"
     assert "record_llc_observation.py" in advice.command
 
@@ -226,15 +226,15 @@ def test_advisor_requests_plots_then_report_after_gate_passes(tmp_path) -> None:
 def test_advisor_blocks_failed_manual_observation(tmp_path) -> None:
     models_dir = tmp_path / "models"
     outputs_dir = tmp_path / "outputs"
-    _write_demo(models_dir, "recovery_mastery")
-    (models_dir / "llc_recovery_mastery_bc_init.zip").write_bytes(b"fake")
-    (models_dir / "llc_recovery_mastery.zip").write_bytes(b"fake")
+    _write_demo(models_dir, "movement_fluency")
+    (models_dir / "llc_movement_fluency_bc_init.zip").write_bytes(b"fake")
+    (models_dir / "llc_movement_fluency.zip").write_bytes(b"fake")
     _write_eval(
         models_dir,
-        "recovery_mastery",
+        "movement_fluency",
         [
             {
-                "phase": "recovery_mastery",
+                "phase": "movement_fluency",
                 "skill_score": 0.80,
                 "best_skill_score": 0.80,
                 "retention": 1.0,
@@ -245,11 +245,11 @@ def test_advisor_blocks_failed_manual_observation(tmp_path) -> None:
             }
         ],
     )
-    _write_plot_set(models_dir, "recovery_mastery")
-    _write_report(outputs_dir, "recovery_mastery")
-    _write_observation(outputs_dir, "recovery_mastery", approved=False)
+    _write_plot_set(models_dir, "movement_fluency")
+    _write_report(outputs_dir, "movement_fluency")
+    _write_observation(outputs_dir, "movement_fluency", approved=False)
 
-    advice = build_advice(_args(tmp_path, phase="recovery_mastery"))
+    advice = build_advice(_args(tmp_path, phase="movement_fluency"))
 
     assert advice.next_kind == "manual_observation"
     assert advice.exit_code == 2

@@ -35,6 +35,7 @@ import capture_first  # noqa: E402,F401  (import order is load-bearing)
 import argparse
 import sys
 import time
+from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ import numpy as np
 # Ensure project root is on sys.path when invoked directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from action_space import Action
 from config import UI_REGIONS
 from env import BrawlDeepEnv, EnvConfig, NullInputController
 from feature_extractor.memory.state_spec import StateSpec
@@ -53,7 +55,7 @@ from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv, StageSpec
 
 
-MOVEMENT_KEYS = {"a": 0, "d": 1, "s": 2}
+MOVEMENT_KEYS = ("a", "d", "s", "w")
 JUMP_KEY = "space"
 DODGE_KEY = "e"
 # keyboard scan codes for numpad 4/5/6.
@@ -80,26 +82,80 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def read_keyboard_action() -> tuple[int, int, int, int]:
-    movement = 3
-    for key, idx in MOVEMENT_KEYS.items():
-        if keyboard.is_pressed(key):
-            movement = idx
-            break
+def _action_from_pressed_keys(
+    pressed: Collection[str | int],
+    *,
+    mirrored: bool,
+) -> int:
+    """Collapse physical keyboard state into the categorical canonical action.
 
-    jump = 1 if keyboard.is_pressed(JUMP_KEY) else 0
-    dodge = 1 if keyboard.is_pressed(DODGE_KEY) else 0
+    Manual play can contain chords the 27-action controller deliberately excludes.
+    The precedence below preserves the old recorder's dodge-over-attack rule, then
+    records the first tap family before falling back to locomotion.
+    """
+    physical_hdir = -1 if "a" in pressed else (1 if "d" in pressed else 0)
+    hdir = -physical_hdir if mirrored else physical_hdir
+    vdir = 1 if "s" in pressed else (-1 if "w" in pressed else 0)
 
-    attack = 0
-    for key, idx in ATTACK_KEYS.items():
-        if keyboard.is_pressed(key):
-            attack = idx
-            break
+    if DODGE_KEY in pressed:
+        dodge_actions = {
+            (0, 0): Action.DODGE_SPOT,
+            (1, 0): Action.DODGE_TOWARD,
+            (-1, 0): Action.DODGE_AWAY,
+            (0, -1): Action.DODGE_UP,
+            (0, 1): Action.DODGE_DOWN,
+            (1, -1): Action.DODGE_UP_TOWARD,
+            (-1, -1): Action.DODGE_UP_AWAY,
+            (1, 1): Action.DODGE_DOWN_TOWARD,
+            (-1, 1): Action.DODGE_DOWN_AWAY,
+        }
+        return int(dodge_actions[(hdir, vdir)])
 
-    if dodge == 1 and attack != 0:
-        attack = 0
+    if 75 in pressed:
+        if vdir > 0:
+            return int(Action.LIGHT_DOWN)
+        if hdir > 0:
+            return int(Action.LIGHT_TOWARD)
+        if hdir < 0:
+            return int(Action.LIGHT_AWAY)
+        return int(Action.LIGHT_NEUTRAL)
 
-    return movement, jump, dodge, attack
+    if 77 in pressed:
+        if vdir > 0:
+            return int(Action.HEAVY_DOWN)
+        if hdir > 0:
+            return int(Action.HEAVY_TOWARD)
+        if hdir < 0:
+            return int(Action.HEAVY_AWAY)
+        return int(Action.HEAVY_NEUTRAL)
+
+    if 76 in pressed:
+        return int(Action.PICKUP)
+
+    if JUMP_KEY in pressed:
+        if hdir > 0:
+            return int(Action.JUMP_TOWARD)
+        if hdir < 0:
+            return int(Action.JUMP_AWAY)
+        return int(Action.JUMP)
+
+    if vdir > 0:
+        if hdir > 0:
+            return int(Action.FAST_FALL_TOWARD)
+        if hdir < 0:
+            return int(Action.FAST_FALL_AWAY)
+        return int(Action.FAST_FALL)
+    if hdir > 0:
+        return int(Action.MOVE_TOWARD)
+    if hdir < 0:
+        return int(Action.MOVE_AWAY)
+    return int(Action.NOOP)
+
+
+def read_keyboard_action(*, mirrored: bool) -> int:
+    keys = (*MOVEMENT_KEYS, JUMP_KEY, DODGE_KEY, *ATTACK_KEYS)
+    pressed = {key for key in keys if keyboard.is_pressed(key)}
+    return _action_from_pressed_keys(pressed, mirrored=mirrored)
 
 
 def make_env(args: argparse.Namespace) -> tuple[StageGoalEnv, StageSpec]:
@@ -151,8 +207,19 @@ def _format_success_lines(info: dict[str, Any], spec: StageSpec) -> tuple[list[s
         f"goal_error: {goal_error:.4f}",
         f"success_threshold: {float(spec.success_threshold):.4f}",
         f"goal_new_sampled: {int(bool(info.get('goal_new_sampled', False)))}",
-        "active success elements:",
     ]
+
+    if float(info.get("sequential_goal_enabled", 0.0)) > 0.5:
+        phase = int(info.get("sequential_phase", 1))
+        state = "ARMED_RETURN" if phase == 2 else "SEEK_OFFSTAGE"
+        lines.extend(
+            [
+                f"sequence: {state} (phase={phase})",
+                f"terminal_success: {int(float(info.get('terminal_success', 0.0)) > 0.5)}",
+            ]
+        )
+
+    lines.append("active success elements:")
 
     active_idx = [i for i, w in enumerate(goal_mask.tolist()) if float(w) > 0.0]
     if not active_idx:
@@ -175,7 +242,7 @@ def draw_obs_panel(
     obs: np.ndarray,
     step_idx: int,
     reward: float,
-    action: tuple[int, int, int, int],
+    action: int,
     info: dict[str, Any],
     spec: StageSpec,
     font_scale: float,
@@ -187,7 +254,7 @@ def draw_obs_panel(
     header = [
         f"step: {step_idx}",
         f"reward: {float(reward):+.4f}",
-        f"action [mv,j,d,atk]: {list(action)}",
+        f"action: {Action(int(action)).name} ({int(action)})",
         (
             "weapon diag: "
             f"state={float(info.get('player_weapon_state', 0.0)):.1f} "
@@ -283,7 +350,8 @@ def main() -> None:
     try:
         while True:
             t0 = time.perf_counter()
-            action = read_keyboard_action()
+            mirrored = bool(float(info.get("canon_mirrored", 0.0)) > 0.5)
+            action = read_keyboard_action(mirrored=mirrored)
             obs_step, reward, terminated, truncated, info_step = env.step(action)
 
             obs_for_draw = obs_step

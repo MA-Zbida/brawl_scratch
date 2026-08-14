@@ -46,12 +46,16 @@ the goal sampler, mask, reward shaping and action restrictions.
 
 | Phase | Mask | Success threshold | Reward clip | Attacks |
 |---|---|---:|---:|---|
-| `recovery_mastery` | ledge dx, dy | 0.08 | 4.0 | disabled |
 | `movement_fluency` | player x, y | 0.04 | 3.0 | disabled |
 | `weapon_acquisition` | has_weapon, weapon dx/dy | 0.10 | 10.0 | NUM5 only |
 | `spacing_neutral` | rel_distance, rel_dy | 0.06 | 3.0 | disabled |
 | `combat_execution` | in_strike_range, opponent damage | 0.15 | 6.0 | all |
+| `recovery_mastery` | ledge dx, dy | 0.08 | 4.0 | disabled |
 | `all_skills_llc` | sampled per episode | 0.10 | 6.0 | all |
+
+The canonical progression order is defined in `train/phase_registry.py`. Recovery
+is currently deferred until after combat so the first end-to-end pilot is not
+blocked by unreliable offstage setup.
 
 Two reward modes exist:
 

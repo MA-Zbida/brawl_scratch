@@ -98,6 +98,11 @@ class Memory:
 
         self._edge_x_radius = 0.04
         self._edge_y_tolerance = 0.03
+        # Enter outside the calibrated platform by more than detector jitter, then
+        # require a small inward return before clearing. Without hysteresis, one
+        # noisy box at the ledge fabricates alternating recovery/onstage states.
+        self._offstage_enter_x_margin = 0.01
+        self._offstage_exit_x_inset = 0.015
         self._player_last_dx = 1.0
         self._opponent_last_dx = -1.0
 
@@ -538,7 +543,37 @@ class Memory:
             self.opponent.exists = True
 
     def update_off_stage(self, state: FighterState) -> bool:
-        return (state.x < self.platform.x_min or state.x > self.platform.x_max) and (state.y > self.platform.y_min)
+        """Return whether a tracked airborne fighter has left the playable top.
+
+        Lateral displacement and passing below the platform are independent ways
+        to be offstage. Requiring both hid high recoveries in the live overlay: a
+        fighter far beyond a ledge read as onstage until falling below its top.
+        """
+        if not state.exists or state.grounded:
+            return False
+
+        if state.off_stage:
+            outside_x = bool(
+                state.x < self.platform.x_min + self._offstage_exit_x_inset
+                or state.x > self.platform.x_max - self._offstage_exit_x_inset
+            )
+            # Clear vertical offstage only after returning above half the ordinary
+            # ground tolerance; this avoids flicker around the calibrated surface.
+            below_platform = bool(
+                state.y
+                > self.platform.y_min + (0.5 * self.physics.ground_y_tolerance)
+            )
+        else:
+            outside_x = bool(
+                state.x < self.platform.x_min - self._offstage_enter_x_margin
+                or state.x > self.platform.x_max + self._offstage_enter_x_margin
+            )
+            below_platform = bool(
+                state.y
+                > self.platform.y_min + self.physics.ground_y_tolerance
+            )
+
+        return bool(outside_x or below_platform)
 
     def update_player_off_stage(self) -> bool:
         return self.update_off_stage(self.player)

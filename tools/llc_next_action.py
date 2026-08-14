@@ -259,18 +259,20 @@ def build_advice(args: argparse.Namespace) -> Advice:
 
     any_demo_exists = any(_demo_path(str(args.models_dir), p).exists() for p in DEMO_BY_PHASE)
     if not any_demo_exists and str(args.phase) == "auto":
-        state = _state_for_phase(args, "recovery_mastery")
+        first_phase = PHASE_ORDER[0]
+        state = _state_for_phase(args, first_phase)
         states.append(state)
         return Advice(
             title="sanity-check perception before collecting demos",
-            next_phase="movement_fluency",
+            next_phase=first_phase,
             next_kind="perception",
             command=PERCEPTION_COMMAND,
             details=[
                 "If this is a fresh environment, run: python -m pip install -r requirements-llc.txt",
                 "First run: python tools/llc_preflight.py --device cuda",
                 "No demo archives were found. Verify boxes, damage, stocks, weapon state, and relative positions before recording anchors.",
-                "After perception looks correct, collect the first demo archive with: " + COLLECT_COMMANDS["recovery_mastery"],
+                "After perception looks correct, collect the first demo archive with: "
+                + COLLECT_COMMANDS[first_phase],
             ],
             states=states,
         )

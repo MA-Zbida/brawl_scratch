@@ -140,6 +140,7 @@ class StageSpec:
     sequential_failure_penalty: float = 0.0
     sequential_require_offstage_first: bool = False
     sequential_require_onstage_second: bool = False
+    sequential_require_grounded_second: bool = False
 
 
 class StageGoalEnv(gym.Wrapper):
@@ -264,6 +265,39 @@ class StageGoalEnv(gym.Wrapper):
         if self.stage_spec.use_l2_error:
             return float(np.sqrt(np.sum(use_mask * (delta ** 2))))
         return float(np.sum(use_mask * np.abs(delta)))
+
+    def goal_error(self, obs: np.ndarray, info: dict) -> float:
+        """Evaluate the active goal without taking an environment step."""
+        base_obs = np.asarray(obs, dtype=np.float32).reshape(-1)[: self._base_dim]
+        target = np.asarray(
+            info.get("goal_target", self._active_goal_target),
+            dtype=np.float32,
+        ).reshape(self.goal_dim)
+        mask = np.asarray(
+            info.get("goal_mask", self._active_mask),
+            dtype=np.float32,
+        ).reshape(self.goal_dim)
+        return self._goal_error_from_feats(self._extract(base_obs), target, mask=mask)
+
+    def resample_goal(self, obs: np.ndarray, info: dict) -> tuple[np.ndarray, dict]:
+        """Replace a reset-time goal while preserving the current game frame."""
+        base_obs = np.asarray(obs, dtype=np.float32).reshape(-1)[: self._base_dim].copy()
+        feats = self._extract(base_obs)
+        if self._sequential_enabled():
+            self._activate_goal(base_obs, feats, sequence_step=self._seq_phase)
+        else:
+            self._activate_goal(base_obs, feats)
+        self._sync_goal_frame(bool(float(info.get("canon_mirrored", 0.0)) > 0.5))
+        self._prev_error = None
+
+        updated_info = dict(info)
+        updated_info["goal_type"] = self.goal_type
+        updated_info["goal_type_index"] = int(self.goal_type_index)
+        updated_info["goal_type_onehot"] = self._goal_type_onehot.copy()
+        updated_info["goal_target"] = self._active_goal_target.copy()
+        updated_info["goal_mask"] = self._active_mask.copy()
+        updated_info["goal_active"] = float(1.0 if self._goal_active else 0.0)
+        return self._augment(base_obs), updated_info
 
     def _feature_value(self, feats: np.ndarray, name: str, default: float = 0.0) -> float:
         idx = self._feature_index.get(name)
@@ -663,11 +697,16 @@ class StageGoalEnv(gym.Wrapper):
                     success = bool((op_dmg_curr + tol) >= op_dmg_target)
 
             if seq_enabled:
-                offstage_now = self._feature_value(curr_feats, "player_is_offstage", 0.0) > 0.5
+                # Sequence guards are state predicates, not optimisation targets.
+                # They deliberately remain outside CURRICULUM_GOAL_FEATURES, so
+                # reading them from curr_feats would silently return the default.
+                offstage_now = StateSpec.get(obs, "player_is_offstage") > 0.5
                 if self._seq_phase == 1:
                     step1_ok = bool(success)
                     if self.stage_spec.sequential_require_offstage_first:
-                        step1_ok = bool(step1_ok and offstage_now)
+                        # Offstage is the arming event, not a proximity goal. Requiring
+                        # ledge-radius success here would ignore high/far recoveries.
+                        step1_ok = bool(offstage_now)
 
                     if step1_ok:
                         if self.stage_spec.sequential_step1_bonus > 0.0:
@@ -684,6 +723,9 @@ class StageGoalEnv(gym.Wrapper):
                     step2_ok = bool(success)
                     if self.stage_spec.sequential_require_onstage_second:
                         step2_ok = bool(step2_ok and (not offstage_now))
+                    if self.stage_spec.sequential_require_grounded_second:
+                        grounded_now = StateSpec.get(obs, "player_grounded") > 0.5
+                        step2_ok = bool(step2_ok and grounded_now)
                     success = bool(step2_ok)
 
             if success:
@@ -2145,6 +2187,34 @@ def train_stage_model(
         print(f"[{args.model_name}] Final model also saved after interruption.")
 
 
+def _require_complete_bc_anchor(
+    model,
+    *,
+    bc_loss_coef: float,
+    bc_demos_path: str | None,
+    model_name: str,
+) -> None:
+    """Fail before live training when any requested BC dataset was skipped."""
+    if float(bc_loss_coef) <= 0.0 or not str(bc_demos_path or "").strip():
+        return
+
+    store = getattr(model, "_bc_store", None)
+    expected_count = len(getattr(store, "paths", ())) if store is not None else 0
+    loaded_count = int(getattr(store, "num_datasets", 0)) if store is not None else 0
+    enabled = bool(getattr(store, "enabled", False)) if store is not None else False
+    reason = str(getattr(store, "disable_reason", "")) if store is not None else "store was not created"
+    if not enabled or expected_count <= 0 or loaded_count != expected_count or reason:
+        raise RuntimeError(
+            f"[{model_name}] incomplete BC anchor: requested={expected_count}, "
+            f"loaded={loaded_count}, reason={reason or 'unknown'}"
+        )
+
+    print(
+        f"[{model_name}] BC anchor enabled: datasets={loaded_count} "
+        f"samples={int(getattr(store, 'size', 0))}"
+    )
+
+
 def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     """Build or resume a PPO model."""
     replay_ratio = float(np.clip(getattr(args, "replay_ratio", 0.30), 0.0, 0.95))
@@ -2188,7 +2258,7 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     if args.resume:
         print(f"[{args.model_name}] Resuming PPO from {args.resume}")
         try:
-            return AnchoredReplayPPO.load(
+            model = AnchoredReplayPPO.load(
                 args.resume,
                 env=vec_env,
                 learning_rate=args.learning_rate,
@@ -2221,6 +2291,13 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
                 "Checkpoint architecture likely differs from current stage goal schema/observation shape. "
                 "Use a compatible checkpoint or restart training without --resume."
             ) from exc
+        _require_complete_bc_anchor(
+            model,
+            bc_loss_coef=bc_loss_coef,
+            bc_demos_path=bc_demos_path,
+            model_name=str(args.model_name),
+        )
+        return model
 
     if stage_spec is not None:
         goal_feature_names = GOAL_STATE_SPEC_NAMES
@@ -2237,7 +2314,7 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
     else:
         policy_kwargs = dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
 
-    return AnchoredReplayPPO(
+    model = AnchoredReplayPPO(
         "MlpPolicy",
         vec_env,
         learning_rate=args.learning_rate,
@@ -2266,6 +2343,14 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
         bc_demos_path=bc_demos_path,
         enable_pcgrad=enable_pcgrad,
     )
+    _require_complete_bc_anchor(
+        model,
+        bc_loss_coef=bc_loss_coef,
+        bc_demos_path=bc_demos_path,
+        model_name=str(args.model_name),
+    )
+    return model
+
 
 def make_base_env(max_episode_steps: int, terminate_on_stock_out: bool = False) -> BrawlDeepEnv:
     return BrawlDeepEnv(config=default_env_config(max_episode_steps=max_episode_steps, terminate_on_stock_out=terminate_on_stock_out))

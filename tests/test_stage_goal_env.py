@@ -106,3 +106,18 @@ def test_stage_goal_env_reset_preserves_base_weapon_state() -> None:
     env.reset(seed=7)
 
     assert base.memory.player.weapon_state == 1.0
+
+
+def test_recovery_executes_allowed_heavy_and_rejects_other_attacks() -> None:
+    spec = build_phase_spec("recovery_mastery", terminate_on_death=False)
+
+    allowed_env = StageGoalEnv(DummyStageEnv(), spec)
+    allowed_env.reset(seed=7)
+    _, _, _, _, allowed_info = allowed_env.step(int(Action.HEAVY_TOWARD))
+
+    blocked_env = StageGoalEnv(DummyStageEnv(), spec)
+    blocked_env.reset(seed=7)
+    _, _, _, _, blocked_info = blocked_env.step(int(Action.LIGHT_TOWARD))
+
+    assert allowed_info["stage_action"] == int(Action.HEAVY_TOWARD)
+    assert blocked_info["stage_action"] == int(Action.NOOP)

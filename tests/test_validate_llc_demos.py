@@ -19,12 +19,14 @@ def _write_demo(path, *, phase: str = "movement_fluency", samples: int = 12, idl
     else:
         actions = (np.arange(samples) % ACTION_DIM).astype(np.int64)
     goal_mask = np.ones((samples, 11), dtype=np.float32)
+    goal_target = np.full((samples, 11), 0.5, dtype=np.float32)
     np.savez_compressed(
         path,
         obs=obs,
         actions=actions,
         actions_discrete=actions,
         goal_mask=goal_mask,
+        goal_target=goal_target,
         episodes_collected=np.asarray([3], dtype=np.int64),
         phase=np.asarray([phase]),
     )
@@ -118,4 +120,25 @@ def test_validate_demo_archive_warns_on_idle_action_collapse(tmp_path) -> None:
     assert result["status"] == "WARN"
     assert any("high idle rate" in warning for warning in result["warnings"])
     assert any("low action entropy" in warning for warning in result["warnings"])
+
+
+def test_validate_demo_archive_rejects_active_mask_with_zero_goal_target(
+    tmp_path,
+) -> None:
+    path = tmp_path / "recovery_mastery_demos.npz"
+    _write_demo(path, phase="recovery_mastery")
+    with np.load(path) as data:
+        payload = {key: data[key] for key in data.files}
+    payload["goal_target"] = payload["goal_target"].copy()
+    payload["goal_target"][3] = 0.0
+    np.savez_compressed(path, **payload)
+
+    result = validate_demo_archive(
+        path,
+        expected_phase="recovery_mastery",
+        min_samples=8,
+    )
+
+    assert result["status"] == "FAIL"
+    assert any("active goal mask with an all-zero target" in err for err in result["errors"])
 

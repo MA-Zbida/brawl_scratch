@@ -67,6 +67,27 @@ def test_combat_phase_keeps_attacks():
     assert any(components(a).heavy for a in allowed)
 
 
+def test_movement_phase_keeps_ground_dash_actions():
+    spec = build_phase_spec("movement_fluency", terminate_on_death=False)
+    allowed = resolve_allowed_actions(spec)
+
+    assert int(Action.DODGE_TOWARD) in allowed
+    assert int(Action.DODGE_AWAY) in allowed
+
+
+def test_recovery_phase_has_exactly_locomotion_dodge_and_two_recovery_heavies():
+    spec = build_phase_spec("recovery_mastery", terminate_on_death=False)
+    allowed = resolve_allowed_actions(spec)
+
+    assert len(allowed) == 20
+    assert int(Action.HEAVY_NEUTRAL) in allowed
+    assert int(Action.HEAVY_TOWARD) in allowed
+    assert int(Action.HEAVY_AWAY) not in allowed
+    assert int(Action.HEAVY_DOWN) not in allowed
+    assert int(Action.PICKUP) not in allowed
+    assert all(not components(action).light for action in allowed)
+
+
 def test_no_phase_references_the_removed_field():
     """Guards the whole class of half-finished rename."""
     for phase in PHASES:

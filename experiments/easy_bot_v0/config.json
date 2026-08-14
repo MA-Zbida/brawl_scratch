@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "experiment_id": "easy_bot_v0",
+  "objective": "Test whether one sequential goal-conditioned LLC can produce positive full-match play against one fixed Easy bot.",
+  "model_dir": "train/models/easy_bot_v0",
+  "game_setup": {
+    "player_legend": "Wu Shang",
+    "opponent_legend": "Mordex",
+    "opponent_difficulty": "easy",
+    "map": "Small Brawlhaven",
+    "mode": "training_mode",
+    "resolution": [1920, 1080],
+    "opponent_pool_size": 1
+  },
+  "phase_order": [
+    "movement_fluency",
+    "weapon_acquisition",
+    "spacing_neutral",
+    "combat_execution",
+    "recovery_mastery",
+    "all_skills_llc"
+  ],
+  "active_pilot_phases": [
+    "movement_fluency",
+    "weapon_acquisition",
+    "spacing_neutral",
+    "combat_execution"
+  ],
+  "perception": {
+    "detector": "feature_extractor/yolo/best.engine",
+    "yolo_infer_every_n_steps": 1,
+    "weapon_classifier_enabled": false
+  },
+  "initialization": {
+    "movement_checkpoint": "train/models/llc_movement_fluency_bc_init.zip",
+    "later_phase_bc_epochs": 8,
+    "bc_batch_size": 512,
+    "bc_learning_rate": 0.0002,
+    "bc_entropy_coef": 0.001,
+    "goal_relabel": true
+  },
+  "ppo_pilot": {
+    "timesteps_per_phase": 4096,
+    "n_steps": 512,
+    "batch_size": 256,
+    "max_episode_steps": 200,
+    "seed": 42,
+    "device": "cuda",
+    "periodic_eval_enabled": false,
+    "sequential_eval_episodes": 2
+  },
+  "match_evaluation": {
+    "harness_status": "BLOCKED_UNTIL_SELECTED_GOAL_CONDITIONING_IS_VERIFIED",
+    "smoke_matches": 3,
+    "diagnostic_matches": 10,
+    "benchmark_matches": 30,
+    "stocks_to_win": 1,
+    "smoke_max_steps": 1200,
+    "benchmark_max_steps": 3000,
+    "deterministic": true,
+    "promotion": {
+      "minimum_wins": 18,
+      "minimum_mean_damage_trade": 0.0,
+      "maximum_self_destruct_rate": 0.2
+    }
+  },
+  "deferred": {
+    "recovery_training": true,
+    "all_skills_consolidation": true,
+    "weapon_classifier_integration": true,
+    "opponent_pool_expansion": true
+  }
+}

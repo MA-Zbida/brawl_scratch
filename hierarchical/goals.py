@@ -1,4 +1,4 @@
-"""Structured masked goals for goal-conditioned LLC/HSP.
+"""Legacy structured masked goals for goal-conditioned skill pretraining.
 
 Goal vector format is concatenated as:
     goal = [target_0..target_{k-1}, mask_0..mask_{k-1}]

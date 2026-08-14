@@ -175,14 +175,13 @@ def _sampler_spacing(_: np.ndarray) -> np.ndarray:
 
 
 def _sampler_combat(obs: np.ndarray) -> np.ndarray:
-    """Combat goal: enter strike range and raise the opponent's damage.
+    """Combat goal: raise the opponent's measured damage.
 
     The target is the opponent's *current* damage plus an increment, so the goal
-    is "deal this much more", grounded in a UI measurement rather than in an
-    estimate of hidden frame data.
+    specifies the outcome rather than prescribing strike range as an intermediate
+    tactic. The policy may approach, retreat, bait, jump, or dodge first.
     """
     t = _base_target()
-    t[GOAL_INDEX["in_strike_range"]] = 1.0
     try:
         current = float(np.clip(StateSpec.get(np.asarray(obs, dtype=np.float32), "opponent_damage_pct"), 0.0, 1.0))
     except Exception:
@@ -228,7 +227,7 @@ def _sample_all_skills(_: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
         )
     return (
         _sampler_combat(_),
-        _mask_for(("in_strike_range", 1.0), ("opponent_damage_pct", 0.8)),
+        _mask_for(("opponent_damage_pct", 1.0)),
         normalize_goal_type("combat"),
     )
 
@@ -257,7 +256,7 @@ def build_phase_spec(
             success_threshold=0.08,
             success_bonus=2.5,
             use_l2_error=True,
-            reward_from_goal_progress=False,
+            reward_from_goal_progress=True,
             progress_scale=3.0,
             jump_usage_penalty_scale=0.10,
             velocity_penalty_scale=0.05,
@@ -292,7 +291,7 @@ def build_phase_spec(
             success_threshold=0.04,
             success_bonus=1.5,
             use_l2_error=True,
-            reward_from_goal_progress=False,
+            reward_from_goal_progress=True,
             progress_scale=2.0,
             vertical_velocity_penalty_scale=0.10,
             death_penalty=float(death_penalty),
@@ -319,7 +318,7 @@ def build_phase_spec(
             goal_extractor=extract_curriculum_goal_features,
             success_threshold=0.1,
             success_bonus=1.0,
-            reward_from_goal_progress=False,
+            reward_from_goal_progress=True,
             # Strictly BELOW step_penalty. Holding should be better than not holding,
             # but never better than nothing: at +0.1 against a 0.05 step penalty,
             # standing still while armed earned +0.05/step indefinitely, which over a
@@ -360,7 +359,7 @@ def build_phase_spec(
             success_threshold=0.06,
             success_bonus=1.2,
             use_l2_error=True,
-            reward_from_goal_progress=False,
+            reward_from_goal_progress=True,
             progress_scale=2.0,
             death_penalty=float(death_penalty),
             reward_clip=3.0,
@@ -377,8 +376,7 @@ def build_phase_spec(
             name="stage5_combat_execution",
             goal_type=normalize_goal_type("combat"),
             mask=_mask_for(
-                ("in_strike_range", 1.0),
-                ("opponent_damage_pct", 0.8),
+                ("opponent_damage_pct", 1.0),
             ),
             target_sampler=_sampler_combat,
             feature_names=list(CURRICULUM_GOAL_FEATURES),
@@ -386,10 +384,14 @@ def build_phase_spec(
             progress_scale=1.5,
             progress_clip_min=-0.20,
             progress_clip_max=0.40,
-            success_threshold=0.15,
+            # Damage is now the only combat outcome. A 1% tolerance prevents
+            # the old 15% two-feature threshold from accepting every 3-10%
+            # damage target at reset.
+            success_threshold=0.01,
             success_bonus=1.5,
             reward_from_goal_progress=True,
-            in_strike_range_bonus=0.03,
+            require_opponent_damage_for_success=True,
+            in_strike_range_bonus=0.0,
             hit_event_bonus=0.5,
             damage_dealt_scale=2.0,
             self_damage_penalty_scale=0.5,
@@ -417,9 +419,16 @@ def build_phase_spec(
             progress_clip_min=-0.20,
             progress_clip_max=0.35,
             success_threshold=0.10,
+            success_threshold_by_goal_type={
+                "recovery": 0.08,
+                "movement": 0.04,
+                "weapon_acquisition": 0.10,
+                "spacing": 0.06,
+                "combat": 0.01,
+            },
             success_bonus=1.0,
             reward_from_goal_progress=True,
-            in_strike_range_bonus=0.02,
+            in_strike_range_bonus=0.0,
             hit_event_bonus=0.35,
             damage_dealt_scale=1.25,
             self_damage_penalty_scale=0.35,

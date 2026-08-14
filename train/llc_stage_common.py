@@ -25,6 +25,13 @@ from feature_extractor.memory.canonicalize import mirror_goal_target
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goals import GOAL_FEATURE_NAMES, GOAL_STATE_SPEC_NAMES, GOAL_TARGET_DIM, extract_goal_features
 from train.curriculum_goals import GOAL_TYPE_INDEX, goal_type_onehot, normalize_goal_type
+from train.checkpoint_roles import (
+    GOAL_CONDITIONED_SKILL,
+    metadata_for_skill_model,
+    metadata_path,
+    require_checkpoint_role,
+    save_typed_checkpoint,
+)
 from train.retention import (
     load_best_scores,
     parse_phase_list,
@@ -83,6 +90,7 @@ class StageSpec:
     progress_clip_max: float = 0.3
     clip_progress_reward: bool = True
     success_threshold: float = 0.12
+    success_threshold_by_goal_type: Optional[dict[str, float]] = None
     success_bonus: float = 0.25
     proximity_scale: float = 0.0  # penalty for current error: -proximity_scale * error
     chase_rel_distance_scale: float = 0.0
@@ -270,9 +278,16 @@ class StageGoalEnv(gym.Wrapper):
     def _goal_error_from_feats(self, feats: np.ndarray, target: np.ndarray, mask: Optional[np.ndarray] = None) -> float:
         use_mask = self.mask if mask is None else np.asarray(mask, dtype=np.float32).reshape(self.goal_dim)
         delta = np.asarray(feats, dtype=np.float32) - np.asarray(target, dtype=np.float32)
+        mask_mass = float(np.sum(use_mask))
+        if mask_mass <= 1e-8:
+            return 0.0
         if self.stage_spec.use_l2_error:
-            return float(np.sqrt(np.sum(use_mask * (delta ** 2))))
-        return float(np.sum(use_mask * np.abs(delta)))
+            return float(np.sqrt(np.sum(use_mask * (delta ** 2)) / mask_mass))
+        return float(np.sum(use_mask * np.abs(delta)) / mask_mass)
+
+    def _success_threshold(self) -> float:
+        overrides = self.stage_spec.success_threshold_by_goal_type or {}
+        return float(overrides.get(self.goal_type, self.stage_spec.success_threshold))
 
     def goal_error(self, obs: np.ndarray, info: dict) -> float:
         """Evaluate the active goal without taking an environment step."""
@@ -296,7 +311,11 @@ class StageGoalEnv(gym.Wrapper):
         else:
             self._activate_goal(base_obs, feats)
         self._sync_goal_frame(bool(float(info.get("canon_mirrored", 0.0)) > 0.5))
-        self._prev_error = None
+        self._prev_error = self._goal_error_from_feats(
+            feats,
+            self._active_goal_target,
+            mask=self._active_mask,
+        )
 
         updated_info = dict(info)
         updated_info["goal_type"] = self.goal_type
@@ -306,7 +325,7 @@ class StageGoalEnv(gym.Wrapper):
         updated_info["goal_target_world"] = self._goal_target.copy()
         updated_info["goal_mask"] = self._active_mask.copy()
         updated_info["stage_feature_names"] = list(self.feature_names)
-        updated_info["goal_success_threshold"] = float(self.stage_spec.success_threshold)
+        updated_info["goal_success_threshold"] = self._success_threshold()
         updated_info["goal_active"] = float(1.0 if self._goal_active else 0.0)
         return self._augment(base_obs), updated_info
 
@@ -448,7 +467,7 @@ class StageGoalEnv(gym.Wrapper):
                 self._active_goal_target,
                 mask=self._active_mask,
             )
-            if error >= float(self.stage_spec.success_threshold):
+            if error >= self._success_threshold():
                 return True, rejected
             rejected += 1
 
@@ -478,14 +497,18 @@ class StageGoalEnv(gym.Wrapper):
         self._active_mask = self._effective_mask_for_step(feats)
         self._goal_active = True
         self._sync_goal_frame(bool(float(info.get("canon_mirrored", 0.0)) > 0.5))
-        self._prev_error = None
+        self._prev_error = self._goal_error_from_feats(
+            feats,
+            self._active_goal_target,
+            mask=self._active_mask,
+        )
 
         updated_info = dict(info)
         updated_info["goal_target"] = self._active_goal_target.copy()
         updated_info["goal_target_world"] = self._goal_target.copy()
         updated_info["goal_mask"] = self._active_mask.copy()
         updated_info["stage_feature_names"] = list(self.feature_names)
-        updated_info["goal_success_threshold"] = float(self.stage_spec.success_threshold)
+        updated_info["goal_success_threshold"] = self._success_threshold()
         updated_info["goal_active"] = 1.0
         return self._augment(base_obs), updated_info
 
@@ -591,7 +614,15 @@ class StageGoalEnv(gym.Wrapper):
         self._prev_in_range = float(np.clip(self._feature_value(init_feats, "in_strike_range", 0.0), 0.0, 1.0))
         self._combo_chain_hits = 0
         self._weapon_pickup_awarded = False
-        self._prev_error = None
+        self._prev_error = (
+            self._goal_error_from_feats(
+                init_feats,
+                self._active_goal_target,
+                mask=self._active_mask,
+            )
+            if self._goal_active
+            else None
+        )
 
         info["stage_name"] = self.stage_spec.name
         info["goal_type"] = self.goal_type
@@ -601,7 +632,7 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_target_world"] = self._goal_target.copy()
         info["goal_mask"] = self._active_mask.copy()
         info["stage_feature_names"] = list(self.feature_names)
-        info["goal_success_threshold"] = float(self.stage_spec.success_threshold)
+        info["goal_success_threshold"] = self._success_threshold()
         info["goal_active"] = float(1.0 if self._goal_active else 0.0)
         info["goal_reset_resamples"] = int(goal_reset_resamples)
         info["goal_reset_rejected"] = float(1.0 if goal_reset_rejected else 0.0)
@@ -787,7 +818,7 @@ class StageGoalEnv(gym.Wrapper):
             if op_stock_lost > 0.0:
                 self._combo_chain_hits = 0
 
-            success = bool(curr_error < self.stage_spec.success_threshold)
+            success = bool(curr_error < self._success_threshold())
             if success and self.stage_spec.require_attack_for_success:
                 commit_threshold = float(np.clip(self.stage_spec.attack_commit_threshold, 0.0, 1.0))
                 success = bool(attack_input != 0 and in_range > commit_threshold)
@@ -864,7 +895,7 @@ class StageGoalEnv(gym.Wrapper):
             terminated_by_hit_event = True
 
         # Velocity damping: penalise speed when close to target
-        if self._goal_active and self.stage_spec.velocity_penalty_scale > 0.0 and curr_error < self.stage_spec.velocity_penalty_radius * self.stage_spec.success_threshold:
+        if self._goal_active and self.stage_spec.velocity_penalty_scale > 0.0 and curr_error < self.stage_spec.velocity_penalty_radius * self._success_threshold():
             speed = float(np.hypot(StateSpec.get(obs, "player_vx"), StateSpec.get(obs, "player_vy")))
             reward -= self.stage_spec.velocity_penalty_scale * speed
 
@@ -936,7 +967,7 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_target"] = self._active_goal_target.copy()
         info["goal_target_world"] = self._goal_target.copy()
         info["goal_mask"] = self._active_mask.copy()
-        info["goal_success_threshold"] = float(self.stage_spec.success_threshold)
+        info["goal_success_threshold"] = self._success_threshold()
         info["goal_error"] = float(curr_error)
         info["goal_progress"] = float(goal_progress)
         info["goal_success"] = float(1.0 if success else 0.0)
@@ -2084,7 +2115,15 @@ class PeriodicEvalCallback(BaseCallback):
                 if improved:
                     self.best_mean_reward = mean_reward
                     if self.best_model_path is not None:
-                        self.model.save(str(self.best_model_path))
+                        save_typed_checkpoint(
+                            self.model,
+                            self.best_model_path,
+                            metadata_for_skill_model(
+                                self.model,
+                                phase=self.current_phase,
+                                training_stage="skill_pretraining_best_eval",
+                            ),
+                        )
 
                 if self._eval_writer is not None:
                     self._eval_writer.writerow(
@@ -2316,12 +2355,24 @@ def train_stage_model(
             )
     callbacks = CallbackList(callbacks_list)
 
+    def _save_skill_checkpoint() -> None:
+        save_typed_checkpoint(
+            model,
+            final_model,
+            metadata_for_skill_model(
+                model,
+                phase=str(getattr(args, "phase", stage_spec.name if stage_spec else "unknown")),
+                training_stage="skill_pretraining_ppo",
+                initialized_from=str(args.resume) if args.resume else None,
+            ),
+        )
+
     interrupted = False
     try:
         model.learn(total_timesteps=args.timesteps, progress_bar=True, callback=callbacks)
     except KeyboardInterrupt:
         interrupted = True
-        model.save(str(final_model))
+        _save_skill_checkpoint()
         print(f"[{args.model_name}] Interrupted checkpoint saved: {final_model}")
     finally:
         try:
@@ -2329,7 +2380,7 @@ def train_stage_model(
         except Exception:
             pass
 
-    model.save(str(final_model))
+    _save_skill_checkpoint()
     print(f"[{args.model_name}] Saved model to {final_model}")
     if interrupted:
         print(f"[{args.model_name}] Final model also saved after interruption.")
@@ -2405,6 +2456,13 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
 
     if args.resume:
         print(f"[{args.model_name}] Resuming PPO from {args.resume}")
+        if metadata_path(args.resume).exists():
+            require_checkpoint_role(args.resume, GOAL_CONDITIONED_SKILL)
+        else:
+            print(
+                f"[{args.model_name}] WARNING: legacy untyped skill checkpoint {args.resume}; "
+                "the FiLM observation contract will be verified while loading."
+            )
         try:
             model = AnchoredReplayPPO.load(
                 args.resume,

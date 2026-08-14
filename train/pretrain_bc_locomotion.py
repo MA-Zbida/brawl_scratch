@@ -37,6 +37,7 @@ from action_space import ACTION_DIM
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goals import extract_goal_features
 from train.curriculum_config import PHASES, build_phase_spec
+from train.checkpoint_roles import metadata_for_skill_model, save_typed_checkpoint
 from train.llc_stage_common import StageGoalEnv
 
 
@@ -534,12 +535,21 @@ def main() -> None:
 
     out_model = Path(output_path)
     out_model.parent.mkdir(parents=True, exist_ok=True)
-    model.save(str(out_model))
+    archive = save_typed_checkpoint(
+        model,
+        out_model,
+        metadata_for_skill_model(
+            model,
+            phase=resolved_phase,
+            training_stage="skill_pretraining_bc",
+            initialized_from=resume_path or None,
+        ),
+    )
 
     print("Saved BC-initialized PPO checkpoint")
-    print(f"  model: {out_model}")
+    print(f"  model: {archive}")
     print("Fine-tune with:")
-    print(f"  python -m train.train_curriculum --phase {resolved_phase} --resume {out_model}")
+    print(f"  python -m train.train_curriculum --phase {resolved_phase} --resume {archive}")
 
 
 if __name__ == "__main__":

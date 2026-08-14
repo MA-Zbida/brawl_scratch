@@ -1,4 +1,8 @@
-"""Low-Level Controller (LLC) wrapper for structured goal-conditioned training.
+"""Legacy wrapper for structured goal-conditioned skill pretraining.
+
+Current curriculum training uses ``train.llc_stage_common.StageGoalEnv``. This
+class remains importable for older experiments and is not controlled by a
+runtime planner.
 
 Observation layout:
     [base_state, goal_target(k), goal_mask(k)]

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
-from tools.print_llc_phase_commands import commands_for_phase
+from tools.print_llc_phase_commands import commands_for_phase, main
 
 
 def _args(**overrides) -> argparse.Namespace:
@@ -19,6 +20,18 @@ def _args(**overrides) -> argparse.Namespace:
     }
     data.update(overrides)
     return argparse.Namespace(**data)
+
+
+def test_printed_policy_device_defaults_to_cpu(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["print_llc_phase_commands", "--phase", "movement_fluency"],
+    )
+
+    main()
+
+    assert '$device = "cpu"' in capsys.readouterr().out
 
 
 def test_middle_phase_commands_include_previous_resume_and_demo_chain() -> None:

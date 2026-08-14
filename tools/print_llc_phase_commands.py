@@ -243,7 +243,7 @@ def main() -> None:
     args = parse_args()
     command_args = argparse.Namespace(**vars(args))
     phases = list(PHASE_ORDER) if args.phase == "all" else [str(args.phase).strip().lower()]
-    print("$device = \"cuda\"  # or \"cpu\"")
+    print('$device = "cpu"  # MLP policy; TensorRT detection remains on CUDA')
     best_literal = str(args.best_scores).strip()
     if best_literal.startswith("$"):
         print(f"# {best_literal} is expected to be set already")

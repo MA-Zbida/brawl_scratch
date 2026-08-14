@@ -15,7 +15,12 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormali
 
 from algo.anchored_replay_ppo import AnchoredReplayPPO
 from env import BrawlDeepEnv, EnvConfig
-from action_space import ACTION_DIM, Action, components as action_components
+from action_space import (
+    ACTION_DIM,
+    Action,
+    components as action_components,
+    sanitize as sanitize_action,
+)
 from feature_extractor.memory.canonicalize import mirror_goal_target
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goals import GOAL_FEATURE_NAMES, GOAL_STATE_SPEC_NAMES, GOAL_TARGET_DIM, extract_goal_features
@@ -112,6 +117,9 @@ class StageSpec:
     disable_dodge: bool = False
     disable_jump: bool = False
     reset_perturb_steps: int = 0
+    # Retry random targets that are already inside the success radius. Eight
+    # draws makes accidental one-step episodes rare without an unbounded reset.
+    reset_goal_resample_attempts: int = 8
     step_penalty: float = 0.0  # constant per-step penalty to discourage time wastage
     reward_from_goal_progress: bool = False
     player_has_weapon_bonus: float = 0.0
@@ -295,7 +303,10 @@ class StageGoalEnv(gym.Wrapper):
         updated_info["goal_type_index"] = int(self.goal_type_index)
         updated_info["goal_type_onehot"] = self._goal_type_onehot.copy()
         updated_info["goal_target"] = self._active_goal_target.copy()
+        updated_info["goal_target_world"] = self._goal_target.copy()
         updated_info["goal_mask"] = self._active_mask.copy()
+        updated_info["stage_feature_names"] = list(self.feature_names)
+        updated_info["goal_success_threshold"] = float(self.stage_spec.success_threshold)
         updated_info["goal_active"] = float(1.0 if self._goal_active else 0.0)
         return self._augment(base_obs), updated_info
 
@@ -413,6 +424,71 @@ class StageGoalEnv(gym.Wrapper):
         self._maybe_update_player_xy_goal(obs)
         self._active_mask = self._effective_mask_for_step(feats)
 
+    def _activate_unsatisfied_goal(
+        self,
+        obs: np.ndarray,
+        feats: np.ndarray,
+        *,
+        mirrored: bool,
+        sequence_step: Optional[int] = None,
+    ) -> tuple[bool, int]:
+        """Activate a target only when the current state is outside its goal.
+
+        A reset that begins inside the success radius produces a one-transition
+        episode with no learning signal. If every bounded draw is trivial, the
+        goal remains inactive and later states may retry activation safely.
+        """
+        attempts = max(1, int(self.stage_spec.reset_goal_resample_attempts))
+        rejected = 0
+        for _ in range(attempts):
+            self._activate_goal(obs, feats, sequence_step=sequence_step)
+            self._sync_goal_frame(mirrored)
+            error = self._goal_error_from_feats(
+                feats,
+                self._active_goal_target,
+                mask=self._active_mask,
+            )
+            if error >= float(self.stage_spec.success_threshold):
+                return True, rejected
+            rejected += 1
+
+        self._goal_active = False
+        return False, rejected
+
+    def set_goal_target(
+        self,
+        obs: np.ndarray,
+        info: dict,
+        target: np.ndarray,
+    ) -> tuple[np.ndarray, dict]:
+        """Install an explicit world-frame target for reproducible evaluation."""
+        base_obs = np.asarray(obs, dtype=np.float32).reshape(-1)[: self._base_dim].copy()
+        goal_target = np.asarray(target, dtype=np.float32).reshape(-1)
+        if goal_target.shape[0] != self.goal_dim:
+            raise ValueError(
+                f"Fixed goal has dim={goal_target.shape[0]}, expected {self.goal_dim}"
+            )
+        if not np.all(np.isfinite(goal_target)):
+            raise ValueError("Fixed goal contains non-finite values")
+
+        feats = self._extract(base_obs)
+        self._goal_target = np.clip(goal_target, 0.0, 1.0).astype(np.float32, copy=True)
+        self._sampled_mask = self.mask.copy()
+        self._maybe_update_player_xy_goal(base_obs)
+        self._active_mask = self._effective_mask_for_step(feats)
+        self._goal_active = True
+        self._sync_goal_frame(bool(float(info.get("canon_mirrored", 0.0)) > 0.5))
+        self._prev_error = None
+
+        updated_info = dict(info)
+        updated_info["goal_target"] = self._active_goal_target.copy()
+        updated_info["goal_target_world"] = self._goal_target.copy()
+        updated_info["goal_mask"] = self._active_mask.copy()
+        updated_info["stage_feature_names"] = list(self.feature_names)
+        updated_info["goal_success_threshold"] = float(self.stage_spec.success_threshold)
+        updated_info["goal_active"] = 1.0
+        return self._augment(base_obs), updated_info
+
     def _player_is_controllable(self, info: Optional[dict] = None) -> bool:
         """Returns whether the player can currently execute actions."""
         info = info or {}
@@ -464,10 +540,13 @@ class StageGoalEnv(gym.Wrapper):
         if self.stage_spec.reset_perturb_steps <= 0:
             return obs, info
 
-        direction = 0 if np.random.rand() < 0.5 else 1
+        move_toward = bool(np.random.rand() < 0.5)
         for _ in range(self.stage_spec.reset_perturb_steps):
-            jump = 1 if np.random.rand() < 0.35 else 0
-            action = np.array([direction, jump, 0, 0], dtype=np.int64)
+            jump = bool(np.random.rand() < 0.35)
+            if jump:
+                action = int(Action.JUMP_TOWARD if move_toward else Action.JUMP_AWAY)
+            else:
+                action = int(Action.MOVE_TOWARD if move_toward else Action.MOVE_AWAY)
             obs, _, terminated, truncated, info = self.env.step(action)
             if terminated or truncated:
                 obs, info = self.env.reset()
@@ -485,16 +564,29 @@ class StageGoalEnv(gym.Wrapper):
         self._step_count = 0
         self._seq_phase = 1
         self._seq_step1_completed = False
+        mirrored = bool(float(info.get("canon_mirrored", 0.0)) > 0.5)
+        goal_reset_resamples = 0
+        goal_reset_rejected = False
         if self.stage_spec.sample_goal_only_when_player_exists and not self._player_is_controllable(info):
             self._goal_target.fill(0.0)
             self._goal_active = False
             self._active_mask = self.mask.copy()
         else:
             if self._sequential_enabled():
-                self._activate_goal(obs, init_feats, sequence_step=1)
+                goal_activated, goal_reset_resamples = self._activate_unsatisfied_goal(
+                    obs,
+                    init_feats,
+                    mirrored=mirrored,
+                    sequence_step=1,
+                )
             else:
-                self._activate_goal(obs, init_feats)
-        self._sync_goal_frame(bool(float(info.get('canon_mirrored', 0.0)) > 0.5))
+                goal_activated, goal_reset_resamples = self._activate_unsatisfied_goal(
+                    obs,
+                    init_feats,
+                    mirrored=mirrored,
+                )
+            goal_reset_rejected = not goal_activated
+        self._sync_goal_frame(mirrored)
         self._prev_has_weapon = self._feature_value(init_feats, "player_has_weapon", 0.0) > 0.5
         self._prev_in_range = float(np.clip(self._feature_value(init_feats, "in_strike_range", 0.0), 0.0, 1.0))
         self._combo_chain_hits = 0
@@ -506,8 +598,13 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_type_index"] = int(self.goal_type_index)
         info["goal_type_onehot"] = self._goal_type_onehot.copy()
         info["goal_target"] = self._active_goal_target.copy()
+        info["goal_target_world"] = self._goal_target.copy()
         info["goal_mask"] = self._active_mask.copy()
+        info["stage_feature_names"] = list(self.feature_names)
+        info["goal_success_threshold"] = float(self.stage_spec.success_threshold)
         info["goal_active"] = float(1.0 if self._goal_active else 0.0)
+        info["goal_reset_resamples"] = int(goal_reset_resamples)
+        info["goal_reset_rejected"] = float(1.0 if goal_reset_rejected else 0.0)
         return self._augment(obs), info
 
     def step(self, action: Sequence[int]):
@@ -554,6 +651,7 @@ class StageGoalEnv(gym.Wrapper):
         seq_failure_penalty = 0.0
 
         goal_new_sampled = False
+        goal_activation_rejections = 0
         goal_resampled_after_reward = False
         resample_goal_after_reward = False
         resample_goal_sequence_step: Optional[int] = None
@@ -562,11 +660,19 @@ class StageGoalEnv(gym.Wrapper):
         if player_controllable:
             if not self._goal_active:
                 if seq_enabled:
-                    self._activate_goal(obs, curr_feats, sequence_step=1)
+                    goal_activated, goal_activation_rejections = self._activate_unsatisfied_goal(
+                        obs,
+                        curr_feats,
+                        mirrored=bool(float(info.get("canon_mirrored", 0.0)) > 0.5),
+                        sequence_step=1,
+                    )
                 else:
-                    self._activate_goal(obs, curr_feats)
-                self._sync_goal_frame(bool(float(info.get('canon_mirrored', 0.0)) > 0.5))
-                goal_new_sampled = True
+                    goal_activated, goal_activation_rejections = self._activate_unsatisfied_goal(
+                        obs,
+                        curr_feats,
+                        mirrored=bool(float(info.get("canon_mirrored", 0.0)) > 0.5),
+                    )
+                goal_new_sampled = bool(goal_activated)
         # When player is not controllable (YOLO miss / respawning), keep the
         # existing goal active.  The goal is NEVER resampled mid-episode.
         curr_has_weapon = self._feature_value(curr_feats, "player_has_weapon", 0.0) > 0.5
@@ -828,13 +934,16 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_type_index"] = int(self.goal_type_index)
         info["goal_type_onehot"] = self._goal_type_onehot.copy()
         info["goal_target"] = self._active_goal_target.copy()
+        info["goal_target_world"] = self._goal_target.copy()
         info["goal_mask"] = self._active_mask.copy()
+        info["goal_success_threshold"] = float(self.stage_spec.success_threshold)
         info["goal_error"] = float(curr_error)
         info["goal_progress"] = float(goal_progress)
         info["goal_success"] = float(1.0 if success else 0.0)
         info["llc_reward"] = float(reward)
         info["stage_feature_names"] = list(self.feature_names)
         info["goal_new_sampled"] = goal_new_sampled
+        info["goal_activation_rejections"] = int(goal_activation_rejections)
         info["goal_active"] = float(1.0 if self._goal_active else 0.0)
         info["raw_goal_feats"] = curr_feats  # already computed above - no second call
         info["active_goal_feature_errors"] = (
@@ -977,7 +1086,7 @@ class StageDashboardCallback(BaseCallback):
         self._cur_ep_op_delta_sum = 0.0
         self._cur_ep_self_delta_sum = 0.0
         self._cur_ep_time_to_success: Optional[int] = None
-        self._cur_ep_action_counts = np.zeros((4, 4), dtype=np.int64)
+        self._cur_ep_action_counts = np.zeros((ACTION_DIM,), dtype=np.int64)
         self._cur_ep_idle_steps = 0
         self._cur_ep_attack_steps = 0
         self._cur_ep_hit_steps = 0
@@ -1250,10 +1359,11 @@ class StageDashboardCallback(BaseCallback):
             self_delta = float(info.get("self_delta_damage", 0.0))
             damage_trade = float(op_delta - self_delta)
             # `stage_action` is a single index into the 27-action space now.
-            comp = action_components(int(info.get("stage_action", int(Action.NOOP))))
+            action_id = sanitize_action(info.get("stage_action", int(Action.NOOP)))
+            comp = action_components(action_id)
             movement, jump, dodge = comp.hdir, comp.jump, comp.dodge
             attack = int(comp.light or comp.heavy)
-            idle = 1.0 if int(info.get("stage_action", 0)) == int(Action.NOOP) else 0.0
+            idle = 1.0 if action_id == int(Action.NOOP) else 0.0
             hit = 1.0 if op_delta > 1e-6 else 0.0
             whiff = 1.0 if attack != 0 and hit <= 0.0 else 0.0
             death_event = float(info.get("death_event", 0.0))
@@ -1322,10 +1432,7 @@ class StageDashboardCallback(BaseCallback):
                     self._cur_ep_time_to_success = self._cur_ep_len
             self._cur_ep_op_delta_sum += op_delta
             self._cur_ep_self_delta_sum += self_delta
-            self._cur_ep_action_counts[0, int(np.clip(movement, 0, 3))] += 1
-            self._cur_ep_action_counts[1, int(np.clip(jump, 0, 3))] += 1
-            self._cur_ep_action_counts[2, int(np.clip(dodge, 0, 3))] += 1
-            self._cur_ep_action_counts[3, int(np.clip(attack, 0, 3))] += 1
+            self._cur_ep_action_counts[action_id] += 1
             self._cur_ep_idle_steps += int(idle > 0.5)
             self._cur_ep_attack_steps += int(attack != 0)
             self._cur_ep_hit_steps += int(hit > 0.5)
@@ -1515,7 +1622,7 @@ class DiagnosticCallback(BaseCallback):
         self._report_every = max(1, report_every)
         self._rewards: list[float] = []
         self._errors: list[float] = []
-        self._actions: list[np.ndarray] = []
+        self._actions: list[int] = []
         self._successes: list[float] = []
 
     def _on_step(self) -> bool:
@@ -1528,22 +1635,30 @@ class DiagnosticCallback(BaseCallback):
             self._errors.append(float(info.get("goal_error", 0.0)))
             self._successes.append(float(info.get("goal_success", 0.0)))
             if actions is not None and i < len(actions):
-                self._actions.append(np.asarray(actions[i]))
+                self._actions.append(sanitize_action(actions[i]))
 
         if self.num_timesteps % self._report_every == 0 and len(self._rewards) > 0:
             r = np.asarray(self._rewards[-self._report_every:], dtype=np.float32)
             e = np.asarray(self._errors[-self._report_every:], dtype=np.float32)
             s = np.asarray(self._successes[-self._report_every:], dtype=np.float32)
 
-            # Action distribution (movement axis = index 0)
+            # Canonical horizontal intent is derived from the categorical action;
+            # indexing a retired movement channel crashes for Discrete(27).
             act_str = ""
             if len(self._actions) >= self._report_every:
-                recent_acts = np.stack(self._actions[-self._report_every:])
-                move_counts = np.bincount(recent_acts[:, 0].astype(int), minlength=4)
-                move_pct = 100.0 * move_counts / max(1, move_counts.sum())
+                recent_actions = self._actions[-self._report_every:]
+                hdirs = np.asarray(
+                    [action_components(action).hdir for action in recent_actions],
+                    dtype=np.int8,
+                )
+                n_actions = max(1, len(recent_actions))
+                toward_pct = 100.0 * float(np.count_nonzero(hdirs > 0)) / n_actions
+                away_pct = 100.0 * float(np.count_nonzero(hdirs < 0)) / n_actions
+                neutral_pct = 100.0 * float(np.count_nonzero(hdirs == 0)) / n_actions
+                noop_pct = 100.0 * float(recent_actions.count(int(Action.NOOP))) / n_actions
                 act_str = (
-                    f"move=[L:{move_pct[0]:.0f}% R:{move_pct[1]:.0f}% "
-                    f"D:{move_pct[2]:.0f}% idle:{move_pct[3]:.0f}%]"
+                    f"hdir=[toward:{toward_pct:.0f}% away:{away_pct:.0f}% "
+                    f"neutral:{neutral_pct:.0f}%] noop:{noop_pct:.0f}%"
                 )
 
             # VecNormalize stats
@@ -1573,7 +1688,10 @@ class DiagnosticCallback(BaseCallback):
                 f"{act_str} | {norm_str}"
             )
 
-            # Sample one raw obs from the current step
+            # Sample one raw obs from the current step. Goal diagnostics come
+            # from info instead of fixed observation slices: the base width grows
+            # when history is stacked, and terminal info can accompany an
+            # auto-reset ``new_obs`` from the next episode.
             new_obs = self.locals.get("new_obs")
             if new_obs is not None:
                 if isinstance(new_obs, dict):
@@ -1587,15 +1705,45 @@ class DiagnosticCallback(BaseCallback):
                     )
                 elif len(new_obs) > 0:
                     obs0 = new_obs[0]
-                    base = StateSpec.dim()
-                    g = GOAL_TARGET_DIM
-                    if len(infos) > 0 and isinstance(infos[0].get("goal_target"), np.ndarray):
-                        g = int(np.asarray(infos[0].get("goal_target"), dtype=np.float32).shape[0])
+                    print(f"  raw_obs[0:6]={obs0[:6].round(3)}")
+
+            if len(infos) > 0:
+                latest_info = infos[0]
+                target = np.asarray(latest_info.get("goal_target", []), dtype=np.float32).reshape(-1)
+                world_target = np.asarray(
+                    latest_info.get("goal_target_world", target),
+                    dtype=np.float32,
+                ).reshape(-1)
+                mask = np.asarray(latest_info.get("goal_mask", []), dtype=np.float32).reshape(-1)
+                feats = np.asarray(latest_info.get("raw_goal_feats", []), dtype=np.float32).reshape(-1)
+                names = list(latest_info.get("stage_feature_names", []))
+
+                def format_array(values: np.ndarray) -> str:
+                    flat = np.asarray(values, dtype=np.float32).reshape(-1)
+                    return "[" + " ".join(f"{float(value):.3f}" for value in flat) + "]"
+
+                if target.size > 0:
                     print(
-                        f"  raw_obs[0:6]={obs0[:6].round(3)} "
-                        f"goal_target={obs0[base:base+g].round(3)} "
-                        f"mask={obs0[base+g:base+2*g].round(3)}"
+                        f"  goal_target={format_array(target)} "
+                        f"mask={format_array(mask)}"
                     )
+                if "player_x" in names and "player_y" in names:
+                    x_idx = names.index("player_x")
+                    y_idx = names.index("player_y")
+                    if max(x_idx, y_idx) < min(target.size, world_target.size, feats.size):
+                        player_xy = feats[[x_idx, y_idx]]
+                        target_xy = target[[x_idx, y_idx]]
+                        cursor_xy = world_target[[x_idx, y_idx]]
+                        threshold = float(latest_info.get("goal_success_threshold", 0.0))
+                        mirrored = int(float(latest_info.get("canon_mirrored", 0.0)) > 0.5)
+                        in_step_resample = int(bool(latest_info.get("goal_new_sampled", False)))
+                        print(
+                            f"  player_xy={format_array(player_xy)} "
+                            f"target_xy={format_array(target_xy)} "
+                            f"cursor_xy={format_array(cursor_xy)} "
+                            f"threshold={threshold:.3f} mirrored={mirrored} "
+                            f"in_step_resample={in_step_resample}"
+                        )
 
         return True
 

@@ -65,6 +65,19 @@ def test_anchor_snapshot_pool_is_bounded_and_sampleable() -> None:
     assert th.isfinite(loss)
 
 
+def test_discrete_replay_survives_second_ppo_update() -> None:
+    """Replay must preserve SB3's ``[batch, 1]`` Discrete action shape."""
+    model = _make_model()
+
+    # The first update fills replay; the second is the first one that mixes it
+    # with live rollout actions and reproduces the real training crash.
+    model.learn(total_timesteps=16)
+
+    assert model._replay_store.size == 16
+    assert model._replay_store.actions is not None
+    assert model._replay_store.actions.shape == (16, 1)
+
+
 @pytest.mark.skipif(not th.cuda.is_available(), reason="needs a second device to mismatch")
 def test_anchor_kl_loss_survives_observations_from_another_device() -> None:
     """The KL term must not crash when caller and policy disagree on device.

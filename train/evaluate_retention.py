@@ -64,6 +64,7 @@ def make_env(args: argparse.Namespace, phase: str) -> Any:
     from env import BrawlDeepEnv, EnvConfig
     from train.curriculum_config import build_phase_spec
     from train.llc_stage_common import StageGoalEnv
+    from train.train_curriculum import GoalMouseTrackerWrapper
 
     config = EnvConfig(
         terminate_on_stock_out=True,
@@ -82,7 +83,9 @@ def make_env(args: argparse.Namespace, phase: str) -> Any:
     )
     spec.terminate_on_death = False
     spec.terminate_on_hit_event = False
-    return StageGoalEnv(base, spec)
+    # Evaluation must display the same physical target as training; otherwise a
+    # mirrored canonical goal makes live inspection look like a policy failure.
+    return GoalMouseTrackerWrapper(StageGoalEnv(base, spec))
 
 
 def _to_env_action(env: Any, action: Any) -> Any:

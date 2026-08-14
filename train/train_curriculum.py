@@ -29,6 +29,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env import BrawlDeepEnv, EnvConfig
+from feature_extractor.memory.canonicalize import mirror_goal_target
 from train.curriculum_config import PHASES, build_phase_spec
 from train.llc_stage_common import StageGoalEnv, train_stage_model
 from train.train_config import parse_args, TrainConfig
@@ -61,14 +62,23 @@ class GoalMouseTrackerWrapper(gym.Wrapper):
         return int(self._user32.GetSystemMetrics(0)), int(self._user32.GetSystemMetrics(1))
 
     def _goal_xy_from_info(self, info) -> np.ndarray | None:
-        goal_target = None if info is None else info.get("goal_target")
-        if goal_target is None:
+        policy_target = None if info is None else info.get("goal_target")
+        if policy_target is None:
             return None
-        goal_target = np.asarray(goal_target, dtype=np.float32).reshape(-1)
+        policy_target = np.asarray(policy_target, dtype=np.float32).reshape(-1)
+        goal_target = np.asarray(
+            info.get("goal_target_world", policy_target),
+            dtype=np.float32,
+        ).reshape(-1)
         if goal_target.shape[0] < 2:
             return None
         names = list(info.get("stage_feature_names", [])) if isinstance(info, dict) else []
         mask = np.asarray(info.get("goal_mask", np.zeros_like(goal_target)), dtype=np.float32).reshape(-1) if isinstance(info, dict) else np.zeros_like(goal_target)
+        if "goal_target_world" not in info and float(info.get("canon_mirrored", 0.0)) > 0.5:
+            # The policy target lives in the canonical frame, while SetCursorPos
+            # addresses the physical display. Mirroring is its own inverse and
+            # reflects about the calibrated stage centre, not screen centre.
+            goal_target = mirror_goal_target(policy_target, names)
         if "player_x" in names and "player_y" in names:
             x_idx = names.index("player_x")
             y_idx = names.index("player_y")
@@ -93,6 +103,15 @@ class GoalMouseTrackerWrapper(gym.Wrapper):
         obs, info = self.env.reset(seed=seed, options=options)
         self._set_cursor_to_goal(info)
         return obs, info
+
+    def set_goal_target(self, obs, info, target):
+        """Forward a diagnostic target and keep the visible cursor in sync."""
+        updated_obs, updated_info = self.env.set_goal_target(obs, info, target)
+        self._set_cursor_to_goal(updated_info)
+        return updated_obs, updated_info
+
+    def goal_error(self, obs, info) -> float:
+        return float(self.env.goal_error(obs, info))
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)

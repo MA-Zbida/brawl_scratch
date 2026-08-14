@@ -13,6 +13,7 @@ promoted as "mastered" from this 4,096-step pilot.
 - Interpreter: `C:\venvs\brawl312\Scripts\python.exe`
 - Output directory: `train/models/easy_bot_v0`
 - Phase order: movement -> weapon -> spacing -> combat -> recovery -> consolidation
+- Compute split: MLP policy and optimizer on CPU; TensorRT detection remains on CUDA
 - Perception: YOLO every step; weapon classifier integration remains off
 - PPO: 4,096 steps per active phase, `n_steps=512`, `batch_size=256`
 - Evaluation: two sequential skill episodes after each PPO phase
@@ -71,7 +72,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
   --save-dir train\models\easy_bot_v0 `
   --model-name llc_movement_fluency `
   --seed 42 `
-  --device cuda `
+  --device cpu `
   --log-csv `
   --plot-every 0 `
   --diag-report-every 512 `
@@ -90,7 +91,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.evaluate_retention `
   --best-scores train\models\easy_bot_v0\retention_best.json `
   --csv train\models\easy_bot_v0\llc_movement_fluency_retention_eval.csv `
   --seed 42 `
-  --device cuda
+  --device cpu
 ```
 
 Continue only if the checkpoint and both CSV logs exist, training/evaluation
@@ -113,7 +114,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.pretrain_bc_locomotion `
   --entropy-coef 0.001 `
   --goal-relabel `
   --output train\models\easy_bot_v0\llc_weapon_acquisition_bc_init.zip `
-  --device cuda
+  --device cpu
 
 C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
   --phase weapon_acquisition `
@@ -126,7 +127,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
   --save-dir train\models\easy_bot_v0 `
   --model-name llc_weapon_acquisition `
   --seed 42 `
-  --device cuda `
+  --device cpu `
   --log-csv `
   --plot-every 0 `
   --diag-report-every 512 `
@@ -141,7 +142,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.evaluate_retention `
   --best-scores train\models\easy_bot_v0\retention_best.json `
   --csv train\models\easy_bot_v0\llc_weapon_acquisition_retention_eval.csv `
   --seed 42 `
-  --device cuda
+  --device cpu
 ```
 
 Apply the same integration gate as movement. Evaluation is sequential and
@@ -161,7 +162,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.pretrain_bc_locomotion `
   --entropy-coef 0.001 `
   --goal-relabel `
   --output train\models\easy_bot_v0\llc_spacing_neutral_bc_init.zip `
-  --device cuda
+  --device cpu
 
 C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
   --phase spacing_neutral `
@@ -174,7 +175,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
   --save-dir train\models\easy_bot_v0 `
   --model-name llc_spacing_neutral `
   --seed 42 `
-  --device cuda `
+  --device cpu `
   --log-csv `
   --plot-every 0 `
   --diag-report-every 512 `
@@ -189,7 +190,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.evaluate_retention `
   --best-scores train\models\easy_bot_v0\retention_best.json `
   --csv train\models\easy_bot_v0\llc_spacing_neutral_retention_eval.csv `
   --seed 42 `
-  --device cuda
+  --device cpu
 ```
 
 ## Gate 5 - combat handoff
@@ -205,7 +206,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.pretrain_bc_locomotion `
   --entropy-coef 0.001 `
   --goal-relabel `
   --output train\models\easy_bot_v0\llc_combat_execution_bc_init.zip `
-  --device cuda
+  --device cpu
 
 C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
   --phase combat_execution `
@@ -218,7 +219,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
   --save-dir train\models\easy_bot_v0 `
   --model-name llc_combat_execution `
   --seed 42 `
-  --device cuda `
+  --device cpu `
   --log-csv `
   --plot-every 0 `
   --diag-report-every 512 `
@@ -233,7 +234,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.evaluate_retention `
   --best-scores train\models\easy_bot_v0\retention_best.json `
   --csv train\models\easy_bot_v0\llc_combat_execution_retention_eval.csv `
   --seed 42 `
-  --device cuda
+  --device cpu
 ```
 
 ## Gate 6 - first Easy-bot match
@@ -254,3 +255,64 @@ After that contract is tested, run 3 one-stock smoke matches, then 10 diagnostic
 matches. Only a stable harness may run the 30-match promotion gate in
 `config.json`. Recovery is revisited only after this first gameplay evidence shows
 it is the limiting failure mode.
+
+## Attempt ledger
+
+- Movement attempt 1 stopped before its first PPO update at the 512-step
+  diagnostic boundary. A legacy multidiscrete diagnostic indexed a scalar
+  `Discrete(27)` action. No model checkpoint was produced; the two CSVs are
+  preserved with `failed_step512` in their names. The callback, categorical
+  entropy counter, and dormant reset perturbation were migrated together, and
+  the rerun starts again from the frozen movement BC initializer on CPU.
+
+- Movement attempt 2 reached 1,024 environment steps after one complete
+  512-step rollout optimization cycle. The next optimization cycle stopped
+  before its first optimizer minibatch when anchored replay tried to concatenate
+  live `Discrete(27)` actions shaped `[N, 1]` with replay actions shaped `[N]`.
+  No model checkpoint was produced; the 1,024-row step CSV and 8-row episode CSV
+  are preserved with `failed_replay_step1024` in their names. The rerun starts
+  again from the frozen movement BC initializer on CPU after the replay
+  action-shape contract is covered by a two-update regression test.
+
+- Movement attempt 3 completed all 4,096 steps on CPU and produced a loadable
+  checkpoint plus 4,096 step rows and 55 completed-episode rows. The two-episode
+  deterministic evaluation then scored `0.060` with `0/2` successes and both
+  episodes reaching the 200-step cap. This passes the integration smoke but
+  fails the movement promotion threshold of `0.650`; no later phase may resume
+  from this checkpoint until the diagnostic below identifies the failure mode.
+
+## Movement BC/PPO diagnostic gate
+
+The first completed PPO run used replay rows inside the core PPO/value loss,
+despite the algorithm contract specifying auxiliary-only replay. That behavior
+is now blocked by regression tests. Reset-time targets already inside the goal
+radius are also resampled; an exhausted target remains inactive instead of
+creating a fake one-step success.
+
+Run the five-target grounded/airborne route once for each checkpoint and policy
+mode. The route is target-paired, but Training Mode cannot restore an exact
+physical starting frame, so each row records start error and excludes trivial
+starts from its score.
+
+```powershell
+C:\venvs\brawl312\Scripts\python.exe -m train.compare_movement_checkpoints `
+  --bc-model train\models\llc_movement_fluency_bc_init.zip `
+  --ppo-model train\models\easy_bot_v0\llc_movement_fluency.zip `
+  --csv train\models\easy_bot_v0\movement_bc_ppo_diagnostic.csv `
+  --repeats 1 `
+  --max-episode-steps 200 `
+  --seed 42 `
+  --device cpu
+```
+
+Decision rules:
+
+- PPO deterministic passes `0.650`: movement may advance after a clean rerun
+  with the corrected replay/reset contracts.
+- BC deterministic beats PPO deterministic materially: PPO damaged a useful BC
+  policy; discard the PPO checkpoint and rerun from the frozen BC initializer.
+- Stochastic materially beats deterministic for the same checkpoint: the action
+  distribution contains useful behavior but its argmax policy is collapsed;
+  inspect the exact 27-action traces before choosing inference mode.
+- BC and PPO both fail, especially on airborne targets: improve the movement
+  demonstrations/target curriculum before spending a longer PPO budget.

@@ -91,12 +91,21 @@ class _TensorReplayStore:
             return
         n_envs = int(getattr(rb, "n_envs", 1))
 
-        obs = self._flatten(np.asarray(obs_raw), n_envs)
-        actions = self._flatten(np.asarray(rb.actions), n_envs)
-        values = self._flatten(np.asarray(rb.values), n_envs).reshape(-1)
-        log_probs = self._flatten(np.asarray(rb.log_probs), n_envs).reshape(-1)
-        advantages = self._flatten(np.asarray(rb.advantages), n_envs).reshape(-1)
-        returns = self._flatten(np.asarray(rb.returns), n_envs).reshape(-1)
+        # RolloutBuffer.get() mutates its arrays into transition-major form.
+        # Flattening those arrays again mistakes Discrete actions shaped [N, 1]
+        # for an unflattened [steps, envs] array and drops the action dimension.
+        already_flattened = bool(getattr(rb, "generator_ready", False))
+
+        def transition_major(value: Any) -> np.ndarray:
+            array = np.asarray(value)
+            return array if already_flattened else self._flatten(array, n_envs)
+
+        obs = transition_major(obs_raw)
+        actions = transition_major(rb.actions)
+        values = transition_major(rb.values).reshape(-1)
+        log_probs = transition_major(rb.log_probs).reshape(-1)
+        advantages = transition_major(rb.advantages).reshape(-1)
+        returns = transition_major(rb.returns).reshape(-1)
 
         n = min(obs.shape[0], actions.shape[0], values.shape[0],
                 log_probs.shape[0], advantages.shape[0], returns.shape[0])
@@ -392,24 +401,35 @@ class AnchoredReplayPPO(PPO):
         if len(self._anchor_pool) == 0:
             self._refresh_anchor_policy()
 
-    def _mix_rollout_with_replay(self, rollout_data: Any) -> tuple[_PPOSamples, float]:
+    def _prepare_training_sources(
+        self,
+        rollout_data: Any,
+    ) -> tuple[_PPOSamples, th.Tensor, float]:
+        """Split a minibatch into on-policy PPO rows and auxiliary states.
+
+        PPO importance ratios are only valid for the rollout that produced them.
+        Historical replay rows therefore contribute states to the anchor loss, but
+        never actions, returns, or advantages to the core PPO/value objective.
+        """
         on_batch = self._to_batch(rollout_data)
         total = int(on_batch.observations.shape[0])
 
         if total <= 0:
-            return on_batch, 0.0
+            return on_batch, on_batch.observations, 0.0
 
-        target_replay = int(round(total * self.replay_ratio))
+        # A very small minibatch plus a high replay ratio must still leave at
+        # least one genuinely on-policy transition for the PPO objective.
+        target_replay = min(max(0, total - 1), int(round(total * self.replay_ratio)))
         if target_replay <= 0:
             if self.normalize_advantage and self.normalize_advantage_per_source:
                 on_batch.advantages = self._normalize_advantages(on_batch.advantages)
-            return on_batch, 0.0
+            return on_batch, on_batch.observations, 0.0
 
         replay_ready = self._replay_store.size > 0 and self._train_calls > self.replay_warmup_updates
         if not replay_ready:
             if self.normalize_advantage and self.normalize_advantage_per_source:
                 on_batch.advantages = self._normalize_advantages(on_batch.advantages)
-            return on_batch, 0.0
+            return on_batch, on_batch.observations, 0.0
 
         replay_oversample = False
         if self.strict_replay_mix:
@@ -421,7 +441,7 @@ class AnchoredReplayPPO(PPO):
         if replay_count <= 0:
             if self.normalize_advantage and self.normalize_advantage_per_source:
                 on_batch.advantages = self._normalize_advantages(on_batch.advantages)
-            return on_batch, 0.0
+            return on_batch, on_batch.observations, 0.0
 
         on_count = max(0, total - replay_count)
 
@@ -443,27 +463,26 @@ class AnchoredReplayPPO(PPO):
         if replay_batch is None:
             if self.normalize_advantage and self.normalize_advantage_per_source:
                 on_batch.advantages = self._normalize_advantages(on_batch.advantages)
-            return on_batch, 0.0
-
-        replay_advantages = replay_batch.advantages
+            return on_batch, on_batch.observations, 0.0
 
         if self.normalize_advantage and self.normalize_advantage_per_source:
             if on_advantages.numel() > 1:
                 on_advantages = self._normalize_advantages(on_advantages)
-            if replay_advantages.numel() > 1:
-                replay_advantages = self._normalize_advantages(replay_advantages)
 
-        mixed = _PPOSamples(
-            observations=th.cat((on_obs, replay_batch.observations), dim=0),
-            actions=th.cat((on_actions, replay_batch.actions), dim=0),
-            old_values=th.cat((on_old_values, replay_batch.old_values), dim=0),
-            old_log_prob=th.cat((on_old_log_prob, replay_batch.old_log_prob), dim=0),
-            advantages=th.cat((on_advantages, replay_advantages), dim=0),
-            returns=th.cat((on_returns, replay_batch.returns), dim=0),
+        ppo_batch = _PPOSamples(
+            observations=on_obs,
+            actions=on_actions,
+            old_values=on_old_values,
+            old_log_prob=on_old_log_prob,
+            advantages=on_advantages,
+            returns=on_returns,
         )
+        auxiliary_observations = th.cat((on_obs, replay_batch.observations), dim=0)
 
-        effective_fraction = float(replay_batch.observations.shape[0] / max(1, mixed.observations.shape[0]))
-        return mixed, effective_fraction
+        effective_fraction = float(
+            replay_batch.observations.shape[0] / max(1, auxiliary_observations.shape[0])
+        )
+        return ppo_batch, auxiliary_observations, effective_fraction
 
     @staticmethod
     def _mean_distribution_kl(anchor_distribution: Any, current_distribution: Any) -> th.Tensor:
@@ -609,7 +628,9 @@ class AnchoredReplayPPO(PPO):
 
         for epoch in range(self.n_epochs):
             for rollout_data in self.rollout_buffer.get(self.batch_size):
-                batch, replay_fraction = self._mix_rollout_with_replay(rollout_data)
+                batch, auxiliary_observations, replay_fraction = self._prepare_training_sources(
+                    rollout_data,
+                )
                 replay_fractions.append(float(replay_fraction))
 
                 actions = batch.actions
@@ -648,7 +669,7 @@ class AnchoredReplayPPO(PPO):
 
                 core_loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
 
-                anchor_kl_loss = self._compute_anchor_kl_loss(batch.observations)
+                anchor_kl_loss = self._compute_anchor_kl_loss(auxiliary_observations)
                 bc_loss = self._compute_bc_loss()
                 aux_loss = self.anchor_kl_coef * anchor_kl_loss + self.bc_loss_coef * bc_loss
                 total_loss = core_loss + aux_loss

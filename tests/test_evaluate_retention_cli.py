@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 
-from train.evaluate_retention import parse_args
+import env as env_module
+import train.curriculum_config as curriculum_config
+import train.llc_stage_common as llc_stage_common
+import train.train_curriculum as train_curriculum
+from train.evaluate_retention import make_env, parse_args
 
 
 def test_retention_evaluator_cli_parses_without_training_stack(monkeypatch) -> None:
@@ -31,3 +36,33 @@ def test_retention_evaluator_cli_parses_without_training_stack(monkeypatch) -> N
     assert args.best_scores.endswith("llc_retention_best.json")
     assert args.csv.endswith("retention_eval.csv")
 
+
+def test_retention_environment_keeps_goal_cursor_visible(monkeypatch) -> None:
+    class FakeBaseEnv:
+        def __init__(self, *, config) -> None:
+            self.config = config
+
+    class FakeStageGoalEnv:
+        def __init__(self, env, spec) -> None:
+            self.env = env
+            self.spec = spec
+
+    class FakeGoalMouseTracker:
+        def __init__(self, env) -> None:
+            self.env = env
+
+    monkeypatch.setattr(env_module, "EnvConfig", lambda **kwargs: kwargs)
+    monkeypatch.setattr(env_module, "BrawlDeepEnv", FakeBaseEnv)
+    monkeypatch.setattr(
+        curriculum_config,
+        "build_phase_spec",
+        lambda **kwargs: SimpleNamespace(terminate_on_death=True),
+    )
+    monkeypatch.setattr(llc_stage_common, "StageGoalEnv", FakeStageGoalEnv)
+    monkeypatch.setattr(train_curriculum, "GoalMouseTrackerWrapper", FakeGoalMouseTracker)
+    args = SimpleNamespace(max_episode_steps=200, yolo_every=1, death_penalty=1.0)
+
+    wrapped = make_env(args, "movement_fluency")
+
+    assert isinstance(wrapped, FakeGoalMouseTracker)
+    assert isinstance(wrapped.env, FakeStageGoalEnv)

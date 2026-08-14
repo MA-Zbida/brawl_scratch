@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -17,6 +19,7 @@ def _is_attack(action) -> bool:
     return bool(comp.light or comp.heavy)
 
 from feature_extractor.memory.state_spec import StateSpec
+from feature_extractor.memory.canonicalize import mirror_goal_target
 from train.curriculum_config import build_phase_spec
 from train.llc_stage_common import StageGoalEnv
 
@@ -44,6 +47,7 @@ class DummyStageEnv(gym.Env):
         )
         self.action_space = gym.spaces.Discrete(ACTION_DIM)
         self.steps = 0
+        self.actions: list[int] = []
         self.memory = _DummyMemory()
 
     def _obs(self) -> np.ndarray:
@@ -68,6 +72,7 @@ class DummyStageEnv(gym.Env):
 
     def step(self, action):
         self.steps += 1
+        self.actions.append(int(np.asarray(action).reshape(-1)[0]))
         info = {
             # An attack landed iff the executed action carries a light/heavy component.
             "op_delta_damage": 1.0 if _is_attack(action) else 0.0,
@@ -76,6 +81,13 @@ class DummyStageEnv(gym.Env):
             "player_respawn_timer": 0.0,
         }
         return self._obs(), 0.0, False, self.steps >= 3, info
+
+
+class MirroredDummyStageEnv(DummyStageEnv):
+    def reset(self, *, seed=None, options=None):
+        obs, info = super().reset(seed=seed, options=options)
+        info["canon_mirrored"] = 1.0
+        return obs, info
 
 
 def test_stage_goal_env_emits_dynamic_goal_diagnostics() -> None:
@@ -95,6 +107,26 @@ def test_stage_goal_env_emits_dynamic_goal_diagnostics() -> None:
     assert info["stage_action_attack"] == 1
     assert info["stage_action_hdir"] == 1
     assert np.asarray(info["goal_mask"]).shape == np.asarray(info["goal_target"]).shape
+
+
+def test_stage_goal_env_exposes_world_goal_separately_from_policy_goal() -> None:
+    spec = build_phase_spec("movement_fluency", terminate_on_death=False)
+    world_target = np.full((len(spec.feature_names or []),), 0.5, dtype=np.float32)
+    player_x_idx = list(spec.feature_names or []).index("player_x")
+    player_y_idx = list(spec.feature_names or []).index("player_y")
+    world_target[player_x_idx] = 0.37
+    world_target[player_y_idx] = 0.61
+    spec = replace(spec, target_sampler=lambda _obs: world_target.copy())
+    env = StageGoalEnv(MirroredDummyStageEnv(), spec)
+
+    _, info = env.reset(seed=7)
+
+    assert info["stage_feature_names"] == list(spec.feature_names or [])
+    np.testing.assert_allclose(info["goal_target_world"], world_target)
+    np.testing.assert_allclose(
+        info["goal_target"],
+        mirror_goal_target(world_target, spec.feature_names or []),
+    )
 
 
 def test_stage_goal_env_reset_preserves_base_weapon_state() -> None:
@@ -121,3 +153,20 @@ def test_recovery_executes_allowed_heavy_and_rejects_other_attacks() -> None:
 
     assert allowed_info["stage_action"] == int(Action.HEAVY_TOWARD)
     assert blocked_info["stage_action"] == int(Action.NOOP)
+
+
+def test_reset_perturbation_emits_discrete_actions_and_preserves_jump(monkeypatch) -> None:
+    spec = replace(
+        build_phase_spec("movement_fluency", terminate_on_death=False),
+        reset_perturb_steps=2,
+    )
+    base = DummyStageEnv()
+    env = StageGoalEnv(base, spec)
+    draws = iter((0.8, 0.1, 0.8, 0.8))  # toward, jump, no jump, goal family
+    monkeypatch.setattr(np.random, "rand", lambda: next(draws))
+
+    env.reset()
+
+    assert len(base.actions) == 2
+    assert all(0 <= action < ACTION_DIM for action in base.actions)
+    assert any(action_components(action).jump for action in base.actions)

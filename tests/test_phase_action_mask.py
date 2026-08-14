@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import gymnasium as gym
@@ -53,6 +54,19 @@ def test_phase_profiles_expose_one_explicit_legal_action_set() -> None:
         allowed = phase_allowed_action_ids(build_phase_spec(phase))
         assert int(Action.PICKUP) not in allowed
         assert all(action < int(Action.LIGHT_NEUTRAL) for action in allowed)
+
+
+def test_explicit_allowlist_is_the_single_source_of_truth() -> None:
+    spec = replace(
+        build_phase_spec("combat_execution"),
+        allowed_actions=(int(Action.NOOP), int(Action.LIGHT_TOWARD)),
+        disable_attack=True,
+    )
+
+    assert phase_allowed_action_ids(spec) == (
+        int(Action.NOOP),
+        int(Action.LIGHT_TOWARD),
+    )
 
 
 def test_masked_policy_never_samples_or_credits_disallowed_actions() -> None:

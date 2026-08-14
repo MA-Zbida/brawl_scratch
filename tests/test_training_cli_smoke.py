@@ -50,6 +50,7 @@ def test_recovery_collection_sequence_gate_defaults_on(monkeypatch) -> None:
 
     assert args.enforce_recovery_sequence is True
     assert args.min_episode_steps == 4
+    assert args.world_replay == "", "transition recording must be explicitly enabled"
 
 
 def test_bc_pretrain_cli_accepts_current_phase_names(monkeypatch) -> None:

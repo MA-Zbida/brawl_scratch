@@ -173,9 +173,14 @@ def evaluate_phase(model: Any, args: argparse.Namespace, phase: str) -> dict[str
                 movement, jump, dodge = comp.hdir, comp.jump, comp.dodge
                 attack = int(comp.light or comp.heavy)
                 ep_idle += int(int(info.get('stage_action', 0)) == int(Action.NOOP))
-                ep_attacks += int(attack != 0)
-                ep_hits += int(op_delta > 1e-6)
-                ep_whiffs += int(attack != 0 and op_delta <= 1e-6)
+                ep_attacks += int(info.get("attack_attempt_event", attack != 0))
+                ep_hits += int(info.get("attack_hit_credited", op_delta > 1e-6))
+                ep_whiffs += int(
+                    info.get(
+                        "attack_whiff_events",
+                        attack != 0 and op_delta <= 1e-6,
+                    )
+                )
 
                 raw_feats = np.asarray(info.get("raw_goal_feats", []), dtype=np.float32).reshape(-1)
                 names = list(info.get("stage_feature_names", []))

@@ -99,7 +99,8 @@ class StageSpec:
     self_damage_penalty_scale: float = 0.0
     offstage_penalty_scale: float = 0.0
     combo_penalty_scale: float = 0.0  # penalize opponent_time_since_hit to encourage combos
-    attack_whiff_penalty_scale: float = 0.0  # penalize attack inputs that do not connect
+    attack_whiff_penalty_scale: float = 0.0  # penalty when an attack's outcome window expires
+    attack_outcome_window_steps: int = 0  # delayed hit-credit window; 0 keeps legacy same-step accounting
     attack_commit_threshold: float = 0.7
     attack_commit_bonus: float = 0.0
     no_attack_in_range_penalty: float = 0.0
@@ -109,6 +110,7 @@ class StageSpec:
     combo_chain_reset_time_since_hit: float = 0.12
     require_attack_for_success: bool = False
     require_opponent_damage_for_success: bool = False
+    require_onstage_for_success: bool = False
     opponent_damage_success_tolerance: float = 0.01
     use_l2_error: bool = False
     death_penalty: float = 0.0    # penalty applied when agent loses a stock
@@ -144,6 +146,9 @@ class StageSpec:
     anchor_player_xy_goal_when_in_strike_range: bool = False
     agent_weapon_drop_penalty: float = 0.0
     drop_weapon_key: str = "num5"
+    reset_drop_weapon_when_armed: bool = False
+    weapon_reset_max_steps: int = 30
+    weapon_reset_retry_interval: int = 8
     terminate_on_death: bool = False
     terminate_on_hit_event: bool = False
     hit_event_damage_threshold: float = 1e-6
@@ -217,6 +222,7 @@ class StageGoalEnv(gym.Wrapper):
         self._weapon_pickup_awarded: bool = False
         self._prev_in_range: float = 0.0
         self._combo_chain_hits: int = 0
+        self._pending_attack_deadlines: list[int] = []
         self._seq_phase: int = 1
         self._seq_step1_completed: bool = False
         self._allowed_actions: Optional[set[int]] = None
@@ -549,6 +555,82 @@ class StageGoalEnv(gym.Wrapper):
 
         return True
 
+    def _prepare_weapon_episode_reset(
+        self,
+        obs: np.ndarray,
+        info: dict,
+    ) -> tuple[np.ndarray, dict, int, int]:
+        """Drop a held weapon before publishing a weapon-acquisition reset.
+
+        `PICKUP` is the canonical action that maps to NUM5. These setup steps are
+        performed below StageGoalEnv, so PPO and the outer world-replay recorder
+        never mistake forced reset controls for policy transitions.
+        """
+        if not self.stage_spec.reset_drop_weapon_when_armed:
+            return obs, info, 0, 0
+        if StateSpec.get(obs, "player_has_weapon") <= 0.5:
+            return obs, info, 0, 0
+
+        max_steps = max(1, int(self.stage_spec.weapon_reset_max_steps))
+        retry_interval = max(1, int(self.stage_spec.weapon_reset_retry_interval))
+        drop_attempts = 0
+        setup_steps = 0
+        for step_index in range(max_steps):
+            action = int(Action.PICKUP) if step_index % retry_interval == 0 else int(Action.NOOP)
+            if action == int(Action.PICKUP):
+                drop_attempts += 1
+            obs, _reward, terminated, truncated, info = self.env.step(action)
+            obs = np.asarray(obs, dtype=np.float32)
+            setup_steps += 1
+            if StateSpec.get(obs, "player_has_weapon") <= 0.5:
+                # Reset only the base episode counters. The physical game state is
+                # deliberately unchanged, so the confirmed disarm survives.
+                obs, info = self.env.reset()
+                obs = np.asarray(obs, dtype=np.float32)
+                if StateSpec.get(obs, "player_has_weapon") <= 0.5:
+                    return obs, info, setup_steps, drop_attempts
+            if terminated or truncated:
+                obs, info = self.env.reset()
+                obs = np.asarray(obs, dtype=np.float32)
+
+        raise RuntimeError(
+            "Weapon reset could not confirm an unarmed player after "
+            f"{setup_steps} setup steps and {drop_attempts} NUM5 attempts. "
+            "Training stopped to avoid recording inactive armed-start episodes."
+        )
+
+    def _update_attack_outcomes(
+        self,
+        *,
+        attack_input: int,
+        opponent_damage: float,
+    ) -> tuple[int, int, int]:
+        """Match delayed damage to prior attacks and expire only true whiffs."""
+        attempted = int(attack_input != 0)
+        window = max(0, int(self.stage_spec.attack_outcome_window_steps))
+        if window <= 0:
+            credited = int(attempted and opponent_damage > 1e-6)
+            return attempted, credited, int(attempted and not credited)
+
+        if attempted:
+            self._pending_attack_deadlines.append(self._step_count + window)
+
+        credited = 0
+        if opponent_damage > 1e-6 and self._pending_attack_deadlines:
+            # One observed hit credits one pending attack. Repeated attack inputs
+            # therefore remain accountable instead of one hit forgiving a spam burst.
+            self._pending_attack_deadlines.pop(0)
+            credited = 1
+
+        whiffs = 0
+        while (
+            self._pending_attack_deadlines
+            and self._pending_attack_deadlines[0] <= self._step_count
+        ):
+            self._pending_attack_deadlines.pop(0)
+            whiffs += 1
+        return attempted, credited, whiffs
+
     def _augment(self, obs: np.ndarray) -> np.ndarray:
         # Emit [base_obs | goal_target(goal_dim) | mask(goal_dim)].
         # goal_target is already in [0, 1] (extract_goal_features space).
@@ -582,6 +664,11 @@ class StageGoalEnv(gym.Wrapper):
             obs, info = self._perturb_reset()
 
         obs = np.asarray(obs, dtype=np.float32)
+        self._pending_attack_deadlines.clear()
+        obs, info, weapon_reset_steps, weapon_reset_attempts = self._prepare_weapon_episode_reset(
+            obs,
+            info,
+        )
         init_feats = self._extract(obs)
         self._step_count = 0
         self._seq_phase = 1
@@ -635,6 +722,9 @@ class StageGoalEnv(gym.Wrapper):
         info["goal_active"] = float(1.0 if self._goal_active else 0.0)
         info["goal_reset_resamples"] = int(goal_reset_resamples)
         info["goal_reset_rejected"] = float(1.0 if goal_reset_rejected else 0.0)
+        info["weapon_reset_steps"] = int(weapon_reset_steps)
+        info["weapon_reset_drop_attempts"] = int(weapon_reset_attempts)
+        info["weapon_reset_succeeded"] = 1.0
         return self._augment(obs), info
 
     def step(self, action: Sequence[int]):
@@ -720,6 +810,14 @@ class StageGoalEnv(gym.Wrapper):
         attack_commit_bonus_applied = 0.0
         no_attack_in_range_penalty_applied = 0.0
         combo_chain_bonus = 0.0
+        attack_attempt_event = 0
+        attack_hit_credited = 0
+        attack_whiff_events = 0
+        success_blocked_offstage = False
+        # This predicate lives in the base state, not the 11-d goal feature set.
+        offstage = float(
+            np.clip(StateSpec.get(obs, "player_is_offstage"), 0.0, 1.0)
+        )
         if self._goal_active and player_controllable:
             self._maybe_update_player_xy_goal(obs)
             self._active_mask = self._effective_mask_for_step(curr_feats)
@@ -756,9 +854,16 @@ class StageGoalEnv(gym.Wrapper):
             # Explicit combat shaping (phase-configurable): chase, orient, connect, and trade favorably.
             rel_distance = float(np.clip(self._feature_value(curr_feats, "rel_distance", 1.0), 0.0, 1.0))
             in_range = float(np.clip(self._feature_value(curr_feats, "in_strike_range", 0.0), 0.0, 1.0))
-            offstage = float(np.clip(self._feature_value(curr_feats, "player_is_offstage", 0.0), 0.0, 1.0))
             mem = getattr(self.env, "memory", None)
             time_since_hit = float(np.clip(getattr(mem, "opponent_time_since_hit", 2.0) / 2.0, 0.0, 1.0))
+            (
+                attack_attempt_event,
+                attack_hit_credited,
+                attack_whiff_events,
+            ) = self._update_attack_outcomes(
+                attack_input=attack_input,
+                opponent_damage=op_delta_damage,
+            )
 
             # Stage A: immediate supervision on attack timing.
             commit_threshold = float(np.clip(self.stage_spec.attack_commit_threshold, 0.0, 1.0))
@@ -801,8 +906,10 @@ class StageGoalEnv(gym.Wrapper):
                 combo_delay_penalty = float(self.stage_spec.combo_penalty_scale * time_since_hit)
                 reward -= combo_delay_penalty
 
-            if self.stage_spec.attack_whiff_penalty_scale > 0.0 and attack_input != 0 and op_delta_damage <= 1e-6:
-                attack_whiff_penalty = float(self.stage_spec.attack_whiff_penalty_scale)
+            if self.stage_spec.attack_whiff_penalty_scale > 0.0 and attack_whiff_events > 0:
+                attack_whiff_penalty = float(
+                    self.stage_spec.attack_whiff_penalty_scale * attack_whiff_events
+                )
                 reward -= attack_whiff_penalty
 
             # Stage C: reward longer hit chains.
@@ -831,6 +938,10 @@ class StageGoalEnv(gym.Wrapper):
                     op_dmg_curr = float(curr_feats[op_dmg_idx])
                     tol = float(max(0.0, self.stage_spec.opponent_damage_success_tolerance))
                     success = bool((op_dmg_curr + tol) >= op_dmg_target)
+
+            if success and self.stage_spec.require_onstage_for_success and offstage > 0.5:
+                success = False
+                success_blocked_offstage = True
 
             if seq_enabled:
                 # Sequence guards are state predicates, not optimisation targets.
@@ -1005,6 +1116,11 @@ class StageGoalEnv(gym.Wrapper):
         info["combat_penalty_combo_delay"] = float(combo_delay_penalty)
         info["combat_penalty_attack_whiff"] = float(attack_whiff_penalty)
         info["combat_penalty_no_attack_in_range"] = float(no_attack_in_range_penalty_applied)
+        info["attack_attempt_event"] = float(attack_attempt_event)
+        info["attack_hit_credited"] = float(attack_hit_credited)
+        info["attack_whiff_events"] = int(attack_whiff_events)
+        info["goal_success_blocked_offstage"] = float(success_blocked_offstage)
+        info["player_is_offstage"] = float(offstage)
         info["sequential_goal_enabled"] = float(1.0 if seq_enabled else 0.0)
         info["sequential_phase"] = int(self._seq_phase if seq_enabled else 0)
         info["sequential_step1_completed"] = float(1.0 if self._seq_step1_completed else 0.0)
@@ -1147,6 +1263,9 @@ class StageDashboardCallback(BaseCallback):
                 "goal_error",
                 "goal_progress",
                 "goal_success",
+                "goal_active",
+                "goal_success_blocked_offstage",
+                "player_is_offstage",
                 "op_delta_damage",
                 "self_delta_damage",
                 "damage_trade",
@@ -1154,6 +1273,10 @@ class StageDashboardCallback(BaseCallback):
                 "jump",
                 "dodge",
                 "attack",
+                "action_id",
+                "attack_attempt_event",
+                "attack_hit_credited",
+                "attack_whiff_events",
                 "idle",
                 "hit",
                 "whiff",
@@ -1394,9 +1517,13 @@ class StageDashboardCallback(BaseCallback):
             comp = action_components(action_id)
             movement, jump, dodge = comp.hdir, comp.jump, comp.dodge
             attack = int(comp.light or comp.heavy)
+            attack_attempt = int(info.get("attack_attempt_event", attack != 0))
             idle = 1.0 if action_id == int(Action.NOOP) else 0.0
             hit = 1.0 if op_delta > 1e-6 else 0.0
-            whiff = 1.0 if attack != 0 and hit <= 0.0 else 0.0
+            credited_hit = int(info.get("attack_hit_credited", hit > 0.0))
+            whiff = float(
+                info.get("attack_whiff_events", 1.0 if attack != 0 and hit <= 0.0 else 0.0)
+            )
             death_event = float(info.get("death_event", 0.0))
             weapon_drop_event = float(info.get("agent_weapon_drop_event", 0.0))
 
@@ -1427,6 +1554,11 @@ class StageDashboardCallback(BaseCallback):
                         "goal_error": goal_error,
                         "goal_progress": goal_progress,
                         "goal_success": goal_success,
+                        "goal_active": float(info.get("goal_active", 0.0)),
+                        "goal_success_blocked_offstage": float(
+                            info.get("goal_success_blocked_offstage", 0.0)
+                        ),
+                        "player_is_offstage": float(info.get("player_is_offstage", 0.0)),
                         "op_delta_damage": op_delta,
                         "self_delta_damage": self_delta,
                         "damage_trade": damage_trade,
@@ -1434,6 +1566,10 @@ class StageDashboardCallback(BaseCallback):
                         "jump": jump,
                         "dodge": dodge,
                         "attack": attack,
+                        "action_id": action_id,
+                        "attack_attempt_event": attack_attempt,
+                        "attack_hit_credited": credited_hit,
+                        "attack_whiff_events": whiff,
                         "idle": idle,
                         "hit": hit,
                         "whiff": whiff,
@@ -1465,9 +1601,9 @@ class StageDashboardCallback(BaseCallback):
             self._cur_ep_self_delta_sum += self_delta
             self._cur_ep_action_counts[action_id] += 1
             self._cur_ep_idle_steps += int(idle > 0.5)
-            self._cur_ep_attack_steps += int(attack != 0)
-            self._cur_ep_hit_steps += int(hit > 0.5)
-            self._cur_ep_whiff_steps += int(whiff > 0.5)
+            self._cur_ep_attack_steps += attack_attempt
+            self._cur_ep_hit_steps += credited_hit
+            self._cur_ep_whiff_steps += int(whiff)
 
             done = bool(dones[i]) if i < len(dones) else False
 
@@ -1994,9 +2130,14 @@ class PeriodicEvalCallback(BaseCallback):
                 movement, jump, dodge = comp.hdir, comp.jump, comp.dodge
                 attack = int(comp.light or comp.heavy)
                 ep_idle_steps += int(int(info.get('stage_action', 0)) == int(Action.NOOP))
-                ep_attack_steps += int(attack != 0)
-                ep_hit_steps += int(op_delta > 1e-6)
-                ep_whiff_steps += int(attack != 0 and op_delta <= 1e-6)
+                ep_attack_steps += int(info.get("attack_attempt_event", attack != 0))
+                ep_hit_steps += int(info.get("attack_hit_credited", op_delta > 1e-6))
+                ep_whiff_steps += int(
+                    info.get(
+                        "attack_whiff_events",
+                        attack != 0 and op_delta <= 1e-6,
+                    )
+                )
 
                 raw_feats = np.asarray(info.get("raw_goal_feats", []), dtype=np.float32).reshape(-1)
                 feature_names = list(info.get("stage_feature_names", []))

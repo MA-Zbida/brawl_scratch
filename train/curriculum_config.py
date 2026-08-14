@@ -347,6 +347,11 @@ def build_phase_spec(
             # net-positive even if the once-per-episode guard is disabled.
             agent_weapon_drop_penalty=2.5,
             drop_weapon_key="num5",
+            # Training mode preserves inventory across wrapper resets. Force a
+            # confirmed NUM5 drop so every episode is a real acquisition task.
+            reset_drop_weapon_when_armed=True,
+            weapon_reset_max_steps=30,
+            weapon_reset_retry_interval=8,
             terminate_on_death=bool(terminate_on_death),
         )
 
@@ -369,6 +374,10 @@ def build_phase_spec(
             allowed_actions=LOCOMOTION_DODGE_ACTIONS,
             disable_dodge=False,
             disable_jump=False,
+            # Relative distance is not a valid neutral-spacing success when the
+            # policy obtains it by leaving the stage.
+            require_onstage_for_success=True,
+            offstage_penalty_scale=0.20,
             step_penalty=0.05,
             terminate_on_death=bool(terminate_on_death),
         )
@@ -397,6 +406,10 @@ def build_phase_spec(
             in_strike_range_bonus=0.0,
             hit_event_bonus=0.5,
             damage_dealt_scale=2.0,
+            # At 40 Hz, sixteen steps allow roughly 400 ms for startup and hit
+            # detection. An unmatched press then costs only a few step penalties.
+            attack_outcome_window_steps=16,
+            attack_whiff_penalty_scale=0.01,
             self_damage_penalty_scale=0.5,
             offstage_penalty_scale=0.05,
             death_penalty=float(death_penalty),

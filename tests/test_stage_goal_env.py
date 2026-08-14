@@ -21,6 +21,7 @@ def _is_attack(action) -> bool:
 from feature_extractor.memory.state_spec import StateSpec
 from feature_extractor.memory.canonicalize import mirror_goal_target
 from train.curriculum_config import build_phase_spec
+from train.curriculum_goals import GOAL_INDEX, default_goal_target
 from train.llc_stage_common import StageGoalEnv
 
 
@@ -129,15 +130,202 @@ def test_stage_goal_env_exposes_world_goal_separately_from_policy_goal() -> None
     )
 
 
-def test_stage_goal_env_reset_preserves_base_weapon_state() -> None:
+class _WeaponResetEnv(DummyStageEnv):
+    def __init__(self, *, drop_succeeds: bool = True) -> None:
+        super().__init__()
+        self.armed = True
+        self.drop_succeeds = bool(drop_succeeds)
+
+    def _obs(self) -> np.ndarray:
+        obs = super()._obs()
+        obs[StateSpec.index("player_has_weapon")] = float(self.armed)
+        return obs
+
+    def reset(self, *, seed=None, options=None):
+        gym.Env.reset(self, seed=seed)
+        self.steps = 0
+        return self._obs(), {"player_exists": 1.0, "player_respawn_timer": 0.0}
+
+    def step(self, action):
+        action_id = int(np.asarray(action).reshape(-1)[0])
+        self.actions.append(action_id)
+        self.steps += 1
+        if action_id == int(Action.PICKUP) and self.drop_succeeds:
+            self.armed = False
+        return self._obs(), 0.0, False, False, {
+            "player_exists": 1.0,
+            "player_respawn_timer": 0.0,
+            "op_delta_damage": 0.0,
+            "self_delta_damage": 0.0,
+        }
+
+
+def test_weapon_reset_drops_held_weapon_before_activating_goal() -> None:
     spec = build_phase_spec("weapon_acquisition", terminate_on_death=False)
-    base = DummyStageEnv()
-    base.memory.player.weapon_state = 1.0
+    base = _WeaponResetEnv()
     env = StageGoalEnv(base, spec)
 
+    obs, info = env.reset(seed=7)
+
+    assert base.actions == [int(Action.PICKUP)]
+    assert StateSpec.get(obs, "player_has_weapon") == 0.0
+    assert info["weapon_reset_steps"] == 1
+    assert info["weapon_reset_drop_attempts"] == 1
+    assert info["weapon_reset_succeeded"] == 1.0
+    assert info["goal_active"] == 1.0
+
+
+def test_weapon_reset_fails_closed_when_drop_cannot_be_confirmed() -> None:
+    spec = replace(
+        build_phase_spec("weapon_acquisition", terminate_on_death=False),
+        weapon_reset_max_steps=3,
+        weapon_reset_retry_interval=2,
+    )
+    base = _WeaponResetEnv(drop_succeeds=False)
+    env = StageGoalEnv(base, spec)
+
+    with pytest.raises(RuntimeError, match="could not confirm an unarmed player"):
+        env.reset(seed=7)
+
+    assert base.actions == [int(Action.PICKUP), int(Action.NOOP), int(Action.PICKUP)]
+
+
+class _SpacingSafetyEnv(DummyStageEnv):
+    def __init__(self, *, offstage: bool) -> None:
+        super().__init__()
+        self.offstage = bool(offstage)
+
+    def _obs(self) -> np.ndarray:
+        obs = super()._obs()
+        obs[StateSpec.index("rel_distance")] = 1.0 if self.steps == 0 else 0.2
+        obs[StateSpec.index("rel_dy")] = 0.0
+        obs[StateSpec.index("player_is_offstage")] = float(self.offstage and self.steps > 0)
+        return obs
+
+    def step(self, action):
+        self.steps += 1
+        self.actions.append(int(np.asarray(action).reshape(-1)[0]))
+        return self._obs(), 0.0, False, False, {
+            "player_exists": 1.0,
+            "player_respawn_timer": 0.0,
+            "op_delta_damage": 0.0,
+            "self_delta_damage": 0.0,
+        }
+
+
+def _spacing_target() -> np.ndarray:
+    target = default_goal_target()
+    target[GOAL_INDEX["rel_distance"]] = 0.1
+    target[GOAL_INDEX["rel_dy"]] = 0.5
+    return target
+
+
+def test_spacing_goal_cannot_succeed_offstage() -> None:
+    spec = replace(
+        build_phase_spec("spacing_neutral", terminate_on_death=False),
+        target_sampler=lambda _obs: _spacing_target(),
+        progress_scale=0.0,
+        success_bonus=0.0,
+        step_penalty=0.0,
+    )
+    env = StageGoalEnv(_SpacingSafetyEnv(offstage=True), spec)
     env.reset(seed=7)
 
-    assert base.memory.player.weapon_state == 1.0
+    _, reward, terminated, truncated, info = env.step(int(Action.NOOP))
+
+    assert not terminated
+    assert not truncated
+    assert info["goal_error"] < spec.success_threshold
+    assert info["goal_success"] == 0.0
+    assert info["goal_success_blocked_offstage"] == 1.0
+    assert info["combat_penalty_offstage"] > 0.0
+    assert reward < 0.0
+
+
+def test_spacing_goal_still_succeeds_onstage() -> None:
+    spec = replace(
+        build_phase_spec("spacing_neutral", terminate_on_death=False),
+        target_sampler=lambda _obs: _spacing_target(),
+    )
+    env = StageGoalEnv(_SpacingSafetyEnv(offstage=False), spec)
+    env.reset(seed=7)
+
+    _, _, _, truncated, info = env.step(int(Action.NOOP))
+
+    assert truncated
+    assert info["goal_success"] == 1.0
+    assert info["goal_success_blocked_offstage"] == 0.0
+
+
+class _CombatTimingEnv(DummyStageEnv):
+    def __init__(self, *, damage_steps: set[int]) -> None:
+        super().__init__()
+        self.damage_steps = set(damage_steps)
+
+    def _obs(self) -> np.ndarray:
+        obs = super()._obs()
+        obs[StateSpec.index("opponent_damage_pct")] = 0.1
+        return obs
+
+    def step(self, action):
+        self.steps += 1
+        self.actions.append(int(np.asarray(action).reshape(-1)[0]))
+        damage = 0.05 if self.steps in self.damage_steps else 0.0
+        return self._obs(), 0.0, False, False, {
+            "player_exists": 1.0,
+            "player_respawn_timer": 0.0,
+            "op_delta_damage": damage,
+            "self_delta_damage": 0.0,
+        }
+
+
+def _combat_timing_spec():
+    target = default_goal_target()
+    target[GOAL_INDEX["opponent_damage_pct"]] = 0.9
+    return replace(
+        build_phase_spec("combat_execution", terminate_on_death=False),
+        target_sampler=lambda _obs: target.copy(),
+        attack_outcome_window_steps=3,
+        attack_whiff_penalty_scale=0.2,
+        progress_scale=0.0,
+        hit_event_bonus=0.0,
+        damage_dealt_scale=0.0,
+        step_penalty=0.0,
+    )
+
+
+def test_delayed_hit_credits_pending_attack_without_whiff_penalty() -> None:
+    env = StageGoalEnv(_CombatTimingEnv(damage_steps={3}), _combat_timing_spec())
+    env.reset(seed=7)
+
+    _, first_reward, _, _, first = env.step(int(Action.LIGHT_TOWARD))
+    _, second_reward, _, _, second = env.step(int(Action.NOOP))
+    _, hit_reward, _, _, hit = env.step(int(Action.NOOP))
+
+    assert first["attack_whiff_events"] == 0
+    assert second["attack_whiff_events"] == 0
+    assert hit["attack_hit_credited"] == 1.0
+    assert hit["attack_whiff_events"] == 0
+    assert first_reward == second_reward == hit_reward == 0.0
+
+
+def test_whiff_penalty_is_delayed_until_attack_window_expires() -> None:
+    env = StageGoalEnv(_CombatTimingEnv(damage_steps=set()), _combat_timing_spec())
+    env.reset(seed=7)
+
+    _, attack_reward, _, _, attack = env.step(int(Action.LIGHT_TOWARD))
+    _, _, _, _, waiting = env.step(int(Action.NOOP))
+    _, _, _, _, still_waiting = env.step(int(Action.NOOP))
+    _, expired_reward, _, _, expired = env.step(int(Action.NOOP))
+
+    assert attack["attack_attempt_event"] == 1.0
+    assert attack["attack_whiff_events"] == 0
+    assert waiting["attack_whiff_events"] == 0
+    assert still_waiting["attack_whiff_events"] == 0
+    assert attack_reward == 0.0
+    assert expired["attack_whiff_events"] == 1
+    assert expired["combat_penalty_attack_whiff"] == pytest.approx(0.2)
+    assert expired_reward == pytest.approx(-0.2)
 
 
 def test_recovery_executes_allowed_heavy_and_rejects_other_attacks() -> None:

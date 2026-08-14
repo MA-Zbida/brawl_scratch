@@ -111,7 +111,9 @@ def test_retention_can_retarget_one_checkpoint_to_each_evaluated_phase() -> None
     assert model.policy.allowed_action_ids == phase_allowed_action_ids(
         build_phase_spec("weapon_acquisition")
     )
-    assert th.count_nonzero(weapon_probs[:, int(Action.DODGE_SPOT):]).item() == 0
+    weapon_allowed = set(model.policy.allowed_action_ids)
+    weapon_illegal = sorted(set(range(ACTION_DIM)) - weapon_allowed)
+    assert th.count_nonzero(weapon_probs[:, weapon_illegal]).item() == 0
 
     set_model_phase_action_mask(model, "combat_execution")
     combat_probs = model.policy.get_distribution(obs).distribution.probs

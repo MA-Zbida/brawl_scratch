@@ -114,7 +114,9 @@ def _resolve_outcome(self_stocks: float, op_stocks: float, truncated: bool) -> s
 
 def evaluate_phase(model: Any, args: argparse.Namespace, phase: str) -> dict[str, float | int | str]:
     from env import BrawlDeepEnv
+    from train.phase_action_policy import set_model_phase_action_mask
 
+    set_model_phase_action_mask(model, phase)
     env = make_env(args, phase)
     deterministic = not bool(args.stochastic)
     rewards: list[float] = []

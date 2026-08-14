@@ -1935,6 +1935,9 @@ class PeriodicEvalCallback(BaseCallback):
         self._eval_writer.writeheader()
 
     def _run_eval(self, phase: str, env: gym.Env) -> dict[str, float | int | str]:
+        from train.phase_action_policy import set_model_phase_action_mask
+
+        set_model_phase_action_mask(self.model, phase)
         rewards: list[float] = []
         lengths: list[int] = []
         self_stocks_list: list[float] = []
@@ -2172,6 +2175,11 @@ class PeriodicEvalCallback(BaseCallback):
                     + (" | best" if improved else "")
                 )
 
+            # Evaluation temporarily retargets one shared policy to each skill.
+            # Restore the training phase before the next rollout or checkpoint.
+            from train.phase_action_policy import set_model_phase_action_mask
+
+            set_model_phase_action_mask(self.model, self.current_phase)
             self._best_scores = update_best_scores(self._best_scores, current_scores)
             if self.retention_path is not None:
                 save_best_scores(self.retention_path, self._best_scores)

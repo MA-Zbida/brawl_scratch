@@ -94,6 +94,19 @@ class PhaseMaskedActorCriticPolicy(ActorCriticPolicy):
         # preserving every learned parameter and optimizer tensor.
         self.register_buffer("_legal_action_mask", mask, persistent=False)
 
+    def set_allowed_action_ids(self, allowed_action_ids: Sequence[int]) -> None:
+        """Retarget the transient mask without changing any learned parameter."""
+        allowed = tuple(sorted({int(action) for action in allowed_action_ids}))
+        if not allowed or any(action < 0 or action >= ACTION_DIM for action in allowed):
+            raise ValueError(f"allowed_action_ids must be non-empty ids in [0, {ACTION_DIM - 1}]")
+        if int(Action.NOOP) not in allowed:
+            raise ValueError("allowed_action_ids must include NOOP")
+
+        mask = th.zeros_like(self._legal_action_mask)
+        mask[list(allowed)] = True
+        self._legal_action_mask.copy_(mask)
+        self.allowed_action_ids = allowed
+
     def _get_action_dist_from_latent(self, latent_pi: th.Tensor) -> Distribution:
         if not isinstance(self.action_dist, CategoricalDistribution):
             return super()._get_action_dist_from_latent(latent_pi)
@@ -117,3 +130,21 @@ def masked_policy_custom_objects(policy_kwargs: Mapping[str, Any]) -> dict[str, 
         "policy_class": PhaseMaskedActorCriticPolicy,
         "policy_kwargs": dict(policy_kwargs),
     }
+
+
+def set_model_phase_action_mask(model: Any, phase: str) -> tuple[int, ...]:
+    """Apply the evaluated phase's action contract to a loaded skill model."""
+    policy = getattr(model, "policy", None)
+    if not isinstance(policy, PhaseMaskedActorCriticPolicy):
+        raise TypeError(
+            "Cross-phase evaluation requires PhaseMaskedActorCriticPolicy; "
+            "resume and save the legacy checkpoint through train_curriculum first"
+        )
+
+    # Local import avoids a module cycle: curriculum_config imports StageSpec,
+    # whose training module imports this policy implementation.
+    from train.curriculum_config import build_phase_spec
+
+    allowed = phase_allowed_action_ids(build_phase_spec(str(phase)))
+    policy.set_allowed_action_ids(allowed)
+    return allowed

@@ -48,11 +48,11 @@
     urlcolor=darkblue
 }
 
-\title{\textbf{Hierarchical Goal-Conditioned Reinforcement Learning\\
+\title{\textbf{Goal-Conditioned Competency Pretraining\\
 for Real-Time Platform Fighting Games}\\[0.5em]
 {\large A Full-Stack Autonomous Agent for Brawlhalla:\\
-From Pixel Capture to Strategic Combat via\\
-FiLM-Modulated UVFA, Skill Curricula, and Anchored-Replay PPO}}
+From Pixel Capture to a Goal-Independent Combat Policy via\\
+FiLM-Modulated UVFA Pretraining and Explicit Weight Transfer}}
 
 \author{
   Technical Research Report\\[0.3em]
@@ -68,16 +68,16 @@ FiLM-Modulated UVFA, Skill Curricula, and Anchored-Replay PPO}}
 
 % ══════════════════════════════════════════════════════════════
 \begin{abstract}
-We present a complete, production-level hierarchical goal-conditioned reinforcement learning system for autonomous play of Brawlhalla, a competitive real-time platform fighting game.
+We present a two-stage reinforcement learning system for autonomous play of Brawlhalla, a competitive real-time platform fighting game: goal-conditioned competency pretraining followed by one goal-independent combat policy.
 The domain combines three independent intractabilities that individually defeat standard RL approaches and whose simultaneous co-occurrence has received little systematic treatment: \emph{reward sparsity} (terminal events separated by thousands of frames), \emph{perceptual aliasing} under pixel observations, and \emph{throughput starvation} (${\sim}40$ fps against a live game client).
 
 We document the complete iterative design trajectory from first principles, including four failed architectural approaches and their mechanistic diagnoses.
-The final system integrates: (i) a fine-tuned YOLOv8 detector with TensorRT FP16 acceleration for structured object-centric state extraction at $90$ fps; (ii) a physics-based SORT tracker with exponential smoothing for temporal state consistency; (iii) a \emph{Low-Level Controller} (LLC) trained as a Universal Value Function Approximator (UVFA) with Feature-wise Linear Modulation (FiLM) goal conditioning over masked partial-goal specifications; (iv) a staged eight-phase skill curriculum with phase-specific action masking, goal distributions, and behavioral cloning warm-start; (v) a custom \emph{Anchored-Replay PPO} optimizer with on-disk experience replay, KL-anchored behavioral regularization, and PCGrad multi-task gradient surgery; and (vi) a \emph{High-Level Strategic Planner} (HSP) issuing macro-goals to the frozen LLC.
+The system integrates: (i) a fine-tuned YOLOv8 detector with TensorRT acceleration; (ii) structured state estimation with temporal history; (iii) a skill-pretraining UVFA with residual Feature-wise Linear Modulation (FiLM) over masked goals; (iv) a five-family curriculum with behavioral-cloning warm-start; (v) Anchored-Replay PPO with replay, KL anchoring, BC, and PCGrad; and (vi) explicit transfer into a separate policy $\pi_{\mathrm{final}}(a\mid s)$ that directly optimizes match reward.
 
-The LLC's reward is a single principled signal---masked mean absolute error between current feature state and goal target, grounded in potential-based shaping theory---plus sparse terminal events.
+The skill policy's dense reward is active-mask-mass-normalized goal progress, plus sparse game events.
 This reward requires zero hand-tuning of component weights.
 We formalize the goal-conditioned MDP, derive the reward consistency proposition from shaping theory, analyze the FiLM architecture as conditional computation, and prove that masked partial goals reduce effective goal-space dimensionality.
-The resulting agent demonstrates proficient locomotion, aerial recovery, weapon acquisition, and combat movement, establishing that structured goal-conditioned hierarchical RL is a viable approach to domains previously considered intractable for end-to-end learning.
+The research question is whether controllability learned under goals can provide a sample-efficient initialization for autonomous composition, without retaining goals as a runtime decision layer.
 \end{abstract}
 
 \newpage
@@ -108,12 +108,12 @@ No single technique addresses all three simultaneously.
 \paragraph{Our approach.}
 We resolve this compound intractability through a modular, structure-injecting pipeline:
 \begin{enumerate}[leftmargin=1.5em]
-    \item \textbf{Solve state representation first.} Replace pixel observations with YOLO-extracted object-centric features, producing a 55-dimensional structured state at $90$ fps via TensorRT acceleration.
+    \item \textbf{Solve state representation first.} Replace pixel observations with 62 measured and derived current-frame features, then append three 28-feature history blocks to form the 146-dimensional policy state.
     \item \textbf{Solve credit assignment through goal conditioning.} Replace flat reward engineering with a single masked mean absolute error (MAE) goal-progress signal, converting every frame into a training-relevant reward.
-    \item \textbf{Solve behavioral complexity through curriculum and hierarchy.} Decompose the full skill set into eight sequential training phases, then compose learned skills via a hierarchical planner.
+    \item \textbf{Solve behavioral complexity through staged transfer.} Learn five controllable competency families under goals, then transfer their representation into one goal-independent actor.
 \end{enumerate}
 
-The result is a full-stack autonomous agent: from raw screen pixels through a structured perception pipeline, through a curriculum-trained goal-conditioned motor controller, to a hierarchical strategic planner---all trained exclusively from game-native observations at human-speed throughput.
+The result is a full-stack training path from raw screen pixels through structured perception, goal-conditioned competency learning, and finally one policy that selects primitive actions directly from state.
 
 \paragraph{Structure of this report.}
 Section~\ref{sec:related} reviews related work.
@@ -121,7 +121,7 @@ Section~\ref{sec:domain} formally characterizes the Brawlhalla domain.
 Section~\ref{sec:setup} describes the full hardware and software setup.
 Section~\ref{sec:failures} documents four failed architectural approaches with mechanistic diagnoses.
 Section~\ref{sec:architecture} presents the final system architecture.
-Sections~\ref{sec:state-representation}--\ref{sec:hsp} detail each component.
+Sections~\ref{sec:state-representation}--\ref{sec:final-transfer} detail each component.
 Section~\ref{sec:ppo} presents the Anchored-Replay PPO optimizer.
 Section~\ref{sec:theory} provides theoretical analysis.
 Section~\ref{sec:implementation} covers implementation details.
@@ -130,10 +130,10 @@ Section~\ref{sec:results} presents results and discussion.
 \subsection{Contributions}
 \begin{enumerate}[leftmargin=1.5em]
     \item \textbf{Mechanistic failure analysis} of four standard RL approaches applied to real-time fighting games, establishing the specific failure mode of each.
-    \item \textbf{YOLO-TensorRT perception pipeline} for zero-API game state extraction, producing a physics-augmented 55-dimensional structured state at ${\sim}40$ fps.
+    \item \textbf{YOLO-TensorRT perception pipeline} for zero-API game state extraction, producing a 62-feature current state and a 146-dimensional state/history policy input at ${\sim}40$ fps.
     \item \textbf{FiLM-modulated UVFA controller} with masked partial-goal specifications and goal-alignment auxiliary inputs, enabling a single policy-value network to serve as a universal motor controller across all tactical contexts.
     \item \textbf{Principled single-signal reward} expressed as masked feature-space MAE with potential-based shaping guarantees---no hand-tuned component weights.
-    \item \textbf{Eight-phase behavioral cloning + PPO curriculum} with phase-specific action masking, goal distributions, and sequential warm-starting.
+    \item \textbf{Five-family behavioral cloning + PPO curriculum} with phase-specific action allowlists, goal distributions, normalized goal progress, and sequential warm-starting.
     \item \textbf{Anchored-Replay PPO} custom optimizer with on-disk experience replay, KL-divergence anchor regularization, concurrent BC loss, and PCGrad multi-task gradient surgery.
     \item \textbf{World model for imagination-based training} enabling ${\sim}1000\times$ speedup for locomotion phases through learned MLP dynamics.
 \end{enumerate}
@@ -157,11 +157,8 @@ Multi-task RL~\cite{caruana1997multitask,yu2020gradient} trains a single policy 
 Our curriculum implicitly performs multi-task learning: each phase's goal distribution spans a family of tasks.
 PCGrad~\cite{yu2020gradient}, which we integrate into the optimizer, was originally proposed for multi-task RL to resolve conflicting gradient directions.
 
-\subsection{Hierarchical Reinforcement Learning}
-Hierarchical RL~\cite{barto2003recent,dayan1992feudal} decomposes complex tasks across temporal scales.
-The Options framework~\cite{sutton1999between} formalizes temporally extended actions.
-Feudal Networks~\cite{vezhnevets2017feudal} train manager-worker hierarchies with different temporal resolutions.
-Data-Efficient HRL~\cite{nachum2018data} trains goal-conditioned hierarchies where the high-level policy outputs goals in the low-level policy's feature space---the approach closest to our HSP/LLC interface.
+\subsection{Runtime Hierarchies Considered and Rejected}
+Hierarchical RL~\cite{barto2003recent,dayan1992feudal} decomposes tasks across temporal scales, and an earlier experimental branch of this project proposed a strategic policy that issued goals to a frozen motor policy. That branch was abandoned before becoming the runtime architecture: an external goal scheduler preserves a planner-controller interface, complicates attribution, and does not test whether pretrained competencies can compose autonomously. The current method retains goal conditioning only as pretraining scaffolding and transfers into $\pi_{\mathrm{final}}(a\mid s)$.
 
 \subsection{Feature-wise Linear Modulation (FiLM)}
 FiLM~\cite{perez2018film} was proposed for visual question answering, conditioning visual processing via learned affine transforms from linguistic features.
@@ -276,7 +273,7 @@ The agent runs on a consumer gaming PC with the following stack:
     \node[swbox, below=1.2cm of yolo] (film) {FiLM Extractor\\$z \in \mathbb{R}^{256}$};
     \node[swbox, left=0.5cm of film] (goal) {Goal\\$g = (\mathbf{t}, \mathbf{m})$};
     \node[swbox, right=0.5cm of film] (ppo) {PPO Policy\\$\pi(a|s,g)$};
-    \node[swbox, right=0.5cm of ppo] (action) {Action $a$\\Discrete(64)};
+    \node[swbox, right=0.5cm of ppo] (action) {Action $a$\\Discrete(27)};
     \node[hwbox, right=0.5cm of action] (game) {Game\\Process};
 
     % Arrows top
@@ -293,7 +290,7 @@ The agent runs on a consumer gaming PC with the following stack:
     \draw[arrow] (action) -- (game) node[above, label, midway] {keypress};
     \draw[arrow, dashed, bend right=30] (game.south) to node[below, label] {screen} (display.south);
 \end{tikzpicture}
-\caption{End-to-end perception-to-action pipeline. Screen capture feeds YOLO detection, which is stabilized by a physics tracker to produce a structured 55-dim state. The FiLM extractor conditions the PPO policy on the current goal. Actions are sent to the live game process via keyboard simulation.}
+\caption{Skill-pretraining perception-to-action pipeline. Screen capture feeds detection and state estimation, producing a 146-dimensional state/history vector. The FiLM extractor additionally consumes an 11-dimensional target and mask during pretraining. Runtime final-policy inference omits the goal path and emits one of 27 canonical actions.}
 \label{fig:pipeline}
 \end{figure}
 
@@ -307,7 +304,7 @@ The full pipeline achieves approximately $37$--$41$ effective steps per second (
     \item Policy forward pass: $\sim$3 ms
     \item Total: $\sim$18--25 ms per step $\Rightarrow$ $\sim$40--55 Hz, consistent with measured throughput.
 \end{itemize}
-YOLO inference runs every 2 steps; odd steps use physics-only prediction, halving GPU load without significant state quality degradation.
+The detector cadence is configurable through \texttt{yolo\_infer\_every\_n\_steps}; the fixed experiment protocol currently uses every step. Any stale-detection cadence change is treated as a measured perception experiment rather than assumed harmless.
 
 % ══════════════════════════════════════════════════════════════
 \section{Failure Modes and Iterative Design}
@@ -392,14 +389,14 @@ This single detector simultaneously solves player identification, opponent local
 TensorRT conversion (FP16) reduced inference from $\sim$50 ms (PyTorch) to $\sim$15 ms, recovering the $3\times$ throughput loss from ResNet.
 
 \paragraph{Failure.}
-With structured 55-dim state, we designed a 9-component reward: damage dealt, KO bonuses, proximity, weapon possession, center control, edge penalty, dodge-use penalty, approach reward, and damage-ratio advantage.
+With structured state, we first designed a 9-component reward: damage dealt, KO bonuses, proximity, weapon possession, center control, edge penalty, dodge-use penalty, approach reward, and damage-ratio advantage.
 The agent learned basic approach behavior but failed to chain sequential sub-objectives: it would not learn to \emph{first} pick up a weapon, \emph{then} approach, \emph{then} attack, because the flat reward provided no mechanism to prioritize temporally ordered sub-goals.
 
 Gradients from contradictory reward components (e.g., ``approach opponent'' vs. ``stay on-stage'' when the opponent is near the edge) caused oscillating behavior that never committed to any coherent strategy.
 
 \paragraph{Root cause.}
 \emph{Sequential sub-objective structure cannot be expressed by a flat reward.}
-This diagnosis motivated the transition to goal-conditioned hierarchical RL.
+This diagnosis motivated goal-conditioned competency pretraining followed by autonomous composition in a single final policy.
 
 \begin{figure}[t]
 \centering
@@ -412,15 +409,15 @@ This diagnosis motivated the transition to goal-conditioned hierarchical RL.
     node distance=0.3cm and 0.6cm
 ]
     \node[failure] (a1) {Attempt 1\\Pixel CNN + PPO\\{\tiny Perceptual aliasing}};
-    \node[failure, right=0.5cm of a1] (a2) {Attempt 2\\+ Curiosity ICM\\{\tiny Noise ≠ novelty}};
+    \node[failure, right=0.5cm of a1] (a2) {Attempt 2\\+ Curiosity ICM\\{\tiny Noise $\neq$ novelty}};
     \node[failure, right=0.5cm of a2] (a3) {Attempt 3\\ResNet-18\\{\tiny Throughput crash}};
     \node[failure, right=0.5cm of a3] (a4) {Attempt 4\\YOLO + flat reward\\{\tiny Sequential failure}};
-    \node[success, below=1.4cm of a2, xshift=3.2cm] (final) {\textbf{Final System}\\YOLO + FiLM-UVFA\\+ Curriculum + HSP};
+    \node[success, below=1.4cm of a2, xshift=3.2cm] (final) {\textbf{Final System}\\Goal-pretrained state encoder\\+ single final policy};
 
     \draw[arrow, darkred] (a1) -- (a2) node[above, ann, midway] {add ICM};
     \draw[arrow, darkred] (a2) -- (a3) node[above, ann, midway] {better enc.};
     \draw[arrow, darkred] (a3) -- (a4) node[above, ann, midway] {YOLO};
-    \draw[arrow, darkgreen, thick] (a4.south) -- ++(0,-0.5) -| (final.north) node[near start, ann, right] {goal-conditioned\\hierarchy};
+    \draw[arrow, darkgreen, thick] (a4.south) -- ++(0,-0.5) -| (final.north) node[near start, ann, right] {competency pretraining\\then transfer};
 \end{tikzpicture}
 \caption{Iterative design trajectory. Each failed attempt reveals a specific, diagnosable failure mode that motivates the next architectural decision.}
 \label{fig:trajectory}
@@ -430,7 +427,7 @@ This diagnosis motivated the transition to goal-conditioned hierarchical RL.
 \section{System Architecture}
 \label{sec:architecture}
 
-The failure analysis converges on three requirements: (1) structured object-centric state, (2) goal-conditioned dense reward, and (3) hierarchical temporal abstraction.
+The failure analysis converges on three requirements: (1) structured object-centric state, (2) goal-conditioned dense credit during competency learning, and (3) a goal-independent policy for autonomous match decisions.
 Figure~\ref{fig:architecture} shows the complete system.
 
 \begin{figure}[t]
@@ -450,14 +447,14 @@ Figure~\ref{fig:architecture} shows the complete system.
     \node[block, fill=yellow!15] (track) at (9.6, 0) {SORT Tracker\\+ Physics};
     \node[component, fill=lightgreen!80, draw=darkgreen] (state) at (9.6, 2.2) {$s \in \mathbb{R}^{55}$\\Structured State};
 
-    % Row 2 — LLC
+    % Row 2 — goal-conditioned skill pretraining
     \node[component, fill=lightblue!80, draw=darkblue] (film) at (5.6, 3.8) {FiLM Extractor\\$z \in \mathbb{R}^{256}$};
-    \node[component, fill=lightblue!50, draw=darkblue] (llc) at (2.2, 3.8) {LLC\\$\pi(a|s,g),\;V(s,g)$};
+    \node[component, fill=lightblue!50, draw=darkblue] (skill) at (2.2, 3.8) {Skill Policy\\$\pi_{\mathrm{skill}}(a|s,g)$};
     \node[block, fill=lightpurple!80] (goal) at (5.6, 5.8) {Goal $g = (\mathbf{t}, \mathbf{m})$\\$\mathbf{t} \in [0,1]^k,\;\mathbf{m} \in \{0,1\}^k$};
 
-    % Row 3 — HSP + Curriculum
-    \node[component, fill=lightpurple!80, draw=darkpurple] (hsp) at (2.2, 5.8) {HSP\\$\pi_H(g|s)$};
-    \node[block, fill=lightorange!80] (curriculum) at (9.0, 5.8) {Skill Curriculum\\8 phases};
+    % Row 3 — goal-independent final agent + curriculum
+    \node[component, fill=lightpurple!80, draw=darkpurple] (finalpolicy) at (2.2, 5.8) {Final Policy\\$\pi_{\mathrm{final}}(a|s)$};
+    \node[block, fill=lightorange!80] (curriculum) at (9.0, 5.8) {Skill Curriculum\\5 families};
     \node[block, fill=lightorange!50] (bc) at (9.0, 3.8) {BC Pretraining\\+ HER relabel};
 
     % Arrows
@@ -466,24 +463,24 @@ Figure~\ref{fig:architecture} shows the complete system.
     \draw[arrow] (yolo) -- (track) node[above, label, midway] {detections};
     \draw[arrow] (track) -- (state);
     \draw[arrow] (state) -| (film);
-    \draw[arrow] (state) -| (hsp);
-    \draw[arrow] (hsp) -- (goal);
+    \draw[arrow] (state) -| (finalpolicy);
     \draw[arrow] (goal) -- (film);
-    \draw[arrow] (film) -- (llc);
+    \draw[arrow] (film) -- (skill);
     \draw[arrow] (curriculum) -- (goal) node[right, label, midway] {dist.};
-    \draw[arrow] (bc) -- (llc) node[right, label, midway] {init};
-    \draw[arrow, bend right=20] (llc.south) to node[left, label] {$a$} (game.north);
+    \draw[arrow] (bc) -- (skill) node[right, label, midway] {init};
+    \draw[darrow] (skill) -- (finalpolicy) node[left, label, midway] {weight transfer};
+    \draw[arrow, bend right=20] (finalpolicy.south) to node[left, label] {$a$} (game.north);
     \draw[darrow] (curriculum) -- (bc);
 \end{tikzpicture}
-\caption{Complete system architecture. YOLO extracts object-centric bounding boxes; a physics tracker produces a consistent 55-dim state. The skill curriculum defines goal distributions; behavioral cloning warm-starts the LLC. The FiLM extractor conditions the LLC on the current goal. The HSP selects goals at macro-timescale; the LLC executes motor primitives.}
+\caption{Current architecture. Goals and FiLM provide dense competency supervision only during skill pretraining. Compatible state and policy weights initialize a separate goal-independent policy, which directly selects primitive actions at runtime.}
 \label{fig:architecture}
 \end{figure}
 
 The system decomposes into three major components, each resolving one failure mode:
 \begin{enumerate}[leftmargin=1.5em]
     \item \textbf{Structured Perception} (Section~\ref{sec:state-representation}): YOLO + tracker resolve perceptual aliasing.
-    \item \textbf{Goal-Conditioned LLC} (Sections~\ref{sec:llc}--\ref{sec:curriculum}): UVFA + curriculum resolve reward sparsity and behavioral complexity.
-    \item \textbf{Strategic Planner} (Section~\ref{sec:hsp}): HSP resolves sequential sub-objective composition at match timescale.
+    \item \textbf{Goal-Conditioned Skill Pretraining} (Sections~\ref{sec:llc}--\ref{sec:curriculum}): UVFA + curriculum teach controllable transformations with dense credit.
+    \item \textbf{Final Agent} (Section~\ref{sec:final-transfer}): explicit representation transfer initializes one policy that optimizes match reward without goals.
 \end{enumerate}
 
 % ══════════════════════════════════════════════════════════════
@@ -534,33 +531,34 @@ Detected positions are fused with constant-velocity physics predictions via expo
 
 On frames where YOLO does not run (every other frame), the physics prediction $\hat{p}_t^{\text{physics}} = \hat{p}_{t-1} + v_{t-1} \cdot \Delta t$ is used directly, maintaining smooth state estimates at half the YOLO inference cost.
 
-\subsection{Structured State Vector $s \in \mathbb{R}^{55}$}
+\subsection{Structured State and Observation Contracts}
 
-The tracker output and HUD pixel readings are assembled into a 55-dimensional observation vector.
-The state is organized into feature groups:
+The state estimator emits 62 current-frame features. Because the policy is an MLP rather
+than a recurrent network, three selected 28-feature dynamic blocks from offsets
+$t-2,t-4,t-8$ are appended once, producing the 146-dimensional state/history vector
+$s_t$. Goal conditioning is an explicit pretraining-only augmentation:
 
 \begin{table}[t]
 \centering
-\caption{Structured state vector $s \in \mathbb{R}^{55}$. All features are normalized to $[0,1]$ or $[-1,1]$.}
+\caption{Executable observation contracts. Dimensions are generated from
+\texttt{StateSpec} and enforced in checkpoint metadata tests.}
 \label{tab:state-spec}
 \small
-\begin{tabular}{@{}llcl@{}}
+\begin{tabular}{@{}lcl@{}}
 \toprule
-\textbf{Group} & \textbf{Features} & \textbf{Dim} & \textbf{Range} \\
+\textbf{Contract} & \textbf{Dim} & \textbf{Contents} \\
 \midrule
-Player kinematics & $x, y, v_x, v_y$, grounded, dmg\%, weapon, jumps, edge, offstage & 10 & $[0,1]$ / $[-1,1]$ \\
-Opponent kinematics & Mirrored player features & 10 & $[0,1]$ / $[-1,1]$ \\
-Relational geometry & $\Delta x, \Delta y, d$, strike-range, facing, facing-dir, weapon $\Delta x / \Delta y$ & 8 & $[-1,1]$ / $[0,2]$ \\
-Game state & Stocks (self/opp), dodge cooldown, weapon-on-ground & 4 & $[0,1]$ \\
-Recovery & Ledge distance, signed $\Delta x/\Delta y$ to ledge & 3 & $[0,2]$ / $[-1,1]$ \\
-Temporal/strategic & Airborne time (self/opp), hitstun (self/opp) & 4 & $[0,1]$ \\
-Combat extended & opp-facing, time-since-hit, knockback, center-dist, + & 12 & various \\
-Previous action & Movement, jump, dodge, attack (normalized) & 4 & $[0,1]$ \\
-\midrule
-\textbf{Total} & & \textbf{55} & \\
+Current state & 62 & measured, derived, estimated, and action-history features \\
+State/history $s_t$ & 146 & current 62 plus $3\times 28$ dynamic history features \\
+Skill-policy input & 168 & $s_t$ plus 11-dimensional target and 11-dimensional mask \\
+Final-policy input & 146 & $s_t$ only; no target, mask, or goal type \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+Horizontal canonicalization is applied before either policy contract, and canonical
+\textsc{toward}/\textsc{away} actions are converted back to physical left/right only at
+the control boundary.
 
 \subsection{Damage Estimation from HUD Pixels}
 
@@ -576,7 +574,7 @@ Stock events (loss, gain) are detected via red/cyan flash pixels in the stock-di
 This approach requires zero game API access and adds negligible latency ($< 1$ ms), at the cost of requiring fixed screen positions and tuned color thresholds.
 
 % ══════════════════════════════════════════════════════════════
-\section{Goal-Conditioned Low-Level Controller}
+\section{Goal-Conditioned Skill Policy}
 \label{sec:llc}
 
 \subsection{Goal-Conditioned MDP Formulation}
@@ -584,85 +582,62 @@ This approach requires zero game API access and adds negligible latency ($< 1$ m
 We replace the original Brawlhalla POMDP with a structured goal-conditioned MDP over the extracted state representation.
 
 \begin{definition}[Goal-Conditioned MDP]
-$\mathcal{M}_g = (\mathcal{S}, \mathcal{A}, \mathcal{G}, P, r_g, \gamma)$ where $\mathcal{S} = \mathbb{R}^{55}$, $\mathcal{A} = \text{Discrete}(64)$ (flattened MultiDiscrete), $\mathcal{G}$ is the structured goal space (Definition~\ref{def:masked-goal}), and $r_g$ is the masked MAE goal-progress reward (Section~\ref{sec:reward}).
+$\mathcal{M}_g = (\mathcal{S}, \mathcal{A}, \mathcal{G}, P, r_g, \gamma)$ where $\mathcal{S} = \mathbb{R}^{146}$, $\mathcal{A} = \text{Discrete}(27)$, $\mathcal{G}$ is the masked target space (Definition~\ref{def:masked-goal}), and $r_g$ is normalized masked goal progress (Section~\ref{sec:reward}).
 \end{definition}
 
 \subsection{Factored Goal Representation}
 \label{sec:structured-goals}
 
-\begin{definition}[Factored Goal]
+\begin{definition}[Masked Competency Goal]
 \label{def:masked-goal}
-A goal is a composite structure $g = (g_{\text{type}},\, \tilde{g})$ where $g_{\text{type}} \in \mathcal{T}$ is a discrete goal type selected from the finite set
-\[
-\mathcal{T} = \{\texttt{recovery},\; \texttt{approach},\; \texttt{spacing},\; \texttt{attack},\; \texttt{weapon}\},
-\]
-and $\tilde{g} \in \mathbb{R}^{d_{g_{\text{type}}}}$ is a type-specific continuous parameter vector.
-The binary feature mask $\mathbf{m} = \text{mask}(g_{\text{type}}) \in \{0,1\}^k$ is derived \emph{deterministically} from $g_{\text{type}}$, and the target projection $\mathbf{t} \in [0,1]^k$ is constructed from $\tilde{g}$.
-The full masked goal vector is:
-\begin{equation}
-g_{\text{full}} = \text{mask}(g_{\text{type}}) \odot \mathbf{t}(g_{\text{type}},\, \tilde{g}) \in [0,1]^k
-\label{eq:factored-goal}
-\end{equation}
+A pretraining goal is the pair $g=(\mathbf{t},\mathbf{m})$, where the normalized target
+$\mathbf{t}\in[0,1]^{11}$ and non-negative mask $\mathbf{m}\in[0,1]^{11}$ share a
+fixed feature ordering. A curriculum family determines which mask entries are active;
+inactive target values have no effect on error, reward, or success.
 \end{definition}
 
-This \emph{factored} representation supersedes the naive target-mask pair $(\mathbf{t}, \mathbf{m})$: the mask is no longer a free binary input to be predicted or provided arbitrarily, but is \emph{determined} by the goal type, making the goal space semantically typed and structured.
-The FiLM generator receives the goal type (as a one-hot $\mathbf{1}_{g_{\text{type}}} \in \mathbb{R}^{|\mathcal{T}|}$) alongside the derived $(g_{\text{full}},\, \mathbf{m})$, enabling type-conditioned modulation while sharing all parameters across goal types.
-
-Our implementation uses $k = 10$ curriculum goal features:
+The 11 features are
 \begin{equation}
-f(s) = \bigl[x_p,\; y_p,\; \mathbb{1}_{\text{weapon}},\; w_{\Delta x},\; w_{\Delta y},\; \mathbb{1}_{\text{strike}},\; d_{\text{opp}},\; \phi_{\text{facing}},\; \Delta_{\text{frame}},\; \mathbb{1}_{\text{offstage}}\bigr]
+f(s) = [\Delta x_{ledge},\Delta y_{ledge},x_p,y_p,
+\mathbb{1}_{weapon},\Delta x_w,\Delta y_w,d_{opp},\Delta y_{opp},
+\mathbb{1}_{strike},D_{opp}].
 \label{eq:goal-features}
 \end{equation}
-
-Table~\ref{tab:goal-types} specifies the semantic parameter vector $\tilde{g}$ and the derived mask for each type.
+The strike-range feature remains useful context in $s$ but is not an active combat
+target. Combat asks only for a measurable increase in opponent damage, avoiding an
+externally imposed tactical assumption about how that damage must be produced.
 
 \begin{table}[h]
 \centering
 \small
-\caption{Factored goal type definitions. The mask $\mathbf{m}$ is derived deterministically from $g_{\text{type}}$; $\tilde{g}$ are the type-specific semantic parameters.}
+\caption{Five retained competency families and their active target dimensions.}
 \label{tab:goal-types}
-\begin{tabular}{@{}llll@{}}
+\begin{tabular}{@{}lll@{}}
 \toprule
-\textbf{Goal Type} & \textbf{Parameters $\tilde{g}$} & \textbf{Active Mask Dims} & \textbf{Tactical Intent} \\
+\textbf{Family} & \textbf{Active target dimensions} & \textbf{Competency} \\
 \midrule
-\texttt{recovery} & $(\text{target}\_x,\; \text{target}\_y,\; \text{urgency})$ & $x_p,\; y_p,\; \mathbb{1}_{\text{offstage}}$ & Return to platform \\
-\texttt{approach} & $(\text{rel\_dist},\; \text{vert\_align},\; \text{facing\_req})$ & $x_p,\; d_{\text{opp}},\; \phi_{\text{facing}}$ & Close distance to opponent \\
-\texttt{spacing} & $(\text{desired\_dist},\; \text{direction})$ & $d_{\text{opp}},\; \mathbb{1}_{\text{strike}},\; \Delta_{\text{frame}}$ & Maintain frame advantage \\
-\texttt{attack} & $(\text{in\_range},\; \text{atk\_type},\; \text{opp\_state})$ & $\mathbb{1}_{\text{strike}},\; d_{\text{opp}},\; \Delta_{\text{frame}}$ & Enter strike range \\
-\texttt{weapon} & $(\text{wpn}\_\Delta x,\; \text{wpn}\_\Delta y,\; \text{pickup\_flag})$ & $w_{\Delta x},\; w_{\Delta y},\; \mathbb{1}_{\text{weapon}}$ & Pick up weapon \\
+\texttt{movement} & $x_p,y_p$ & absolute grounded/aerial positioning \\
+\texttt{recovery} & $\Delta x_{ledge},\Delta y_{ledge}$ & offstage-to-onstage recovery sequence \\
+\texttt{weapon\_acquisition} & $\mathbb{1}_{weapon},\Delta x_w,\Delta y_w$ & navigate to and acquire weapon \\
+\texttt{spacing} & $d_{opp},\Delta y_{opp}$ & relative control against a moving opponent \\
+\texttt{combat} & $D_{opp}$ & cause opponent damage \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\begin{remark}[Why typed partial masking is essential]
-Consider a \texttt{recovery} goal: the agent must return to platform, making opponent distance and frame advantage entirely irrelevant.
-Including those dimensions in the error signal injects spurious gradients.
-By making the mask a \emph{deterministic function of the goal type}, we guarantee that the policy gradient is semantically meaningful at every step---each active dimension corresponds to a feature that definitionally matters for the current tactical intent.
-Simultaneously, sharing parameters across types allows motor primitives learned in recovery to transfer to approach, spacing, and attack without any re-parameterization.
-\end{remark}
+For weapon acquisition, the offset entries are active only while the player is unarmed;
+after acquisition their effective weights become zero and the possession target remains.
+Recovery additionally requires the observed event sequence offstage $\rightarrow$ onstage
+$\rightarrow$ grounded, so standing near a ledge at reset is not a valid recovery episode.
 
 \subsection{Goal Sampling Distribution}
 \label{sec:goal-sampling}
 
-Online goals are drawn from a composite distribution that mixes three sources:
-\begin{equation}
-P(g) = 0.4\, G_{\text{core}} + 0.4\, G_{\text{HER}} + 0.2\, G_{\text{archive}}
-\label{eq:goal-sampling}
-\end{equation}
-
-\begin{itemize}[leftmargin=1.5em]
-    \item $G_{\text{core}}$: the phase-specific \texttt{TargetSampler}, drawing targets from tactically meaningful configurations (e.g., platform bounds for locomotion, opponent proximity ranges for combat).
-    \item $G_{\text{HER}}$: hindsight goals generated from future states in the \emph{current} episode; achieved feature vectors become goal targets, converting every trajectory into goal-conditioned training signal.
-    \item $G_{\text{archive}}$: goals sampled from successful trajectories stored in the replay buffer, providing behavioral anchors to previously mastered skills.
-\end{itemize}
-
-\paragraph{Temporal consistency.}
-Goals are held constant for a fixed horizon before resampling:
-\begin{equation}
-g_t = g_{t+1} = \cdots = g_{t+k}, \quad k \sim \mathcal{U}(16, 32)
-\label{eq:goal-temporal}
-\end{equation}
-A minimum of $k_{\min} = 16$ steps is enforced to prevent rapid cycling that would allow the policy to exploit short-duration goal-achievement bonuses.
+Each family owns a bounded \texttt{TargetSampler}. A target is sampled at episode reset
+and remains fixed until success, death, or the episode step cap. The collector rejects
+targets already satisfied at reset and rejects recorded episodes shorter than the minimum
+demonstration length. Hindsight relabeling is available during behavioral cloning; it is
+not described as online PPO goal resampling.
 
 \begin{proposition}[Reduced effective goal dimensionality]
 \label{prop:dim-reduction}
@@ -676,20 +651,23 @@ The value function $V(s, g)$ varies only along the $|\mathcal{I}|$ active dimens
 For a given active set, the sample complexity of learning $V$ to $\epsilon$ accuracy is polynomial in $|\mathcal{I}|$ rather than $k$.
 \end{proof}
 
-In our system, $k = 10$ but typical goals activate $\ell = 2$--$4$ dimensions, yielding a $2.5$--$5\times$ effective complexity reduction.
+In our system, $k = 11$ and a family activates one to three dimensions. This partial
+specification keeps unrelated state variables from entering that family's error signal.
 
 \subsection{Goal Error and Reward Function}
 \label{sec:reward}
 
 \begin{definition}[Masked Goal Error]
-The instantaneous goal error is the masked mean absolute error (MAE):
+The instantaneous goal error is normalized by active mask mass:
 \begin{equation}
-\varepsilon(s, g) = \sum_{i=1}^{k} m_i \cdot |f_i(s) - t_i|
+\varepsilon_1(s,g)=\frac{\sum_i m_i|f_i(s)-t_i|}{\sum_i m_i+\epsilon},
+\qquad
+\varepsilon_2(s,g)=\sqrt{\frac{\sum_i m_i(f_i(s)-t_i)^2}{\sum_i m_i+\epsilon}}.
 \label{eq:goal-error}
 \end{equation}
 \end{definition}
 
-The LLC reward is a potential-based shaping term plus sparse events:
+The skill reward uses goal progress plus phase-level sparse events:
 
 \begin{equation}
 \boxed{
@@ -731,14 +709,14 @@ This converts the sparse reward problem into a dense regression problem, the sam
 A Universal Value Function Approximator is a single parameterized function family $V_\phi(s, g)$ that simultaneously approximates $V^*(s, g)$ for all $(s, g) \in \mathcal{S} \times \mathcal{G}$.
 \end{definition}
 
-The LLC is trained as an actor-critic UVFA: a shared FiLM feature extractor feeds separate policy and value heads, both conditioned on the current goal $g$.
+The skill policy is trained as an actor-critic UVFA: a shared FiLM feature extractor feeds separate policy and value heads, both conditioned on the current goal $g$.
 The augmented observation is:
 \begin{equation}
-\tilde{s} = [s;\; \tilde{e};\; \mathbf{m};\; \alpha;\; \mathbf{1}_{g_{\text{type}}}] \in \mathbb{R}^{55 + 3k + |\mathcal{T}|}
+\tilde{s} = [s;\; \mathbf{t};\; \mathbf{m}] \in \mathbb{R}^{146+11+11}=\mathbb{R}^{168}
 \label{eq:augmented-obs}
 \end{equation}
-where $\tilde{e}$ is the masked goal error, $\mathbf{m}$ is the type-derived mask, $\alpha$ is the goal-alignment signal (Section~\ref{sec:film}), and $\mathbf{1}_{g_{\text{type}}} \in \mathbb{R}^5$ is the one-hot goal-type encoding.
-PPO trains both $\pi_\theta(a | \tilde{s})$ and $V_\phi(\tilde{s})$ where $g$ is fully embedded inside $\tilde{s}$.
+The extractor derives masked error and alignment features internally before residual FiLM
+modulation. PPO trains both $\pi_\theta(a\mid s,g)$ and $V_\phi(s,g)$.
 
 \subsection{Hindsight Goal Relabeling for BC Pretraining}
 \label{sec:her}
@@ -896,80 +874,43 @@ The curriculum embeds three domain-specific pedagogical principles:
 
 The curriculum also serves as a \emph{reward decomposition}: instead of one complex reward for winning the game, each phase has a single, simple reward objective that is achievable within the phase's timestep budget.
 
-\subsection{Eight Training Phases}
+\subsection{Five Competency Families}
 
 Each phase is defined by a \texttt{StageSpec} specifying: active goal mask, goal target sampler, action mask, and reward coefficients.
-Table~\ref{tab:curriculum} documents all eight phases.
+Table~\ref{tab:curriculum} documents the five retained competency families. A sixth
+\texttt{all\_skills\_llc} consolidation stage samples among them without adding a new goal.
 
 \begin{table}[t]
 \centering
-\caption{Eight-phase LLC training curriculum. Each phase introduces new skill complexity and warm-starts from the previous phase's weights.}
+\caption{Goal-conditioned competency curriculum. Each stage warm-starts from the previous skill checkpoint.}
 \label{tab:curriculum}
 \small
-\begin{tabular}{@{}clp{3.0cm}p{2.5cm}p{3.2cm}@{}}
+\begin{tabular}{@{}clp{3.4cm}p{3.0cm}@{}}
 \toprule
-\textbf{\#} & \textbf{Phase Name} & \textbf{Active Goal Dims} & \textbf{Action Mask} & \textbf{Reward Focus} \\
+\textbf{\#} & \textbf{Phase Name} & \textbf{Active Goal Dims} & \textbf{Key gate} \\
 \midrule
-1 & \texttt{locomotion\_grounded} & $x_p, y_p$ & No jump, no attack & MAE progress + step cost \\
-2 & \texttt{locomotion\_airborne} & $x_p, y_p$ & No attack & + jump usage \\
-3 & \texttt{locomotion\_recovery} & $x_p, y_p, \mathbb{1}_{\text{offstage}}$ & Dodge enabled & + offstage penalty \\
-4 & \texttt{locomotion} & $x_p, y_p, \mathbb{1}_{\text{offstage}}$ & Full movement & Combined locomotion \\
-5 & \texttt{weapon\_control} & $w_{\Delta x}, w_{\Delta y}, \mathbb{1}_{\text{weapon}}$ & Full & Weapon acquisition bonus \\
-6 & \texttt{damage\_static\_fist} & 6D combat goal & Full & Damage dealt (unarmed) \\
-7 & \texttt{damage\_static\_weapon} & 6D combat goal & Full & Damage dealt $\times 2$ \\
-8 & \texttt{damage\_dynamic} & Full 10D goal & Full & Damage dealt $\times 2.5$ \\
+1 & \texttt{movement\_fluency} & $x_p,y_p$ & nontrivial grounded and aerial targets \\
+2 & \texttt{weapon\_acquisition} & $\mathbb{1}_{weapon},\Delta x_w,\Delta y_w$ & acquire without pickup/drop loops \\
+3 & \texttt{spacing\_neutral} & $d_{opp},\Delta y_{opp}$ & relative positioning against opponent \\
+4 & \texttt{combat\_execution} & $D_{opp}$ & observed opponent-damage increase \\
+5 & \texttt{recovery\_mastery} & $\Delta x_{ledge},\Delta y_{ledge}$ & offstage $\rightarrow$ onstage $\rightarrow$ grounded \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\begin{figure}[t]
-\centering
-\begin{tikzpicture}[
-    phase/.style={rectangle, draw, rounded corners=3pt, minimum width=1.7cm, minimum height=0.9cm, align=center, font=\scriptsize\bfseries},
-    arrow/.style={-{Stealth[length=2mm]}, thick},
-    node distance=0.15cm and 0.0cm
-]
-    % Phase boxes
-    \node[phase, fill=lightgreen!80, draw=darkgreen] (p1) {Ph.1\\Grounded};
-    \node[phase, fill=lightgreen!60, draw=darkgreen, right=0.1cm of p1] (p2) {Ph.2\\Airborne};
-    \node[phase, fill=lightgreen!40, draw=darkgreen, right=0.1cm of p2] (p3) {Ph.3\\Recovery};
-    \node[phase, fill=lightblue!80, draw=darkblue, right=0.1cm of p3] (p4) {Ph.4\\Loco.};
-    \node[phase, fill=lightorange!80, draw=darkorange, right=0.1cm of p4] (p5) {Ph.5\\Weapon};
-    \node[phase, fill=lightred!60, draw=darkred, right=0.1cm of p5] (p6) {Ph.6\\Dmg.Fist};
-    \node[phase, fill=lightred!80, draw=darkred, right=0.1cm of p6] (p7) {Ph.7\\Dmg.Wpn};
-    \node[phase, fill=darkred!40, draw=darkred, right=0.1cm of p7] (p8) {Ph.8\\Dynamic};
-
-    % Arrows between phases
-    \foreach \a/\b in {p1/p2, p2/p3, p3/p4, p4/p5, p5/p6, p6/p7, p7/p8} {
-        \draw[arrow] (\a.east) -- (\b.west);
-    }
-
-    % BC annotation
-    \draw[decorate, decoration={brace, amplitude=5pt, mirror}] (p1.south west) -- (p4.south east)
-        node[midway, below=6pt, font=\footnotesize\itshape] {BC pretraining warm-start};
-
-    % Action mask annotation
-    \draw[decorate, decoration={brace, amplitude=5pt}] (p1.north west) -- (p4.north east)
-        node[midway, above=6pt, font=\footnotesize\itshape] {Progressive action unmasking};
-
-    % Color legend
-    \node[font=\footnotesize, below=1.2cm of p1, text=darkgreen] (l1) {\rule{0.5cm}{3pt} Locomotion};
-    \node[font=\footnotesize, right=0.4cm of l1, text=darkorange] (l2) {\rule{0.5cm}{3pt} Weapon};
-    \node[font=\footnotesize, right=0.4cm of l2, text=darkred] (l3) {\rule{0.5cm}{3pt} Combat};
-\end{tikzpicture}
-\caption{Eight-phase curriculum progression. Each phase warm-starts from the previous. Locomotion phases use action masking (no combat actions) and BC pretraining initialization. Progressive unmasking and complexity increase follow the natural skill dependency graph.}
-\label{fig:curriculum}
-\end{figure}
+The fixed pilot order is movement, weapon acquisition, spacing, combat, and recovery,
+followed by optional all-skills consolidation. Recovery is retained as a competency but
+deferred because scripted setup is required to create reliable offstage starts.
 
 \subsection{Phase Transitions and Weight Transfer}
 
-Each phase is trained for a fixed budget (typically $500$K--$1$M timesteps).
+Each phase is first run through a bounded integration pilot before any larger budget.
 At phase transition, the full model weights transfer: both the FiLM extractor and the PPO policy/value heads.
 The FiLM architecture facilitates transfer particularly well: the shared motor backbone (state encoder + post-FiLM MLP) transfers motor primitives, while the goal encoder and FiLM generator adapt to the new goal distribution.
 
 \subsection{Behavioral Cloning Pretraining}
 
-Before Phase 1 PPO training, the LLC is initialized via behavioral cloning on human keyboard demonstrations.
+Before PPO training, the skill policy is initialized via behavioral cloning on phase-specific scripted-teacher demonstrations.
 The BC loss is cross-entropy over the discrete action space:
 \begin{equation}
 \mathcal{L}_{\text{BC}} = -\mathbb{E}_{(s, g, a) \sim \mathcal{D}_{\text{demo}}} \left[\log \pi_\theta(a \mid \tilde{s}(s, g))\right]
@@ -983,7 +924,7 @@ This initialization avoids the random-walk exploration problem in the early phas
 \section{Anchored-Replay Proximal Policy Optimization}
 \label{sec:ppo}
 
-Standard PPO~\cite{schulman2017proximal} is the base optimizer for the LLC.
+Standard PPO~\cite{schulman2017proximal} is the base optimizer for the skill policy.
 However, the curriculum setting creates challenges that motivate several extensions.
 We implement a custom \texttt{AnchoredReplayPPO} optimizer with four modifications.
 
@@ -1032,7 +973,7 @@ The full PPO loss is:
 
 \subsection{Extension 1: On-Disk Experience Replay}
 
-The LLC faces a data-efficiency problem: at ${\sim}41$ steps/s and $n\_steps = 1024$, each PPO rollout covers only $\sim$25 seconds of real interaction.
+The skill policy faces a data-efficiency problem: at ${\sim}41$ steps/s, every PPO rollout consumes scarce live interaction. The fixed pilot uses $n\_steps=512$ so integration failures surface before a larger wall-clock budget is committed.
 We maintain an on-disk replay buffer that stores compressed PPO rollout tensors and samples a fixed mixture of current and past experience for each update.
 
 \begin{equation}
@@ -1128,37 +1069,20 @@ Within each minibatch, each goal type's advantage is independently normalized to
 \end{algorithm}
 
 % ══════════════════════════════════════════════════════════════
-\section{Hierarchical Strategic Planner}
-\label{sec:hsp}
+\section{Transfer to the Goal-Independent Final Agent}
+\label{sec:final-transfer}
 
-\subsection{Architecture}
+Skill pretraining produces $\pi_{\mathrm{skill}}(a\mid s,g)$, but goals are not retained at runtime. A separate policy $\pi_{\mathrm{final}}(a\mid s)$ consumes only the canonical state and history vector and is optimized on match reward.
 
-Once the LLC is fully trained across all eight curriculum phases, it is frozen.
-The High-Level Strategic Planner (HSP) operates at a coarser temporal resolution, issuing macro-goals to the frozen LLC every $T_{\text{macro}}$ primitive steps.
+The transfer is explicit. The final state encoder receives the state columns of the skill encoder's first layer; subsequent state-encoder layers, the post-modulation shared layer, policy/value representations, and compatible action/value heads are copied exactly. Goal encoders, goal-normalization buffers, and FiLM parameters have no goal-free equivalent and are reported as skipped. The process writes a tensor-level transfer report rather than hiding mismatches behind non-strict loading.
 
-\begin{definition}[HSP-LLC Interface]
-The HSP is a policy $\pi_H: \mathcal{S} \to \mathcal{G}$ that maps the current state to a goal $g = (\mathbf{t}, \mathbf{m})$.
-The frozen LLC then executes $T_{\text{macro}} = 12$ primitive actions under this goal before the HSP re-observes.
-\end{definition}
-
-This temporal abstraction reduces the HSP's effective horizon by a factor of $T_{\text{macro}}$, making its learning problem substantially easier than end-to-end training.
-
-\subsection{HSP Reward}
-
-The HSP reward aggregates outcomes over each macro-step:
+The final extractor separates representation encoding from the trainable policy adapter:
 \begin{equation}
-r_{\text{HSP}} = \lambda_g \sum_{t=1}^{T_{\text{macro}}} \Delta\varepsilon_t + \lambda_c \sum_{t=1}^{T_{\text{macro}}} (\Delta d_{\text{opp}} - \Delta d_{\text{self}}) + \lambda_s \sum_{t=1}^{T_{\text{macro}}} (\Delta k_{\text{opp}} - \Delta k_{\text{self}})
-\label{eq:hsp-reward}
+z_s = f_{\mathrm{state}}(s), \qquad h = f_{\mathrm{adapt}}(z_s), \qquad a \sim \pi_{\mathrm{final}}(\cdot\mid h).
 \end{equation}
+This boundary permits a future recurrent belief model to replace or augment $z_s$ without changing the actor and critic heads. No belief model is introduced in the current work.
 
-where $\Delta\varepsilon_t = \varepsilon(s_t, g) - \varepsilon(s_{t+1}, g)$ is goal progress, $\Delta d$ is damage change, $\Delta k$ is stock change, and $\lambda_g = 1.0$, $\lambda_c = 0.03$, $\lambda_s = 0.5$.
-
-\subsection{Objective Consistency}
-
-A key property is that both levels share the goal-error metric $\varepsilon(s, g)$.
-The LLC minimizes $\varepsilon$ directly.
-The HSP is rewarded for reductions in $\varepsilon$ at the macro-step level.
-This \emph{objective consistency} prevents the planner-controller mismatch~\cite{nachum2018data} that plagues many HRL systems: the HSP selects goals that the LLC can make progress on, and the LLC is trained to make progress on precisely such goals.
+Skill checkpoints and final checkpoints declare different roles and observation contracts. The former consume state, target, and mask; the latter consume state only. Training and evaluation fail closed on a role mismatch, preventing a goal-conditioned checkpoint from being mistaken for the deployed agent.
 
 % ══════════════════════════════════════════════════════════════
 \section{Theoretical Analysis}
@@ -1173,7 +1097,7 @@ Following~\cite{schaul2015universal}, the UVFA approximation error decomposes as
 \end{equation}
 
 Proposition~\ref{prop:dim-reduction} shows that masked partial goals reduce $|\mathcal{G}_{\text{eff}}|$ from $k$ to $\ell \ll k$.
-With $k = 10$ and $\ell = 2$--$4$ typical active dimensions, $\epsilon_{\text{gen}}$ is reduced by a factor of $k/\ell = 2.5$--$5\times$ relative to unmasked goals.
+With $k=11$ and one to three active dimensions, masking reduces the number of target coordinates contributing to each family. The resulting sample-efficiency effect is an empirical hypothesis rather than a claimed fixed multiplicative gain.
 
 \subsection{PCGrad Convergence}
 
@@ -1257,36 +1181,30 @@ BC loss coef. $\lambda_{\text{BC}}$ & $0.01$--$0.05$ & \\
 
 \subsection{Goal Sampling and Resampling}
 
-Goals are drawn from the composite distribution $P(g) = 0.4\, G_{\text{core}} + 0.4\, G_{\text{HER}} + 0.2\, G_{\text{archive}}$ (Eq.~\ref{eq:goal-sampling}).
-Each phase defines a phase-specific \texttt{TargetSampler} for $G_{\text{core}}$:
-for locomotion phases targets are drawn uniformly from valid platform bounds;
-for weapon control as offsets from the current weapon position;
-for combat phases from distributions of tactically useful configurations (spacing distances, approach ranges).
-
-$G_{\text{HER}}$ selects a future state from the current episode and uses its feature vector $f(s_{t+h})$ as the goal target.
-$G_{\text{archive}}$ samples from successful stored trajectories in the replay buffer (Section~\ref{sec:ppo}).
-
-\paragraph{Temporal consistency.}
-Goals are held constant for $k \in [16, 32]$ steps (Eq.~\ref{eq:goal-temporal}).
-The 16-step floor prevents rapid cycling that would let the policy game short-duration goal-achievement bonuses.
+Each phase defines a bounded target sampler over its active dimensions. Targets are
+sampled at reset and remain stable for the episode. Demonstration collection rejects a
+target already satisfied at step zero; weapon offsets are masked after acquisition; and
+combat samples a damage increment from the observed current opponent damage.
 
 \subsection{Action Space}
 
-The MultiDiscrete action space $\{0,1,2,3\} \times \{0,1\} \times \{0,1\} \times \{0,1,2,3\}$ is flattened to $\text{Discrete}(64)$ via mixed-radix encoding.
-Early curriculum phases apply action masking by zeroing out logits for masked actions before the softmax.
-The full action semantics are:
+The policy emits one categorical action from $\text{Discrete}(27)$. Directions are
+canonical \textsc{toward}/\textsc{away}; physical left/right is chosen only at key
+injection. Phase restrictions are single allowlists rather than contradictory component
+booleans. The action families are:
 
 \begin{table}[h]
 \centering
 \small
-\begin{tabular}{@{}llll@{}}
+\begin{tabular}{@{}lcl@{}}
 \toprule
-\textbf{Component} & \textbf{Values} & \textbf{Meaning} & \textbf{Masked (Phase 1)} \\
+\textbf{Family} & \textbf{Count} & \textbf{Meaning} \\
 \midrule
-Movement & 0--3 & Idle/Left/Right/Down & Partial (no Down) \\
-Jump & 0--1 & No jump / Jump & Yes (no jump) \\
-Dodge & 0--1 & No dodge / Dodge & Yes (no dodge) \\
-Attack & 0--3 & None/Light/Heavy/Sig & Yes (no attack) \\
+Locomotion & 9 & idle, movement, fast-fall, and jump variants \\
+Dodge/dash & 9 & spot and eight directional variants \\
+Light attack & 4 & neutral, toward, away, and down \\
+Heavy attack & 4 & signatures on ground; recovery/ground-pound in air \\
+Interaction & 1 & weapon pickup/throw input \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1310,74 +1228,40 @@ The training pipeline is:
     \item \textbf{BC pretraining}: supervised training with HER-relabeled goal supervision.
     \item \textbf{PPO fine-tuning}: AnchoredReplayPPO with concurrent BC and KL losses.
     \item \textbf{Phase advancement}: save checkpoint, load next phase's StageSpec, resume.
-    \item \textbf{HSP training}: freeze LLC, train HSP with goal-progress reward.
+    \item \textbf{Explicit transfer}: initialize the goal-independent policy from compatible
+          state-processing and actor--critic tensors while reporting every skipped goal tensor.
+    \item \textbf{Final-policy training}: optimize one policy directly on full-match reward,
+          without a goal input or runtime skill selector.
 \end{enumerate}
 
 % ══════════════════════════════════════════════════════════════
 \section{Results and Current Status}
 \label{sec:results}
 
-\subsection{Achieved Capabilities}
+\subsection{Verified Engineering and Pilot Evidence}
 
-The LLC, trained through Phases 1--5, demonstrates the following capabilities:
+The current repository supports stronger engineering conclusions than behavioral ones.
+All five recollected demonstration archives pass the archive validator, the goal-conditioned
+skill contract is 168-dimensional, the final contract is 146-dimensional, and typed
+checkpoint tests prevent either role from being loaded as the other. The explicit converter
+copies compatible representation and actor--critic tensors and emits a machine-readable
+list of every discarded goal/FiLM tensor.
 
-\begin{table}[t]
-\centering
-\caption{LLC capabilities by phase. ``Achieved'' denotes behavioral criteria verified via qualitative evaluation.}
-\small
-\begin{tabular}{@{}clcl@{}}
-\toprule
-\textbf{Phase} & \textbf{Skill} & \textbf{Status} & \textbf{Key Metric} \\
-\midrule
-1 & Grounded locomotion to target & Achieved & $<5\%$ position error in $\leq 30$ steps \\
-2 & Airborne control (jump to aerial target) & Achieved & Reaches aerial targets $>80\%$ of episodes \\
-3 & Recovery from offstage & Achieved & Returns to platform from offstage $>70\%$ \\
-4 & Combined locomotion (full movement) & Achieved & Consistent goal-conditioned navigation \\
-5 & Weapon acquisition & Achieved & Picks up ground weapon $>75\%$ \\
-6--7 & Damage dealing (fist + weapon) & In progress & Training ongoing \\
-8 & Full combat (dynamic opponent) & Planned & Requires Phase 6--7 completion \\
-\bottomrule
-\end{tabular}
-\end{table}
+The completed 4,096-step movement integration run produced a valid checkpoint and logs
+without numerical errors. In the follow-up five-episode comparisons, BC and PPO both
+reached 0.8 deterministic success, while stochastic PPO reached 0.6. None met the
+promotion gate. These results verify the training path but do not establish movement
+mastery or a PPO improvement over BC.
 
-These capabilities \emph{transfer across the goal distribution}: the same Phase-4 LLC serves recovery, approach, spacing, and pressure goals without retraining, validating the UVFA generalization.
-The FiLM conditioning successfully separates motor planning (shared backbone) from goal-specific behavioral modulation (goal encoder + FiLM layer).
+\subsection{Required Controlled Experiments}
 
-\subsection{Ablation: Impact of Architectural Choices}
-
-\begin{table}[t]
-\centering
-\caption{Qualitative ablation. $\checkmark$ = converges to competent behavior; $\times$ = fails or severely degraded.}
-\small
-\begin{tabular}{@{}lcccc@{}}
-\toprule
-\textbf{Configuration} & \textbf{Goal-cond.} & \textbf{FiLM} & \textbf{Curriculum} & \textbf{Result} \\
-\midrule
-Flat PPO + pixel & --- & --- & --- & $\times$ Aliasing failure \\
-Flat PPO + YOLO state & --- & --- & --- & $\times$ Sparse reward failure \\
-Goal-cond. + concat & $\checkmark$ & --- & --- & Slow, brittle \\
-Goal-cond. + concat + curriculum & $\checkmark$ & --- & $\checkmark$ & Partial success \\
-Goal-cond. + FiLM & $\checkmark$ & $\checkmark$ & --- & Partial (no phase transfer) \\
-\textbf{Full system} & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ All phases 1--5 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Key observations from the ablation:
-\begin{itemize}[leftmargin=1.5em]
-    \item \textbf{YOLO state is necessary but not sufficient}: flat PPO with YOLO state fails due to sparse reward, not state quality.
-    \item \textbf{Goal conditioning is the primary enabler}: it converts the sparse-reward problem into a dense regression problem.
-    \item \textbf{FiLM over concatenation}: FiLM policies adapt faster to new goal distributions at phase transitions.
-    \item \textbf{Curriculum is essential for Phase 5+}: without curriculum pretraining, the agent fails to learn weapon acquisition from scratch.
-\end{itemize}
-
-\subsection{Training Efficiency}
-
-\begin{itemize}[leftmargin=1.5em]
-    \item \textbf{Phases 1--3 (world model)}: 500K steps in $\sim$30--60 seconds; $1000\times$ speedup over real game.
-    \item \textbf{Phases 4--5 (real game)}: 500K steps in $\sim$9 hours; BC initialization saves $\sim$2 hours of early random-walk.
-    \item \textbf{BC pretraining}: 60 demonstration episodes $\times$ 4 HER horizons $=$ 240 effective goal-conditioned trajectories; 15 BC epochs train in $<$5 minutes.
-\end{itemize}
+The architectural hypotheses remain to be measured with fixed interaction budgets and
+multiple seeds. The minimum comparison set is: skill BC versus skill PPO; normalized
+progress versus the previous reward; FiLM versus concatenation during skill pretraining;
+final policy initialized by explicit transfer versus a randomly initialized final policy;
+and ablations of replay, KL anchoring, BC regularization, and PCGrad. Main claims should be
+reported as performance versus environment interactions and wall-clock interaction time,
+not as qualitative success labels.
 
 % ══════════════════════════════════════════════════════════════
 \section{Discussion}
@@ -1385,22 +1269,22 @@ Key observations from the ablation:
 
 \subsection{The Compound Intractability Thesis}
 
-The central empirical finding of this work is that the three intractabilities of real-time fighting games (reward sparsity, perceptual aliasing, throughput starvation) are not independently solvable by standard techniques, but they \emph{are} jointly solvable by a structured modular approach.
+The working hypothesis is that the three constraints of real-time fighting games---reward sparsity, perceptual aliasing, and throughput starvation---must be addressed together by a structured modular approach.
 
 Specifically:
 \begin{itemize}[leftmargin=1.5em]
     \item Perceptual aliasing is solved by object detection (YOLO), not by better neural encoders.
-    \item Reward sparsity is solved by goal conditioning (masked MAE), not by better exploration.
-    \item Throughput starvation is solved by world models (for locomotion) and by efficiency engineering (TensorRT, on-disk replay).
+    \item Goal-conditioned pretraining supplies dense competency credit before match training.
+    \item TensorRT and replay improve use of the fixed real-interaction budget.
 \end{itemize}
-Each technique addresses one intractability without worsening the others---a critical property that the failure trajectory revealed only through empirical elimination.
+Whether the combined system improves final match performance is the central experiment, not an established result.
 
 \subsection{Domain Structure as a Resource}
 
 The framework succeeds by systematically injecting domain structure at every level:
 \begin{itemize}[leftmargin=1.5em]
     \item \textbf{YOLO}: ``the world contains identifiable objects with positions and velocities.''
-    \item \textbf{Goal features}: ``tactical relevance is determined by $k=10$ normalized state dimensions.''
+    \item \textbf{Goal features}: ``pretraining competence can be specified over 11 normalized state dimensions.''
     \item \textbf{Masking}: ``each goal type constrains only a relevant subset of features.''
     \item \textbf{Curriculum}: ``locomotion precedes combat in the skill dependency graph.''
     \item \textbf{FiLM}: ``goals modulate how state is processed, not what is observed.''
@@ -1424,17 +1308,17 @@ The specific goal features and curriculum phases are Brawlhalla-specific; the ar
 \section{Conclusion}
 \label{sec:conclusion}
 
-We have presented a complete hierarchical goal-conditioned reinforcement learning system for autonomous Brawlhalla play, developed through a principled iterative process of failure diagnosis and architectural response.
+We have presented a two-stage architecture for vision-only Brawlhalla control, developed through a principled process of failure diagnosis and explicit contract design.
 
 The system's core insight is that real-time fighting games are compound-intractable: perceptual aliasing, reward sparsity, and throughput limitations co-occur and reinforce each other, defeating every standard RL technique individually.
-The solution required structured intervention at every level of the pipeline: YOLO for perception, masked MAE for reward, FiLM for goal conditioning, curriculum for skill decomposition, and hierarchical composition for strategic planning.
+The solution uses structured intervention at every level of the pipeline: YOLO for perception, normalized masked goal progress for competency pretraining, FiLM for goal conditioning, curriculum for skill decomposition, and explicit parameter transfer into a goal-independent final policy.
 
-The resulting agent achieves proficient locomotion, aerial recovery, weapon acquisition, and goal-conditioned motor control---all from raw pixel observations, with no game API access, trained at human-game-speed throughput.
-We believe this establishes a reproducible blueprint for applying hierarchical goal-conditioned RL to real-time adversarial games with structured tactical dynamics.
+The implemented system establishes testable interfaces for five goal-conditioned competencies and for a final policy that acts from raw structured state and history alone. Skill-checkpoint and final-checkpoint roles, observation dimensions, and transferred tensors are machine-checked; full-match competence remains an empirical milestone rather than a claimed result.
+This provides a reproducible blueprint for using goal conditioning as temporary training scaffolding in a real-time adversarial domain without retaining a runtime planner--controller boundary.
 
 \paragraph{Future directions.}
-Immediate next steps are: completing Phases 6--8 (combat training), HSP training on a frozen fully-trained LLC, and a self-play extension where the opponent is replaced by a previous version of the agent.
-Longer-term: integrating sequence models (Transformer or LSTM) into the FiLM extractor to capture temporal patterns (combos, hitstun timing) not expressible in the instantaneous 55-dim state.
+Immediate next steps are: validating all five competency families against real-game gates, transferring the best typed skill checkpoint into the final policy, and measuring final-policy learning against a fixed Wu Shang--versus--Mordex protocol on Small Brawlhaven.
+Longer-term work includes broadening opponents only after the fixed-opponent benchmark is sound, and evaluating a recurrent or learned belief-state encoder behind the documented representation seam.
 
 % ══════════════════════════════════════════════════════════════
 \bibliographystyle{plainnat}

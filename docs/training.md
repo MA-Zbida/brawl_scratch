@@ -18,7 +18,13 @@ python tools/debug_observation_overlay.py --phase movement_fluency --show --max-
 
 Check boxes, stocks, damage, weapon state, platform position and relative geometry before continuing.
 
-## 1. Collect demonstrations
+## Stage A — goal-conditioned skill pretraining
+
+Goals are dense competency scaffolding used only in this stage. The skill policy
+observes `[state/history | target | mask]`; it is evaluated by per-goal competence
+and retention, not by final match win rate.
+
+### 1. Collect demonstrations
 
 Scripted teacher, one phase:
 
@@ -50,7 +56,7 @@ python tools/validate_llc_demos.py --phase all --min-samples 100
 Bad demonstrations become bad anchors — they are replayed as a BC loss for the entire PPO run.
 Recollect any phase with high idle rate, low action entropy, missing goal masks, or wrong metadata.
 
-## 2. Behaviour cloning
+### 2. Behaviour cloning
 
 ```powershell
 python -m train.pretrain_bc_locomotion --phase movement_fluency
@@ -63,7 +69,7 @@ the median episode length are dropped automatically.
 
 Produces `train/models/llc_<phase>_bc_init.zip`.
 
-## 3. PPO fine-tuning
+### 3. PPO fine-tuning
 
 ```powershell
 python -m train.train_curriculum --phase movement_fluency --resume train/models/llc_movement_fluency_bc_init.zip
@@ -89,7 +95,7 @@ prior phase archive. Relevant knobs:
 > **Real-time warning.** The game does not pause during PPO updates. With the default `n_steps=2048`
 > at roughly 40 steps/s, the agent is idle for the duration of each update while the match continues.
 
-## 4. Monitor
+### 4. Monitor
 
 In a second terminal:
 
@@ -100,7 +106,7 @@ python tools/llc_live_monitor.py --phase movement_fluency
 Treat reported stop signals as real: high idle rate, collapsing action entropy, high whiff rate,
 negative damage trade, or a retention failure.
 
-## 5. Evaluate and gate
+### 5. Evaluate and gate
 
 ```powershell
 python -m train.evaluate_retention --phase movement_fluency
@@ -115,7 +121,7 @@ Record your own visual judgement, which can veto the metrics:
 python tools/record_llc_observation.py --phase movement_fluency --approved yes --notes "what you saw"
 ```
 
-## 6. Advance
+### 6. Advance
 
 ```powershell
 python tools/llc_next_action.py
@@ -124,6 +130,36 @@ python tools/llc_next_action.py
 The advisor inspects demonstrations, checkpoints, eval CSVs, plots and manual approvals. If it reports
 `STOP`, do not advance.
 
+## Stage B — goal-independent final agent
+
+After all five families and consolidation pass retention, transfer the compatible
+representation and policy weights into a model whose observation is the raw
+146-feature state/history vector:
+
+```powershell
+python -m train.transfer_skill_checkpoint --skill-checkpoint train/models/llc_all_skills_llc.zip --output train/models/final_agent/final_agent_init.zip --device cpu
+```
+
+The command writes a typed checkpoint sidecar and a tensor-by-tensor transfer
+report. Goal encoders and FiLM parameters are deliberately skipped. Legacy skill
+archives without metadata require the explicit
+`--allow-untyped-skill-checkpoint` flag.
+
+Fine-tune one policy directly on match reward:
+
+```powershell
+python -m train.final_agent --resume train/models/final_agent/final_agent_init.zip --save-dir train/models/final_agent --model-name final_agent --device cpu
+```
+
+Evaluate the same checkpoint with no goal scheduler:
+
+```powershell
+python -m train.run_match --model train/models/final_agent/final_agent.zip --matches 30 --device cpu --csv outputs/final_agent_matches.csv
+```
+
+Final evaluation reports wins, stock differential, damage dealt/received,
+offstage rate, environment steps, and real interaction seconds.
+
 ## Artefacts produced
 
 | Path | Contents |
@@ -131,10 +167,15 @@ The advisor inspects demonstrations, checkpoints, eval CSVs, plots and manual ap
 | `train/models/<phase>_demos.npz` | demonstrations with goals, masks, metadata |
 | `train/models/llc_<phase>_bc_init.zip` | BC-initialised policy |
 | `train/models/llc_<phase>.zip` | fine-tuned policy |
+| `train/models/llc_<phase>.zip.metadata.json` | typed skill-checkpoint role and observation contract |
 | `train/models/llc_<phase>_steps.csv` | per-step rewards, goal errors, actions, events |
 | `train/models/llc_<phase>_episodes.csv` | per-episode returns, success, entropy, whiff rate |
 | `train/models/llc_<phase>_eval.csv` | per-phase skill score, retention, amnesia |
 | `train/models/llc_retention_best.json` | best score per phase, for retention math |
 | `outputs/llc_<phase>_run_report.md` | generated run report |
+| `train/models/final_agent/final_agent*.zip` | goal-independent final initializer/checkpoint |
+| `train/models/final_agent/final_agent*.zip.metadata.json` | typed final-agent role and provenance |
+| `train/models/final_agent/final_agent*.zip.transfer.json` | copied/skipped tensor report |
+| `outputs/final_agent_matches.csv` | full-match metrics and wall-clock interaction time |
 
 Figures for the report are regenerated from these CSVs by [`analysis/`](../analysis/).

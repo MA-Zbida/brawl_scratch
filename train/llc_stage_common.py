@@ -64,13 +64,12 @@ FEATURE_SCALE: dict[str, float] = {
     "rel_distance": 2.0,
     "in_strike_range": 1.0,
     "opponent_damage_pct": 1.0,
-    "opponent_damage_pct": 1.0,
 }
 
 
 @dataclass
 class StageSpec:
-    """Parametrises one LLC training stage.
+    """Parametrises one goal-conditioned skill-pretraining stage.
 
     Legacy stages use the unified 7-dim goal space from hierarchical/goals.py.
     New curriculum stages may provide a custom goal extractor and feature list.

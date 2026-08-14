@@ -40,7 +40,7 @@ This branch turns the LLC into a measured skill ladder with anti-collapse toolin
   - `tools/summarize_llc_run.py`
   - `tools/record_llc_observation.py`
   - `tools/print_llc_phase_commands.py`
-- Deferred HSP until the LLC passes `all_skills_llc` retention and manual approval. The HSP trainer now refuses to run unless the all-skills retention CSV passes, unless you explicitly use `--allow-legacy-hsp`.
+- Final-agent initialization is deferred until the skill policy passes `all_skills_llc` retention and manual approval.
 
 ## Setup
 
@@ -187,15 +187,18 @@ python tools/record_llc_observation.py --phase PHASE --approved yes --notes "wha
 
 Use `--approved no` if your eyes disagree with the metrics. The advisor will block advancement.
 
-## HSP
+## Final Agent
 
-Do not train HSP until the final LLC passes all gates and manual approval:
+After the skill policy passes every gate, convert it into a genuinely goal-free
+initializer, then fine-tune one policy on match reward:
 
 ```powershell
-python -m train.train_phase3_hsp --llc train/models/llc_all_skills_llc.zip --llc-retention-csv train/models/llc_all_skills_llc_retention_eval.csv
+python -m train.transfer_skill_checkpoint --skill-checkpoint train/models/llc_all_skills_llc.zip --output train/models/final_agent/final_agent_init.zip --device cpu
+python -m train.final_agent --resume train/models/final_agent/final_agent_init.zip --device cpu
 ```
 
-The override `--allow-legacy-hsp` exists, but it is intentionally not the recommended path because HSP still uses the older hierarchical goal space.
+The final checkpoint consumes the 146-dimensional state/history observation. It
+does not accept a goal vector and no scripted selector chooses a skill at runtime.
 
 ## What To Bring Back
 

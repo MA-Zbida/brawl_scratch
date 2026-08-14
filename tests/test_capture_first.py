@@ -38,6 +38,9 @@ LIVE_ENTRY_POINTS = [
     "train/pretrain_bc_locomotion.py",
     "train/train_curriculum.py",
     "train/evaluate_retention.py",
+    "train/final_agent.py",
+    "train/transfer_skill_checkpoint.py",
+    "train/run_match.py",
     "evaluate.py",
 ]
 

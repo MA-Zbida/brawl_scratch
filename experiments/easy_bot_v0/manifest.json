@@ -8,10 +8,17 @@
     "note": "The commit alone does not identify this source state. Make a deliberate source checkpoint before the first live PPO run."
   },
   "data_contract": {
+    "contract_role": "goal_conditioned_skill",
     "observation_dim": 168,
     "action_encoding": "discrete27",
     "action_dim": 27,
     "goal_dim": 11
+  },
+  "final_agent_contract": {
+    "observation_dim": 146,
+    "action_encoding": "discrete27",
+    "action_dim": 27,
+    "goal_conditioning": false
   },
   "demo_archives": [
     {
@@ -76,8 +83,8 @@
     {
       "role": "experiment_config",
       "path": "experiments/easy_bot_v0/config.json",
-      "sha256": "48ad4bc158b5539b18e8b19047ef8a093271e2123e1a258de9320a66cb6e5527",
-      "size_bytes": 2011
+      "sha256": "e9a0ac79fac92eb960538931d3203856a3649aca5e7c4b289b0da248330856e8",
+      "size_bytes": 2747
     },
     {
       "role": "movement_bc_initialization",

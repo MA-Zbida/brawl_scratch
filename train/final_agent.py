@@ -16,10 +16,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 
 from env import BrawlDeepEnv, EnvConfig
+from feature_extractor.memory.state_spec import StateSpec
+from reward.providers import MatchRewardProvider
 from train.checkpoint_roles import read_checkpoint_metadata, save_typed_checkpoint
 from train.final_config import FinalAgentConfig, parse_args
 from train.final_policy import initialize_final_model, load_final_model
@@ -64,7 +67,17 @@ class FinalTrainingMetricsCallback(BaseCallback):
         info = infos[0] if infos else {}
         rewards = self.locals.get("rewards", [0.0])
         actions = self.locals.get("actions", [0])
-        action_id = int(actions[0]) if len(actions) else 0
+        action_values = np.asarray(actions).reshape(-1)
+        action_id = int(action_values[0]) if action_values.size else 0
+        observations = np.asarray(self.locals.get("new_obs", []))
+        state = info.get("terminal_observation")
+        if state is None and observations.size:
+            state = observations.reshape(-1, observations.shape[-1])[0]
+        player_offstage = 0.0
+        player_has_weapon = 0.0
+        if state is not None:
+            player_offstage = StateSpec.get(state, "player_is_offstage")
+            player_has_weapon = StateSpec.get(state, "player_has_weapon")
         self._writer.writerow(
             {
                 "environment_step": int(self.num_timesteps),
@@ -75,8 +88,8 @@ class FinalTrainingMetricsCallback(BaseCallback):
                 "damage_received": float(info.get("self_delta_damage", 0.0)),
                 "op_stock_lost": float(info.get("op_stock_lost_step", 0.0)),
                 "self_stock_lost": float(info.get("self_stock_lost_step", 0.0)),
-                "player_offstage": float(info.get("player_is_offstage", 0.0)),
-                "player_has_weapon": float(info.get("player_has_weapon", 0.0)),
+                "player_offstage": float(player_offstage),
+                "player_has_weapon": float(player_has_weapon),
             }
         )
         return True
@@ -91,6 +104,7 @@ class FinalTrainingMetricsCallback(BaseCallback):
 
 def _make_env(cfg: FinalAgentConfig) -> BrawlDeepEnv:
     return BrawlDeepEnv(
+        reward_provider=MatchRewardProvider(),
         config=EnvConfig(
             terminate_on_stock_out=True,
             max_episode_steps=int(cfg.max_episode_steps),

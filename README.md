@@ -4,8 +4,9 @@ Training a Brawlhalla agent from **screen pixels alone** — no memory reading, 
 emulator — on a single consumer laptop (RTX 3050 Ti, 4 GB VRAM).
 
 > **Status: active research.** The perception → state → control stack runs end to end against the
-> live game. The low-level controller (LLC) curriculum is under active development and has not yet
-> cleared its retention gates. Numbers in `outputs/` are development logs, not published results.
+> live game. Goal-conditioned skill pretraining is under active development and has not yet
+> cleared its retention gates; the goal-free final agent is implemented but not yet trained to
+> mastery. Numbers in `outputs/` are development logs, not published results.
 > Known open problems are listed in [Known Issues](#known-issues) — they are documented on purpose.
 
 ![Brawlhalla training-mode reference frame](assets/screenshots/stage-reference-1080p.png)
@@ -41,10 +42,12 @@ flowchart LR
     A[DXCam capture<br/>1920x1080 @ 60fps] --> B[YOLO detector<br/>TensorRT]
     B --> C[Structured Memory<br/>tracking, physics, stage geometry]
     U[UI pixel probes<br/>stocks + damage] --> C
-    C --> D[StateSpec<br/>observation vector]
-    D --> E[Goal augmentation<br/>target + mask]
-    E --> F[FiLM extractor<br/>goal-conditioned]
-    F --> G[PPO policy<br/>Discrete-27]
+    C --> D[StateSpec<br/>146 state/history features]
+    D --> E[Skill pretraining only<br/>target + mask + FiLM]
+    E --> T[Explicit weight transfer]
+    D --> F[Final state encoder<br/>no goal input]
+    T --> F
+    F --> G[Final PPO policy<br/>Discrete-27]
     G --> H[pydirectinput<br/>keyboard injection]
     H --> A
 ```
@@ -58,10 +61,14 @@ extent, stage geometry, ledge distances, and relational features. Stocks and dam
 fixed UI pixel probes. The observation is horizontally canonicalised and carries a short history
 window — see [`docs/observation-space.md`](docs/observation-space.md).
 
-**Control.** A single goal-conditioned policy (UVFA with FiLM modulation) is trained across five
-skill families rather than five separate networks. A goal is a target vector plus a mask selecting
-which dimensions are active, so one network covers recovery, movement, weapon acquisition, spacing
-and combat.
+**Skill pretraining.** A goal-conditioned policy (UVFA with residual FiLM) learns five competency
+families in one network: movement, recovery, weapon acquisition, spacing, and combat. Active-mask
+mass-normalized goal progress supplies dense credit while retention gates detect forgetting.
+
+**Final control.** The skill network initializes a separate goal-independent policy. Compatible
+state, shared, actor, and critic weights transfer explicitly; goal encoders and FiLM parameters are
+reported as skipped. At runtime one policy maps the 146-feature canonical state/history vector
+directly to `Discrete(27)`. Goals are training scaffolding, not a runtime decision layer.
 
 **Training.** Scripted teachers bootstrap each skill, behaviour cloning initialises the policy, and
 PPO fine-tunes it. Anti-forgetting machinery (experience replay, KL anchoring to a snapshot pool,
@@ -110,12 +117,20 @@ Verify perception before doing anything else — if the overlay is wrong, everyt
 python tools/debug_observation_overlay.py --phase movement_fluency --show --max-steps 1000
 ```
 
-Collect teacher demonstrations, pretrain, then fine-tune:
+Collect teacher demonstrations, pretrain, and fine-tune the skill policy:
 
 ```powershell
 python -m train.collect_heuristic_curriculum_demos --episodes-per-phase 50
 python -m train.pretrain_bc_locomotion --phase movement_fluency
 python -m train.train_curriculum --phase movement_fluency --resume train/models/llc_movement_fluency_bc_init.zip
+```
+
+Once all five families pass retention, initialize and train the final agent:
+
+```powershell
+python -m train.transfer_skill_checkpoint --skill-checkpoint train/models/llc_all_skills_llc.zip --output train/models/final_agent/final_agent_init.zip --device cpu
+python -m train.final_agent --resume train/models/final_agent/final_agent_init.zip --device cpu
+python -m train.run_match --model train/models/final_agent/final_agent.zip --device cpu
 ```
 
 The advisor tool reports what the project state says should happen next:
@@ -134,8 +149,8 @@ config.py                  Stage geometry and UI probe calibration
 feature_extractor/
   yolo/                    Detector wrapper and weights
   memory/                  Structured game state + observation spec
-hierarchical/              Goal spaces and the high-level policy environment
-train/                     Curriculum config, teachers, demo collection, BC, PPO entrypoints
+hierarchical/              Legacy goal-conditioning compatibility utilities (no runtime planner)
+train/                     Skill curriculum, explicit transfer, final training/evaluation
 algo/                      AnchoredReplayPPO (replay + KL anchor + BC + PCGrad)
 reward/                    UI pixel decoding for stocks and damage
 tools/                     Preflight, overlay debugger, monitors, validators, plotting

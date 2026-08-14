@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+# Support both ``python -m train.transfer_skill_checkpoint`` and the repository's
+# documented direct-script entry point while preserving DXGI-before-torch order.
+import sys as _sys
+from pathlib import Path as _Path
+
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+import capture_first  # noqa: E402,F401
+
 import argparse
 from typing import Sequence
 

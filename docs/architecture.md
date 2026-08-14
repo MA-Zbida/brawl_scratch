@@ -14,7 +14,7 @@ One environment step, as implemented in `BrawlDeepEnv.step`
 4. **Update state** — `Memory.update_from_detections` associates detections to fighters, integrates
    velocities, and updates stage-relative geometry.
 5. **Read UI** — fixed pixel probes decode stocks and damage.
-6. **Reward** — the active wrapper computes goal error and shaping terms.
+6. **Reward** — skill pretraining computes goal progress; final training uses match outcomes and combat events.
 7. **Observe** — `Memory.to_vector()` produces the observation.
 
 An action may be repeated over several inner frames (`action_repeat_*`), with tap-type inputs emitted
@@ -69,7 +69,16 @@ coordinates (`UI_REGIONS`):
 `PixelStocksHealthProvider` debounces stock events with a confirmation window, a cooldown, and a
 per-side lock, because the flash persists across several frames.
 
-## Policy
+## Policies: training scaffold and runtime agent
+
+The repository has two deliberately different observation contracts:
+
+```text
+skill pretraining: [state/history (146) | target (11) | mask (11)] -> action
+final agent:        [state/history (146)]                         -> action
+```
+
+### Goal-conditioned skill pretraining
 
 `StageGoalEnv` augments the observation to `[state | goal_target | goal_mask]`, then
 `StageGoalFiLMExtractor` ([`feature_extractor/film_extractor.py`](../feature_extractor/film_extractor.py)):
@@ -81,6 +90,25 @@ per-side lock, because the flash persists across several frames.
 5. applies `γ · φ(s) + β + φ(s)` (clamped, with residual)
 
 This is a UVFA: one network conditioned on a goal, rather than one network per skill.
+
+Goal error is normalized by active mask mass. Every family uses progress
+`error(s_t,g) - error(s_{t+1},g)`, so reward scale does not grow merely because a
+family activates more dimensions. Combat constrains measured opponent damage;
+`in_strike_range` remains an observation feature, not a prescribed goal.
+
+### Goal-independent final agent
+
+`FinalStateExtractor` consumes only the canonical 146-feature state/history vector.
+It exposes a state encoder and a trainable adapter before the actor/critic heads. The
+explicit transfer utility projects the skill encoder's first layer onto its state
+columns, copies compatible state/shared/actor/critic tensors, and records goal
+encoders and FiLM tensors as skipped. No constant goal or scripted skill selector is
+used. This representation/adapter boundary is also where a future belief encoder can
+be inserted without rewriting the action heads.
+
+The final environment is bare `BrawlDeepEnv`, whose match reward combines measured
+damage, stock outcomes, weapon possession, proximity, and stage safety. It never
+receives a skill target or goal-progress reward.
 
 ## Action space
 
@@ -117,8 +145,9 @@ exposed via `action_masks()` and in `info`, and takes effect once training moves
 
 ## Training algorithm
 
-`AnchoredReplayPPO` ([`algo/anchored_replay_ppo.py`](../algo/anchored_replay_ppo.py)) extends
-Stable-Baselines3 PPO with four mechanisms aimed at catastrophic forgetting:
+During skill pretraining, `AnchoredReplayPPO`
+([`algo/anchored_replay_ppo.py`](../algo/anchored_replay_ppo.py)) extends Stable-Baselines3 PPO
+with four mechanisms aimed at catastrophic forgetting:
 
 - **Replay mixing** — each minibatch blends on-policy samples with stored transitions, sampled with
   priority proportional to positive advantage.
@@ -130,3 +159,6 @@ Stable-Baselines3 PPO with four mechanisms aimed at catastrophic forgetting:
 
 Neither the BC coefficient nor the KL coefficient is annealed, so these terms retain their full
 strength for the whole run.
+
+Final-agent fine-tuning currently uses standard PPO on match reward. Skill and final
+archives carry different checkpoint roles and cannot be loaded through the wrong path.

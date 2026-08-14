@@ -21,6 +21,7 @@ import numpy as np
 from action_space import ACTION_DIM
 from env import BrawlDeepEnv, EnvConfig
 from feature_extractor.memory.state_spec import StateSpec
+from reward.providers import MatchRewardProvider
 from train.final_policy import load_final_model
 from world_model.replay_log import WorldReplayRecorder, WorldReplayWriter
 
@@ -99,6 +100,7 @@ def main() -> int:
     # 168-dimensional observation contract differ from the final policy.
     model = load_final_model(args.model, device=args.device)
     base = BrawlDeepEnv(
+        reward_provider=MatchRewardProvider(),
         config=EnvConfig(
             terminate_on_stock_out=False,
             max_episode_steps=0,

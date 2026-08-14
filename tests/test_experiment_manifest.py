@@ -87,12 +87,30 @@ def test_easy_bot_config_freezes_the_deferred_pilot_contract() -> None:
     config = json.loads(config_path.read_text(encoding="utf-8"))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    assert tuple(config["phase_order"]) == PHASE_ORDER
+    assert config["schema_version"] == 2
     assert config["model_dir"] == "train/models/easy_bot_v0"
     assert config["perception"]["weapon_classifier_enabled"] is False
     assert config["perception"]["yolo_infer_every_n_steps"] == 1
-    assert config["ppo_pilot"]["timesteps_per_phase"] == 4096
-    assert config["ppo_pilot"]["n_steps"] == 512
+    skill = config["skill_pretraining"]
+    final = config["final_agent"]
+    assert tuple(skill["phase_order"]) == PHASE_ORDER
+    assert skill["initialization"]["device"] == "cpu"
+    assert skill["ppo_pilot"]["timesteps_per_phase"] == 4096
+    assert skill["ppo_pilot"]["n_steps"] == 512
+    assert skill["ppo_pilot"]["device"] == "cpu"
+    assert final["goal_conditioning"] is False
+    assert final["objective"] == "match"
+    assert final["device"] == "cpu"
+    assert final["observation_dim"] == 146
+    assert manifest["final_agent_contract"] == {
+        "observation_dim": 146,
+        "action_encoding": "discrete27",
+        "action_dim": 27,
+        "goal_conditioning": False,
+    }
+    protocol = Path("experiments/easy_bot_v0/protocol.md").read_text(encoding="utf-8")
+    assert protocol.count("--device cuda") == 1  # TensorRT/CUDA preflight only.
+    assert protocol.count("--device cpu") == 12
     assert manifest["aggregate"] == {
         "samples": 7938,
         "episodes": 200,

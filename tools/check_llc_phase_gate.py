@@ -186,7 +186,7 @@ def recommend_actions(
 
     if any("damage trade" in failure for failure in failures):
         recommendations.append(
-            "Negative damage trade: do not progress to HSP; collect better combat demos, verify damage extraction, and rehearse spacing/combat together."
+            "Negative damage trade: do not initialize the final agent yet; collect better combat demos, verify damage extraction, and rehearse spacing/combat together."
         )
 
     if any("current score" in failure for failure in failures):

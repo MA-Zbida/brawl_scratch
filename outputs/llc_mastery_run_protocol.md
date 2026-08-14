@@ -4,7 +4,7 @@
 > the Easy-bot v0 pilot. The current, artifact-pinned sequence is
 > `experiments/easy_bot_v0/protocol.md`.
 
-Use one fixed setup until LLC retention is stable: same legend, map/platform, bot difficulty, 1920x1080 layout, and calibrated UI/perception. Do not start HSP until all LLC phases pass the retention gate.
+Use one fixed setup until skill retention is stable: same legend, map/platform, bot difficulty, 1920x1080 layout, and calibrated UI/perception. Do not initialize the final agent until all skill phases pass the retention gate.
 
 For the goal-by-goal metric and plot checklist, use `outputs/llc_goal_evaluation_matrix.md`.
 
@@ -87,7 +87,7 @@ If it fails:
 - Prior phase amnesia/retention failure: stop the ladder and run a 100k-step rehearsal of the current phase with all demos so far, `--anchor-kl-coef 0.06`, and `--bc-loss-coef 0.12`.
 - High idle rate: inspect perception first, then refresh movement demos and keep entropy high for the next rehearsal.
 - High combat whiff rate: rehearse spacing before combat, add punish-timing demos, and do not reward random attack spam.
-- Negative combat damage trade: do not start HSP; verify damage extraction, collect better combat demos, then rehearse spacing/combat together.
+- Negative combat damage trade: do not initialize the final agent; verify damage extraction, collect better combat demos, then rehearse spacing/combat together.
 
 ## 1. Perception Sanity Check
 
@@ -228,14 +228,16 @@ python tools/record_llc_observation.py --phase all_skills_llc --approved yes --n
 
 Use `--approved no` when your eyes disagree with the metrics. That blocks advancement and preserves the reason.
 
-## 6. HSP Is Deferred
+## 6. Final-Agent Initialization Is Deferred
 
-Do not train HSP until `all_skills_llc` passes `tools/check_llc_phase_gate.py --phase all_skills_llc --phases all` and your visual notes agree.
+Do not transfer into the final policy until `all_skills_llc` passes `tools/check_llc_phase_gate.py --phase all_skills_llc --phases all` and your visual notes agree.
 
-The HSP trainer now enforces that:
+Then create a typed, goal-free initializer and train directly on match reward:
 
 ```powershell
-python -m train.train_phase3_hsp --llc train/models/llc_all_skills_llc.zip --llc-retention-csv train/models/llc_all_skills_llc_retention_eval.csv
+python -m train.transfer_skill_checkpoint --skill-checkpoint train/models/llc_all_skills_llc.zip --output train/models/final_agent/final_agent_init.zip --device cpu
+python -m train.final_agent --resume train/models/final_agent/final_agent_init.zip --device cpu
 ```
 
-`--allow-legacy-hsp` exists only as an explicit override, because current HSP still uses the legacy `hierarchical/goals.py` goal space rather than the current 11-feature curriculum space.
+Existing skill archives without role metadata require the explicit
+`--allow-untyped-skill-checkpoint` conversion flag. New checkpoints are typed.

@@ -9,10 +9,10 @@ from __future__ import annotations
 from feature_extractor.memory.structured_memory import Memory
 
 
-class NullRewardProvider:
-    """Reward for training-mode vs easy bot.
+class MatchRewardProvider:
+    """Reward for direct full-match training against the configured bot.
 
-    Components (8 total):
+    Components (9 total):
         1. dmg_dealt      – positive per opponent HP lost
         2. ko_reward       – bonus per opponent stock taken
         3. ko_penalty      – penalty per self stock lost
@@ -130,3 +130,10 @@ class NullRewardProvider:
 
     def update_memory(self, frame, memory: Memory,) -> None:
         return
+
+
+# Historical imports called the only implemented match reward "null" even
+# though it has always emitted dense damage and sparse stock/win signals. Keep
+# the alias for old entry points and pickled configuration, while new code uses
+# the name that states the actual contract.
+NullRewardProvider = MatchRewardProvider

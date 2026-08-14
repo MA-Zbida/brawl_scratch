@@ -4,7 +4,7 @@ Observation layout expected:
     [state(base_dim) | goal_target_norm(G) | mask(G)]
 
 where G = len(feature_names), goal_target_norm = target / feature_scale,
-and base_dim = StateSpec.dim().
+and base_dim is the complete current-state plus configured-history prefix.
 
 The extractor:
   1. Extracts the G goal features from the raw state and normalises them.
@@ -13,9 +13,8 @@ The extractor:
   4. Encodes augmented state s_aug = [state, masked_error, mask, goal_alignment].
   5. Encodes goal vector and applies FiLM modulation with residual.
 
-This mirrors GoalConditionedModulationExtractor (hierarchical/goal_conditioning.py)
-but is parametrised by stage-specific feature names rather than the fixed 7-dim
-combat goal, so it composes across all LLC stages.
+The extractor is parametrised by stage-specific feature names, so the same
+skill policy can train across all five competency families.
 """
 
 from __future__ import annotations

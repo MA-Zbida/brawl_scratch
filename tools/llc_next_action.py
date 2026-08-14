@@ -393,15 +393,17 @@ def build_advice(args: argparse.Namespace) -> Advice:
                 )
 
     return Advice(
-        title="LLC ladder artifacts are complete; inspect final report before HSP",
+        title="skill-pretraining ladder is complete; initialize the final agent",
         next_phase="all_skills_llc",
-        next_kind="llc_complete",
+        next_kind="skill_pretraining_complete",
         command=(
-            "python -m train.train_phase3_hsp --llc train/models/llc_all_skills_llc.zip "
-            "--llc-retention-csv train/models/llc_all_skills_llc_retention_eval.csv"
+            "python -m train.transfer_skill_checkpoint "
+            "--skill-checkpoint train/models/llc_all_skills_llc.zip "
+            "--output train/models/final_agent/final_agent_init.zip --device cpu"
         ),
         details=[
-            "Run HSP only if all reports and your live observation agree that movement, recovery, weapon pickup, spacing, and combat did not collapse.",
+            "Transfer only after all retention reports and live observation agree that movement, recovery, weapon pickup, spacing, and combat did not collapse.",
+            "The converted checkpoint consumes state/history only; train it with train.final_agent on match reward.",
         ],
         states=states,
     )

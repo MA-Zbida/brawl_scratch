@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "experiment_id": "easy_bot_v0",
-  "objective": "Test whether one sequential goal-conditioned LLC can produce positive full-match play against one fixed Easy bot.",
+  "objective": "Use goal-conditioned competency pretraining to initialize one goal-independent policy, then measure full-match play against one fixed Easy bot.",
   "model_dir": "train/models/easy_bot_v0",
   "game_setup": {
     "player_legend": "Wu Shang",
@@ -12,45 +12,71 @@
     "resolution": [1920, 1080],
     "opponent_pool_size": 1
   },
-  "phase_order": [
-    "movement_fluency",
-    "weapon_acquisition",
-    "spacing_neutral",
-    "combat_execution",
-    "recovery_mastery",
-    "all_skills_llc"
-  ],
-  "active_pilot_phases": [
-    "movement_fluency",
-    "weapon_acquisition",
-    "spacing_neutral",
-    "combat_execution"
-  ],
   "perception": {
     "detector": "feature_extractor/yolo/best.engine",
     "yolo_infer_every_n_steps": 1,
     "weapon_classifier_enabled": false
   },
-  "initialization": {
-    "movement_checkpoint": "train/models/llc_movement_fluency_bc_init.zip",
-    "later_phase_bc_epochs": 8,
-    "bc_batch_size": 512,
-    "bc_learning_rate": 0.0002,
-    "bc_entropy_coef": 0.001,
-    "goal_relabel": true
+  "skill_pretraining": {
+    "goal_conditioning": true,
+    "goal_families": [
+      "movement",
+      "weapon_acquisition",
+      "spacing",
+      "combat",
+      "recovery"
+    ],
+    "goal_error": "active_mask_mass_normalized",
+    "dense_reward": "goal_progress",
+    "phase_order": [
+      "movement_fluency",
+      "weapon_acquisition",
+      "spacing_neutral",
+      "combat_execution",
+      "recovery_mastery",
+      "all_skills_llc"
+    ],
+    "active_pilot_phases": [
+      "movement_fluency",
+      "weapon_acquisition",
+      "spacing_neutral",
+      "combat_execution"
+    ],
+    "initialization": {
+      "movement_checkpoint": "train/models/llc_movement_fluency_bc_init.zip",
+      "device": "cpu",
+      "later_phase_bc_epochs": 8,
+      "bc_batch_size": 512,
+      "bc_learning_rate": 0.0002,
+      "bc_entropy_coef": 0.001,
+      "goal_relabel": true
+    },
+    "ppo_pilot": {
+      "timesteps_per_phase": 4096,
+      "n_steps": 512,
+      "batch_size": 256,
+      "max_episode_steps": 200,
+      "seed": 42,
+      "device": "cpu",
+      "periodic_eval_enabled": false,
+      "sequential_eval_episodes": 2
+    }
   },
-  "ppo_pilot": {
-    "timesteps_per_phase": 4096,
+  "final_agent": {
+    "checkpoint_dir": "train/models/easy_bot_v0/final_agent",
+    "init_from_skill_checkpoint": "train/models/easy_bot_v0/llc_all_skills_llc.zip",
+    "goal_conditioning": false,
+    "objective": "match",
+    "observation_dim": 146,
+    "action_encoding": "discrete27",
+    "action_dim": 27,
+    "device": "cpu",
     "n_steps": 512,
     "batch_size": 256,
-    "max_episode_steps": 200,
-    "seed": 42,
-    "device": "cuda",
-    "periodic_eval_enabled": false,
-    "sequential_eval_episodes": 2
+    "max_episode_steps": 3000,
+    "seed": 42
   },
-  "match_evaluation": {
-    "harness_status": "BLOCKED_UNTIL_SELECTED_GOAL_CONDITIONING_IS_VERIFIED",
+  "final_evaluation": {
     "smoke_matches": 3,
     "diagnostic_matches": 10,
     "benchmark_matches": 30,

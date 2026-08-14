@@ -16,7 +16,7 @@ All phases share one 11-dimensional goal vector, defined in
 | 6 | `weapon_dy` | weapon |
 | 7 | `rel_distance` | spacing |
 | 8 | `rel_dy` | spacing |
-| 9 | `in_strike_range` | combat |
+| 9 | `in_strike_range` | combat context (not an active target) |
 | 10 | `opponent_damage_pct` | combat |
 
 `extract_curriculum_goal_features` maps raw state into this space, normalising every dimension to
@@ -31,10 +31,11 @@ The combat dimension is `opponent_damage_pct`, read from the UI, replacing an ea
 optimise toward a target defined over a quantity that was never measured.
 
 A goal is a `(target, mask)` pair. The mask selects which dimensions are active, so a single network
-and a single goal vector cover all five families. Goal error is
+and a single goal vector cover all five families. Goal error is normalized by active mask mass:
 
 ```
-error = Σ mask · |feature − target|          (or L2 when use_l2_error)
+L1 error = Σ mask · |feature − target| / Σ mask
+L2 error = sqrt(Σ mask · (feature − target)² / Σ mask)
 ```
 
 The observation carries both target and mask, so the policy knows *which* goal it is pursuing.
@@ -49,7 +50,7 @@ the goal sampler, mask, reward shaping and action restrictions.
 | `movement_fluency` | player x, y | 0.04 | 3.0 | disabled |
 | `weapon_acquisition` | has_weapon, weapon dx/dy | 0.10 | 10.0 | NUM5 only |
 | `spacing_neutral` | rel_distance, rel_dy | 0.06 | 3.0 | disabled |
-| `combat_execution` | in_strike_range, opponent damage | 0.15 | 6.0 | all |
+| `combat_execution` | opponent damage | 0.01 | 6.0 | all |
 | `recovery_mastery` | ledge dx, dy | 0.08 | 4.0 | disabled |
 | `all_skills_llc` | sampled per episode | 0.10 | 6.0 | all |
 
@@ -57,13 +58,24 @@ The canonical progression order is defined in `train/phase_registry.py`. Recover
 is currently deferred until after combat so the first end-to-end pilot is not
 blocked by unreliable offstage setup.
 
-Two reward modes exist:
+Every family uses normalized goal progress:
 
-- `reward_from_goal_progress = True` → `reward = progress_scale · (prev_error − curr_error)`, clipped
-- `reward_from_goal_progress = False` → `reward = −curr_error`
+```text
+reward_goal = progress_scale · (previous_error − current_error)
+```
+
+The initial reset error is retained, so the first action receives credit when it
+moves toward the target. Combat requests a measured damage increase and deliberately
+does not prescribe entering strike range; range remains context the policy may use.
+
+Weapon guidance is conditional: while unarmed, weapon offsets help locate the pickup;
+once armed, those mask entries become zero and only possession remains active.
 
 Plus optional shaping: step penalty, success bonus, offstage penalty, death penalty, weapon pickup and
 hold bonuses, hit/damage bonuses, whiff penalties, combo-chain bonuses.
+
+Those optional terms remain available for controlled ablations and backwards-compatible
+phase definitions. They are not additional goal dimensions.
 
 > **Note.** `reward_clip` varies from 3.0 to 10.0 across phases. The value head must therefore relearn
 > its output scale at every phase transition, which works against the anti-forgetting machinery

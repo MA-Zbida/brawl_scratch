@@ -41,4 +41,6 @@ def test_all_skills_sampler_returns_dynamic_family_masks() -> None:
     assert seen == {"recovery", "movement", "weapon_acquisition", "spacing", "combat"}
     assert any(mask[GOAL_INDEX["player_x"]] > 0.0 for mask in masks)
     assert any(mask[GOAL_INDEX["player_has_weapon"]] > 0.0 for mask in masks)
-    assert any(mask[GOAL_INDEX["in_strike_range"]] > 0.0 for mask in masks)
+    combat_masks = [mask for mask in masks if mask[GOAL_INDEX["opponent_damage_pct"]] > 0.0]
+    assert combat_masks
+    assert all(mask[GOAL_INDEX["in_strike_range"]] == 0.0 for mask in combat_masks)

@@ -4,7 +4,8 @@ import argparse
 import csv
 import json
 import time
-from dataclasses import dataclass
+import sys as _sys
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, cast
 
@@ -137,6 +138,10 @@ class StageSpec:
     # transition makes repeated pickup/drop a reward source: the agent can farm it
     # standing still next to a weapon, which is cheaper than learning to fetch one.
     weapon_pickup_bonus_once_per_episode: bool = True
+    # Acquisition is only complete after the independent crop classifier sees
+    # the result. Action inference alone shares the policy's PICKUP input and
+    # therefore cannot serve as its own success label.
+    require_visual_weapon_confirmation: bool = False
     conditional_weapon_guidance_when_unarmed: bool = False
     unarmed_weapon_dx_weight: float = 0.0
     unarmed_weapon_dy_weight: float = 0.0
@@ -175,6 +180,34 @@ class StageGoalEnv(gym.Wrapper):
         super().__init__(env)
         self.stage_spec = spec
         self.action_adapter = action_adapter
+
+        # A phase that gates possession on visual confirmation cannot make progress
+        # without a classifier attached: `player_weapon_visual_valid` stays 0, so
+        # `_weapon_visual_confirmed` never flips and every acquisition is rejected.
+        # That failure is silent -- collection runs to its attempt budget and saves
+        # zero episodes -- so refuse up front instead.
+        if spec.require_visual_weapon_confirmation:
+            base = env.unwrapped if hasattr(env, "unwrapped") else env
+            # Only a real env that *has* the attribute and left it unset is affected.
+            # A stub without the attribute is a test feeding the visual signals
+            # through `info` directly, which is a legitimate way to reach confirmation.
+            if hasattr(base, "weapon_classifier") and base.weapon_classifier is None:
+                # Downgrade rather than raise. Nothing can satisfy this requirement
+                # without a classifier, so leaving it set means every acquisition is
+                # rejected -- a run that burns its whole budget and saves nothing.
+                # Refusing to construct was worse: the requirement lives on the phase
+                # spec while the classifier lives on the env, so *every* entry point
+                # that builds one (collect, BC, PPO, retention eval) had to opt out
+                # by hand, and each was found only by crashing mid-run. Clearing it
+                # here makes possession fall back to action inference, which is what
+                # produced every working archive to date.
+                print(
+                    f"[StageGoalEnv] '{spec.name}' requires visual weapon confirmation but no "
+                    "classifier is attached; falling back to action-inferred possession. "
+                    "Action inference cannot observe a knockback disarm."
+                )
+                spec = replace(spec, require_visual_weapon_confirmation=False)
+                self.stage_spec = spec
         self.goal_extractor = spec.goal_extractor
         self.goal_type = "spacing"
         self.goal_type_index = int(GOAL_TYPE_INDEX[self.goal_type])
@@ -220,6 +253,7 @@ class StageGoalEnv(gym.Wrapper):
         self._prev_error: float | None = None
         self._prev_has_weapon: Optional[bool] = None
         self._weapon_pickup_awarded: bool = False
+        self._weapon_visual_confirmed: bool = False
         self._prev_in_range: float = 0.0
         self._combo_chain_hits: int = 0
         self._pending_attack_deadlines: list[int] = []
@@ -700,6 +734,7 @@ class StageGoalEnv(gym.Wrapper):
         self._prev_in_range = float(np.clip(self._feature_value(init_feats, "in_strike_range", 0.0), 0.0, 1.0))
         self._combo_chain_hits = 0
         self._weapon_pickup_awarded = False
+        self._weapon_visual_confirmed = False
         self._prev_error = (
             self._goal_error_from_feats(
                 init_feats,
@@ -725,6 +760,9 @@ class StageGoalEnv(gym.Wrapper):
         info["weapon_reset_steps"] = int(weapon_reset_steps)
         info["weapon_reset_drop_attempts"] = int(weapon_reset_attempts)
         info["weapon_reset_succeeded"] = 1.0
+        info["weapon_visual_confirmed"] = 0.0
+        info["weapon_success_blocked_visual"] = 0.0
+        info["weapon_pickup_bonus_applied"] = 0.0
         return self._augment(obs), info
 
     def step(self, action: Sequence[int]):
@@ -796,6 +834,19 @@ class StageGoalEnv(gym.Wrapper):
         # When player is not controllable (YOLO miss / respawning), keep the
         # existing goal active.  The goal is NEVER resampled mid-episode.
         curr_has_weapon = self._feature_value(curr_feats, "player_has_weapon", 0.0) > 0.5
+        visual_valid = bool(float(info.get("player_weapon_visual_valid", 0.0)) > 0.5)
+        visual_armed = bool(float(info.get("player_weapon_visual_armed", 0.0)) > 0.5)
+        visual_fresh = bool(float(info.get("player_weapon_visual_fresh", 0.0)) > 0.5)
+        visual_confirmation_new = False
+        if visual_fresh and visual_valid:
+            visual_confirmation_new = bool(visual_armed and not self._weapon_visual_confirmed)
+            self._weapon_visual_confirmed = visual_armed
+        weapon_confirmation_required = bool(
+            self.stage_spec.require_visual_weapon_confirmation
+        )
+        weapon_reward_confirmed = bool(
+            not weapon_confirmation_required or self._weapon_visual_confirmed
+        )
         op_delta_damage = float(max(0.0, info.get("op_delta_damage", 0.0)))
         self_delta_damage = float(max(0.0, info.get("self_delta_damage", 0.0)))
         chase_bonus = 0.0
@@ -814,6 +865,8 @@ class StageGoalEnv(gym.Wrapper):
         attack_hit_credited = 0
         attack_whiff_events = 0
         success_blocked_offstage = False
+        success_blocked_visual = False
+        weapon_pickup_bonus_applied = 0.0
         # This predicate lives in the base state, not the 11-d goal feature set.
         offstage = float(
             np.clip(StateSpec.get(obs, "player_is_offstage"), 0.0, 1.0)
@@ -838,17 +891,23 @@ class StageGoalEnv(gym.Wrapper):
             if self.stage_spec.proximity_scale > 0.0:
                 reward -= self.stage_spec.proximity_scale * curr_error
 
-            if self.stage_spec.player_has_weapon_bonus > 0.0 and self._feature_value(curr_feats, "player_has_weapon", 0.0) > 0.5:
+            if (
+                self.stage_spec.player_has_weapon_bonus > 0.0
+                and curr_has_weapon
+                and weapon_reward_confirmed
+            ):
                 reward += self.stage_spec.player_has_weapon_bonus
 
             # Bonus on the 0->1 transition, once per episode by default.
             if (
                 self.stage_spec.weapon_pickup_bonus > 0.0
                 and curr_has_weapon
-                and not self._prev_has_weapon
+                and (not self._prev_has_weapon or visual_confirmation_new)
+                and weapon_reward_confirmed
                 and not (self.stage_spec.weapon_pickup_bonus_once_per_episode and self._weapon_pickup_awarded)
             ):
                 reward += self.stage_spec.weapon_pickup_bonus
+                weapon_pickup_bonus_applied = float(self.stage_spec.weapon_pickup_bonus)
                 self._weapon_pickup_awarded = True
 
             # Explicit combat shaping (phase-configurable): chase, orient, connect, and trade favorably.
@@ -942,6 +1001,10 @@ class StageGoalEnv(gym.Wrapper):
             if success and self.stage_spec.require_onstage_for_success and offstage > 0.5:
                 success = False
                 success_blocked_offstage = True
+
+            if success and weapon_confirmation_required and not self._weapon_visual_confirmed:
+                success = False
+                success_blocked_visual = True
 
             if seq_enabled:
                 # Sequence guards are state predicates, not optimisation targets.
@@ -1120,6 +1183,9 @@ class StageGoalEnv(gym.Wrapper):
         info["attack_hit_credited"] = float(attack_hit_credited)
         info["attack_whiff_events"] = int(attack_whiff_events)
         info["goal_success_blocked_offstage"] = float(success_blocked_offstage)
+        info["weapon_visual_confirmed"] = float(self._weapon_visual_confirmed)
+        info["weapon_success_blocked_visual"] = float(success_blocked_visual)
+        info["weapon_pickup_bonus_applied"] = float(weapon_pickup_bonus_applied)
         info["player_is_offstage"] = float(offstage)
         info["sequential_goal_enabled"] = float(1.0 if seq_enabled else 0.0)
         info["sequential_phase"] = int(self._seq_phase if seq_enabled else 0)
@@ -1265,6 +1331,7 @@ class StageDashboardCallback(BaseCallback):
                 "goal_success",
                 "goal_active",
                 "goal_success_blocked_offstage",
+                "weapon_success_blocked_visual",
                 "player_is_offstage",
                 "op_delta_damage",
                 "self_delta_damage",
@@ -1282,6 +1349,16 @@ class StageDashboardCallback(BaseCallback):
                 "whiff",
                 "death_event",
                 "weapon_drop_event",
+                "weapon_visible_this_frame",
+                "weapon_on_ground",
+                "weapon_pickup_action",
+                "weapon_drop_action",
+                "player_weapon_visual_valid",
+                "player_weapon_visual_armed",
+                "player_weapon_visual_confidence",
+                "player_weapon_visual_fresh",
+                "weapon_visual_confirmed",
+                "weapon_pickup_bonus_applied",
                 "active_feature_errors",
                 "raw_goal_feats",
                 "goal_target",
@@ -1558,6 +1635,9 @@ class StageDashboardCallback(BaseCallback):
                         "goal_success_blocked_offstage": float(
                             info.get("goal_success_blocked_offstage", 0.0)
                         ),
+                        "weapon_success_blocked_visual": float(
+                            info.get("weapon_success_blocked_visual", 0.0)
+                        ),
                         "player_is_offstage": float(info.get("player_is_offstage", 0.0)),
                         "op_delta_damage": op_delta,
                         "self_delta_damage": self_delta,
@@ -1575,6 +1655,30 @@ class StageDashboardCallback(BaseCallback):
                         "whiff": whiff,
                         "death_event": death_event,
                         "weapon_drop_event": weapon_drop_event,
+                        "weapon_visible_this_frame": float(
+                            info.get("weapon_visible_this_frame", 0.0)
+                        ),
+                        "weapon_on_ground": float(info.get("weapon_on_ground", 0.0)),
+                        "weapon_pickup_action": float(info.get("weapon_pickup_action", 0.0)),
+                        "weapon_drop_action": float(info.get("weapon_drop_action", 0.0)),
+                        "player_weapon_visual_valid": float(
+                            info.get("player_weapon_visual_valid", 0.0)
+                        ),
+                        "player_weapon_visual_armed": float(
+                            info.get("player_weapon_visual_armed", 0.0)
+                        ),
+                        "player_weapon_visual_confidence": float(
+                            info.get("player_weapon_visual_confidence", 0.0)
+                        ),
+                        "player_weapon_visual_fresh": float(
+                            info.get("player_weapon_visual_fresh", 0.0)
+                        ),
+                        "weapon_visual_confirmed": float(
+                            info.get("weapon_visual_confirmed", 0.0)
+                        ),
+                        "weapon_pickup_bonus_applied": float(
+                            info.get("weapon_pickup_bonus_applied", 0.0)
+                        ),
                         "active_feature_errors": self._json_array(info.get("active_goal_feature_errors", [])),
                         "raw_goal_feats": self._json_array(info.get("raw_goal_feats", [])),
                         "goal_target": self._json_array(info.get("goal_target", [])),
@@ -2350,6 +2454,10 @@ def default_env_config(max_episode_steps: int, terminate_on_stock_out: bool = Fa
         action_repeat_min_steps=2,
         action_repeat_max_steps=2,
         tap_latch_steps=1,
+        # The current checkpoint has severe train/serve skew on live captures.
+        # Keep action-inferred possession as the default until a live-crop model
+        # passes its deployment gate; opt-in remains available through EnvConfig.
+        weapon_classifier_enabled=False,
     )
 
 

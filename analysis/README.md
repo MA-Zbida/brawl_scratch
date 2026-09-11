@@ -9,6 +9,7 @@ drawn by hand, so the paper can be regenerated from a run directory.
 python -m analysis.plot_learning_curves --metric success
 python -m analysis.plot_learning_curves --metric entropy
 python -m analysis.plot_retention_matrix
+python -m analysis.paper_evidence
 ```
 
 Inputs come from `train/models/`, outputs go to `assets/figures/`.
@@ -17,6 +18,12 @@ Inputs come from `train/models/`, outputs go to `assets/figures/`.
 |---|---|---|
 | `plot_learning_curves.py` | `llc_<phase>_episodes.csv` | success / return / goal error / entropy / idle-rate curves |
 | `plot_retention_matrix.py` | `llc_<phase>_eval.csv` | retention heatmap, phase trained x phase evaluated |
+| `paper_evidence.py` | latest canonical demos, episode logs, checkpoints, and retention CSVs | paper PNG/PDF figures, long-form metrics, LaTeX tables, SHA-256 manifest, readiness report |
+
+`paper_evidence.py` is the paper-facing entry point. It reads only exact current
+filenames from `train/models/easy_bot_v0` and `train/models/recollected`. It never
+falls back to `_3h`, pilot, failed-run, or alternate-version artifacts. Missing
+evidence is rendered as missing and listed in the readiness report.
 
 ## Style rules
 

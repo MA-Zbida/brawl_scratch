@@ -9,13 +9,107 @@
     "opponent_difficulty": "easy",
     "map": "Small Brawlhaven",
     "mode": "training_mode",
-    "resolution": [1920, 1080],
+    "resolution": [
+      1920,
+      1080
+    ],
     "opponent_pool_size": 1
   },
   "perception": {
     "detector": "feature_extractor/yolo/best.engine",
     "yolo_infer_every_n_steps": 1,
-    "weapon_classifier_enabled": false
+    "weapon_classifier_enabled": false,
+    "weapon_classifier_checkpoint": "train/models/weapon_classifier_r18.pt",
+    "weapon_classifier_interval": 4,
+    "weapon_classifier_min_confidence": 0.7,
+    "weapon_classifier_cv_accuracy": 0.957
+  },
+  "pipeline": {
+    "stage_order": [
+      "recovery_bc",
+      "weapon_collect",
+      "weapon_bc",
+      "weapon_ppo",
+      "weapon_retention",
+      "spacing_collect",
+      "spacing_bc",
+      "spacing_ppo",
+      "spacing_retention",
+      "combat_collect",
+      "combat_bc",
+      "combat_ppo",
+      "combat_retention"
+    ],
+    "collect_phases": [
+      "weapon_acquisition",
+      "spacing_neutral",
+      "combat_execution"
+    ],
+    "recovery": {
+      "mode": "bc_only_existing_archive",
+      "archive": "train/models/recollected/recovery_mastery_demos.npz",
+      "reason": "The heuristic becomes meaningful only after the setup has put the player offstage; do not spend a live collection stage repeating that setup."
+    },
+    "required_checkpoints": [
+      {
+        "name": "movement_base",
+        "path": "train/models/easy_bot_v0/llc_movement_fluency.zip",
+        "role": "goal_conditioned_skill",
+        "observation_dim": 168,
+        "action_dim": 27
+      },
+      {
+        "name": "recovery_bc_handoff",
+        "path": "train/models/easy_bot_v0/llc_recovery_mastery_bc_init.zip",
+        "role": "goal_conditioned_skill",
+        "observation_dim": 168,
+        "action_dim": 27
+      },
+      {
+        "name": "weapon_bc_handoff",
+        "path": "train/models/easy_bot_v0/llc_weapon_acquisition_bc_init.zip",
+        "role": "goal_conditioned_skill",
+        "observation_dim": 168,
+        "action_dim": 27
+      },
+      {
+        "name": "preserved_weapon_ppo",
+        "path": "train/models/easy_bot_v0/llc_weapon_acquisition.zip",
+        "role": "goal_conditioned_skill",
+        "observation_dim": 168,
+        "action_dim": 27
+      }
+    ],
+    "deferred_checkpoint_outputs": [
+      "train/models/easy_bot_v0/llc_all_skills_llc.zip"
+    ],
+    "demo_archives": [
+      {
+        "phase": "movement_fluency",
+        "path": "train/models/recollected/movement_fluency_demos.npz",
+        "min_samples": 100
+      },
+      {
+        "phase": "recovery_mastery",
+        "path": "train/models/recollected/recovery_mastery_demos.npz",
+        "min_samples": 100
+      },
+      {
+        "phase": "weapon_acquisition",
+        "path": "train/models/recollected/weapon_acquisition_demos.npz",
+        "min_samples": 100
+      },
+      {
+        "phase": "spacing_neutral",
+        "path": "train/models/recollected/spacing_neutral_demos.npz",
+        "min_samples": 100
+      },
+      {
+        "phase": "combat_execution",
+        "path": "train/models/recollected/combat_execution_demos.npz",
+        "min_samples": 100
+      }
+    ]
   },
   "skill_pretraining": {
     "goal_conditioning": true,
@@ -43,7 +137,7 @@
       "combat_execution"
     ],
     "initialization": {
-      "movement_checkpoint": "train/models/llc_movement_fluency_bc_init.zip",
+      "movement_checkpoint": "train/models/easy_bot_v0/llc_movement_fluency.zip",
       "device": "cpu",
       "later_phase_bc_epochs": 8,
       "bc_batch_size": 512,

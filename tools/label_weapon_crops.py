@@ -191,6 +191,10 @@ def write_preview(cv2, patch, path: Path, scale: int) -> None:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dataset", type=Path, default=Path("brawlhalla-yolo-data"))
+    p.add_argument("--crops-dir", type=Path, default=None,
+                   help="Label pre-cut crops from <dir>/unlabelled instead of the YOLO "
+                        "dataset. Use for live captures, whose distribution matches "
+                        "inference; the dataset export does not.")
     p.add_argument("--splits", nargs="+", default=["train", "valid", "test"])
     p.add_argument("--out", type=Path, default=Path("data/weapon_crops"))
     p.add_argument("--preview", type=Path, default=Path("cropped.png"),
@@ -232,15 +236,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 done[rec["key"]] = int(rec["label"])
 
+    if args.crops_dir is not None:
+        source = Path(args.crops_dir) / 'unlabelled'
+        pre_cut = sorted(p for p in source.glob('*.png'))
+        if not pre_cut:
+            print(f'No crops in {source}', file=sys.stderr)
+            return 1
+        out = Path(args.crops_dir)
+        for name in LABEL_NAMES.values():
+            (out / name).mkdir(parents=True, exist_ok=True)
+        ledger = out / 'labels.jsonl'
+        crops = [Crop(p, 0, 0.0, 0.0, 0.0, 0.0) for p in pre_cut]
+        random.Random(int(args.seed)).shuffle(crops)
+        print(f'{len(crops)} pre-cut crops from {source}')
+    else:
+        crops = None
     keep = None
-    if not args.include_augmented:
+    if crops is None and not args.include_augmented:
         every = [p for s_ in args.splits for p in sorted((args.dataset / s_ / 'images').glob('*.*'))
                  if (args.dataset / s_ / 'images').is_dir()]
         print(f"filtering augmented copies out of {len(every)} images...")
         originals = select_originals(cv2, every, cache_path=out / 'noise_cache.json')
         keep = set(originals)
         print(f"  kept {len(keep)} un-augmented source frames")
-    crops = list(iter_crops(args.dataset, args.splits, keep=keep))
+    if crops is None:
+        crops = list(iter_crops(args.dataset, args.splits, keep=keep))
     random.Random(int(args.seed)).shuffle(crops)
     todo = [c for c in crops if c.key not in done]
 
@@ -282,7 +302,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if image is None:
             i += 1
             continue
-        patch = crop_pixels(image, crop, float(args.pad))
+        patch = image if args.crops_dir is not None else crop_pixels(image, crop, float(args.pad))
         if patch is None or patch.size == 0:
             i += 1
             continue

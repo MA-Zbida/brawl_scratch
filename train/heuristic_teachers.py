@@ -333,6 +333,14 @@ def _weapon_action(obs: np.ndarray, cfg: HeuristicConfig, state: HeuristicState)
         # agent to freeze for the whole hold window after every pickup.
         return _hold_position(obs, cfg)
 
+    weapon_on_ground = StateSpec.get(obs, "weapon_on_ground") > 0.5
+    if not weapon_on_ground:
+        # Missing weapon offsets are encoded as (0, 0). Without this explicit
+        # presence check, absence looks exactly like a weapon under the player's
+        # feet and the retry cadence teaches periodic PICKUP spam.
+        state.pickup_in_range = False
+        return _hold_position(obs, cfg)
+
     weapon_dx = StateSpec.get(obs, "weapon_dx")
     weapon_dy = StateSpec.get(obs, "weapon_dy")
     distance = float(np.hypot(weapon_dx, weapon_dy))

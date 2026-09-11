@@ -113,6 +113,19 @@ def parse_args() -> argparse.Namespace:
         help="After pickup, reject the weapon episode only after this many consecutive unarmed observations.",
     )
     p.add_argument(
+        "--weapon-classifier-checkpoint",
+        type=str,
+        default="train/models/weapon_classifier_r18.pt",
+        help="Crop classifier used for independent visual weapon confirmation.",
+    )
+    p.add_argument(
+        "--no-weapon-classifier",
+        dest="weapon_classifier",
+        action="store_false",
+        help="Disable visual weapon confirmation. Phases that require it will refuse to run.",
+    )
+    p.set_defaults(weapon_classifier=True)
+    p.add_argument(
         "--world-replay",
         type=str,
         default="",
@@ -158,7 +171,19 @@ def _build_env(args: argparse.Namespace) -> StageGoalEnv:
     if max_ep_steps == _DEFAULT_MAX_STEPS["default"] and is_combat:
         max_ep_steps = _DEFAULT_MAX_STEPS["combat"]
 
+    use_classifier = bool(getattr(args, 'weapon_classifier', True))
+    if not use_classifier and spec.require_visual_weapon_confirmation:
+        # Dropping the classifier has to drop the requirement too, or the phase
+        # deadlocks: nothing can ever supply the confirmation it waits for.
+        spec = replace(spec, require_visual_weapon_confirmation=False)
+        print(
+            "[collect] --no-weapon-classifier: visual weapon confirmation disabled for "
+            "this run. Possession falls back to action inference, which cannot see a "
+            "knockback disarm."
+        )
     config = EnvConfig(
+        weapon_classifier_enabled=use_classifier,
+        weapon_classifier_checkpoint=str(getattr(args, 'weapon_classifier_checkpoint', '')),
         terminate_on_stock_out=False,
         max_episode_steps=max_ep_steps,
         yolo_infer_every_n_steps=1,
@@ -435,6 +460,10 @@ def main() -> None:
     phase_lower = str(args.phase).strip().lower()
     is_damage = phase_lower in _COMBAT_PHASES
     is_weapon_acquisition = phase_lower == _WEAPON_PHASE
+    # Independent visual confirmation is only obtainable when the classifier is
+    # attached. Demanding it with --no-weapon-classifier rejects every episode
+    # while the teacher picks up and drops perfectly -- a silent zero-yield run.
+    visual_confirmation_required = bool(getattr(args, 'weapon_classifier', True))
     enforce_recovery_sequence = bool(args.enforce_recovery_sequence and phase_lower == "recovery_mastery")
     min_episode_steps = max(1, int(args.min_episode_steps))
     weapon_hold_steps_required = max(1, int(args.weapon_hold_steps))
@@ -714,11 +743,20 @@ def main() -> None:
 
                 if is_weapon_acquisition:
                     curr_has_weapon = _obs_has_weapon(next_obs)
-                    pickup_now = bool(ep_weapon_started_unarmed and curr_has_weapon and not ep_weapon_prev_has_weapon)
+                    visual_confirmed = bool(
+                        not visual_confirmation_required
+                        or float(info.get("weapon_visual_confirmed", 0.0)) > 0.5
+                    )
+                    pickup_now = bool(
+                        ep_weapon_started_unarmed
+                        and curr_has_weapon
+                        and visual_confirmed
+                        and not ep_weapon_pickup_seen
+                    )
                     if pickup_now:
                         ep_weapon_pickup_seen = True
                     if ep_weapon_pickup_seen:
-                        if curr_has_weapon:
+                        if curr_has_weapon and visual_confirmed:
                             ep_weapon_hold_steps += 1
                             ep_weapon_lost_steps_after_pickup = 0
                         else:

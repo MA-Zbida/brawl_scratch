@@ -32,7 +32,7 @@ import os
 import sys
 from typing import Any, Optional
 
-__all__ = ["take_camera", "status", "acquire", "is_available"]
+__all__ = ["take_camera", "release_camera", "status", "acquire", "is_available"]
 
 _camera: Optional[Any] = None
 _error: Optional[BaseException] = None
@@ -92,6 +92,21 @@ def take_camera() -> Optional[Any]:
     global _camera
     cam, _camera = _camera, None
     return cam
+
+
+def release_camera(cam: Any) -> None:
+    """Return a borrowed camera so the next provider in this process can take it.
+
+    dxcam keeps one instance per (device, output) *per process*, so a second
+    `dxcam.create()` returns the existing object with a warning rather than a
+    fresh one. Any entry point that builds more than one environment -- the
+    retention evaluator builds one per phase -- therefore has to hand the camera
+    back rather than merely stop it, or the second environment finds nothing to
+    take and collides with the singleton.
+    """
+    global _camera
+    if cam is not None and _camera is None:
+        _camera = cam
 
 
 def is_available() -> bool:

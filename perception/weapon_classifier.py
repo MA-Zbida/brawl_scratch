@@ -27,7 +27,7 @@ from the checkpoint rather than configured here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -44,6 +44,10 @@ class WeaponPrediction:
     #: False when the crop was unusable (off-screen, degenerate) or the model was
     #: not run on this frame. Callers must not treat an abstention as "unarmed".
     valid: bool = True
+    #: True only on a frame where the classifier actually evaluated this crop.
+    #: Held predictions may update the fused state, but cannot independently
+    #: certify that a pickup happened on the current transition.
+    fresh: bool = True
 
 
 class WeaponClassifier:
@@ -131,21 +135,27 @@ class WeaponClassifier:
         run = self.should_run()
         self._frame += 1
         if not run or frame is None or not boxes:
-            return dict(self._cache)
+            return {name: replace(prediction, fresh=False) for name, prediction in self._cache.items()}
 
         names: list[str] = []
         patches: list[np.ndarray] = []
+        refreshed: set[str] = set()
         for name, box in boxes.items():
             patch = self.crop(frame, *box)
             if patch is None:
-                self._cache[name] = WeaponPrediction(False, 0.0, valid=False)
+                self._cache[name] = WeaponPrediction(False, 0.0, valid=False, fresh=True)
+                refreshed.add(name)
                 continue
             names.append(name)
             patches.append(patch)
 
         for name, prediction in zip(names, self.predict_batch(patches)):
             self._cache[name] = prediction
-        return dict(self._cache)
+            refreshed.add(name)
+        return {
+            name: prediction if name in refreshed else replace(prediction, fresh=False)
+            for name, prediction in self._cache.items()
+        }
 
 
 class WeaponStateFusion:

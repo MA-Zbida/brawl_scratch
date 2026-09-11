@@ -1,0 +1,8 @@
+{
+    "stage":  "spacing_collect",
+    "source":  "executed",
+    "completed_at":  "2026-08-21T20:06:05.1160366Z",
+    "artifacts":  [
+                      "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\train\\models\\recollected\\spacing_neutral_demos.npz"
+                  ]
+}

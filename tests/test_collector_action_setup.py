@@ -96,3 +96,26 @@ def test_no_phase_references_the_removed_field():
             "StageSpec still exposes allowed_attack_actions; the rename to "
             "allowed_actions was left incomplete"
         )
+
+
+def test_visual_confirmation_gate_is_conditional_on_the_classifier() -> None:
+    """--no-weapon-classifier must relax the collector's own acceptance gate.
+
+    The spec flag and the collector keep *separate* visual-confirmation checks.
+    Clearing only the spec left the collector demanding `weapon_visual_confirmed`,
+    which without a classifier is permanently 0.0 -- so the teacher picked up and
+    dropped correctly while every episode was rejected and the run saved nothing.
+    A zero-yield collection looks identical to a broken teacher from the outside.
+    """
+    source = Path("train/collect_bc_locomotion_demos.py").read_text(encoding="utf-8")
+
+    assert "visual_confirmation_required = bool(" in source, (
+        "the run-level flag that mirrors --no-weapon-classifier is missing"
+    )
+    assert "not visual_confirmation_required" in source, (
+        "the acceptance gate still demands visual confirmation unconditionally"
+    )
+
+    # The relaxation must guard the gate itself, not merely exist somewhere.
+    gate = source.split("visual_confirmed = bool(", 1)[1].split(")", 1)[0]
+    assert "not visual_confirmation_required" in gate

@@ -55,11 +55,24 @@ TERMINAL_ACTION: int = -1
 #:      read ~0 ms against a ~21 ms `dt_step`. Recoverable: the true observation
 #:      interval for a v1 session is `dt_wall + dt_step`. Use `observation_interval()`.
 #: 2 -- `dt_wall` spans the full interval between successive observations.
-SCHEMA_VERSION: int = 2
+#: 3 -- weapon-detector, pickup-inference, and independent visual-possession
+#:      provenance are stored per transition.
+#: 4 -- final-agent reward components, evaluation flags and optimizer gaps.
+SCHEMA_VERSION: int = 4
 
 #: Per-transition scalar fields pulled from `info`, with their dtype and the
 #: default used when a wrapper in the stack does not provide them.
 _INFO_SCALARS: tuple[tuple[str, str, str, float], ...] = (
+    # Explicit optimizer gaps let dynamics training exclude long neutral bridges.
+    ("update_gap", "update_gap", "float32", 0.0),
+    ("policy_version", "policy_version", "int64", 0.0),
+    ("evaluation", "evaluation", "float32", 0.0),
+    ("match_reward_damage_dealt", "match_reward_dmg_dealt", "float32", 0.0),
+    ("match_reward_damage_taken", "match_reward_dmg_taken", "float32", 0.0),
+    ("match_reward_stock_taken", "match_reward_ko_reward", "float32", 0.0),
+    ("match_reward_stock_lost", "match_reward_ko_penalty", "float32", 0.0),
+    ("match_reward_win", "match_reward_game_win", "float32", 0.0),
+    ("match_reward_loss", "match_reward_game_loss", "float32", 0.0),
     # (column, info key, dtype, default)
     ("op_delta_damage", "op_delta_damage", "float32", 0.0),
     ("self_delta_damage", "self_delta_damage", "float32", 0.0),
@@ -75,6 +88,19 @@ _INFO_SCALARS: tuple[tuple[str, str, str, float], ...] = (
     ("self_health", "self_health", "float32", -1.0),
     ("op_stocks_left", "op_stocks_left", "float32", -1.0),
     ("self_stocks_left", "self_stocks_left", "float32", -1.0),
+    # Keep the causal chain for acquisition inspectable without recording video:
+    # detected target -> interact inference -> independent possession confirmation.
+    ("weapon_visible_this_frame", "weapon_visible_this_frame", "float32", 0.0),
+    ("weapon_on_ground", "weapon_on_ground", "float32", 0.0),
+    ("weapon_pickup_action", "weapon_pickup_action", "float32", 0.0),
+    ("weapon_drop_action", "weapon_drop_action", "float32", 0.0),
+    ("player_weapon_visual_valid", "player_weapon_visual_valid", "float32", 0.0),
+    ("player_weapon_visual_armed", "player_weapon_visual_armed", "float32", 0.0),
+    ("player_weapon_visual_confidence", "player_weapon_visual_confidence", "float32", 0.0),
+    ("player_weapon_visual_fresh", "player_weapon_visual_fresh", "float32", 0.0),
+    ("player_weapon_visual_disarm_event", "player_weapon_visual_disarm_event", "float32", 0.0),
+    ("weapon_visual_confirmed", "weapon_visual_confirmed", "float32", 0.0),
+    ("weapon_success_blocked_visual", "weapon_success_blocked_visual", "float32", 0.0),
 )
 
 

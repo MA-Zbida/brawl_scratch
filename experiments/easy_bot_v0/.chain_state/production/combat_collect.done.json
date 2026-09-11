@@ -1,0 +1,8 @@
+{
+    "stage":  "combat_collect",
+    "source":  "executed",
+    "completed_at":  "2026-08-25T20:20:02.8607873Z",
+    "artifacts":  [
+                      "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\train\\models\\recollected\\combat_execution_demos.npz"
+                  ]
+}

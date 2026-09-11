@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env import BrawlDeepEnv, EnvConfig, NullInputController
 from feature_extractor.memory.state_spec import StateSpec
+from perception.weapon_classifier import WeaponPrediction
 
 
 class StubFrames:
@@ -50,6 +51,47 @@ def make_env(**config_kwargs):
         config=config,
     )
     return env, extractor
+
+
+class StubWeaponClassifier:
+    def __init__(self, predictions: list[WeaponPrediction]) -> None:
+        self.predictions = list(predictions)
+
+    def update(self, _frame, boxes):
+        prediction = self.predictions.pop(0)
+        return {"player": prediction} if "player" in boxes else {}
+
+
+def test_weapon_classifier_fuses_visual_state_and_exposes_provenance() -> None:
+    extractor = StubExtractor()
+    extractor.detections = [
+        det("character", 0.30, 0.60),
+        det("character", 0.70, 0.60),
+        det("indicator_self", 0.30, 0.53, 0.02, 0.02),
+    ]
+    classifier = StubWeaponClassifier([
+        WeaponPrediction(False, 0.99, valid=True, fresh=True),
+        WeaponPrediction(True, 0.98, valid=True, fresh=True),
+    ])
+    env = BrawlDeepEnv(
+        extractor=extractor,
+        frame_provider=StubFrames(),
+        input_controller=NullInputController(),
+        stocks_health_provider=None,
+        weapon_classifier=classifier,
+        config=EnvConfig(ui_regions=None, weapon_classifier_enabled=True),
+    )
+
+    reset_obs, reset_info = env.reset()
+    step_obs, _, _, _, step_info = env.step(0)
+
+    assert StateSpec.get(reset_obs, "player_has_weapon") == 0.0
+    assert StateSpec.get(step_obs, "player_has_weapon") == 1.0
+    assert reset_info["player_weapon_visual_armed"] == 0.0
+    assert step_info["player_weapon_visual_armed"] == 1.0
+    assert step_info["player_weapon_visual_confidence"] == pytest.approx(0.98)
+    assert step_info["player_weapon_visual_valid"] == 1.0
+    assert step_info["player_weapon_visual_fresh"] == 1.0
 
 
 # ── layout ──────────────────────────────────────────────────────────────────
@@ -272,3 +314,34 @@ def test_ui_probes_read_the_raw_frame_not_the_detector_input():
     assert seen["shape"] == (1080, 1920, 3), (
         f"UI probes saw {seen['shape']}; they must receive the full-resolution capture"
     )
+
+
+def test_observations_are_independent_arrays_across_steps() -> None:
+    """An observation must not rewrite itself when the next step runs.
+
+    `_get_obs` fills a reusable buffer, and returning it directly made `reset()` and
+    `step()` hand back the *same object*: code holding an earlier observation saw it
+    mutate underneath. Anything that retains observations -- replay logs, demo
+    archives, before/after comparisons -- is silently corrupted by this, with no
+    error and nothing wrong-looking about the data.
+    """
+    extractor = StubExtractor()
+    extractor.detections = [
+        det("character", 0.30, 0.60),
+        det("character", 0.70, 0.60),
+        det("indicator_self", 0.30, 0.53, 0.02, 0.02),
+    ]
+    env = BrawlDeepEnv(
+        extractor=extractor,
+        frame_provider=StubFrames(),
+        input_controller=NullInputController(),
+        stocks_health_provider=None,
+        config=EnvConfig(ui_regions=None),
+    )
+
+    reset_obs, _ = env.reset()
+    snapshot = reset_obs.copy()
+    step_obs, *_ = env.step(0)
+
+    assert reset_obs is not step_obs, "reset and step returned the same array object"
+    assert np.array_equal(reset_obs, snapshot), "the earlier observation was mutated by step()"

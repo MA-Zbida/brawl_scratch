@@ -115,19 +115,21 @@ def _target_key(source_key: str) -> str | None:
             if suffix.startswith("post_film."):
                 return prefix + "adapter." + suffix[len("post_film.") :]
             return None
-    if source_key.startswith(("mlp_extractor.", "action_net.", "value_net.")):
+    if source_key.startswith(("mlp_extractor.policy_net.", "action_net.")):
         return source_key
     return None
 
 
 def _skip_reason(source_key: str) -> str:
+    if source_key.startswith(("value_net.", "mlp_extractor.value_net.")):
+        return "fresh critic: match returns differ from goal-conditioned returns"
     if any(token in source_key for token in ("goal_encoder", "film_generator", "feat_min", "feat_max")):
         return "goal-specific parameter has no final-policy equivalent"
     return "no semantically compatible final-policy parameter"
 
 
 def transfer_skill_policy(skill_policy: Any, final_policy: Any) -> TransferReport:
-    """Copy every compatible tensor and report every deliberate exclusion.
+    """Copy the state representation and actor, retaining a fresh critic.
 
     The first skill state layer consumes ``[state, goal-error, mask,
     alignment]``.  Only its leading state columns initialise the final layer;

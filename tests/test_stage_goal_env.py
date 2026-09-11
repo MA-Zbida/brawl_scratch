@@ -190,6 +190,66 @@ def test_weapon_reset_fails_closed_when_drop_cannot_be_confirmed() -> None:
     assert base.actions == [int(Action.PICKUP), int(Action.NOOP), int(Action.PICKUP)]
 
 
+class _VisualWeaponEnv(DummyStageEnv):
+    def __init__(self) -> None:
+        super().__init__()
+        self.armed = False
+
+    def _obs(self) -> np.ndarray:
+        obs = super()._obs()
+        obs[StateSpec.index("player_has_weapon")] = float(self.armed)
+        obs[StateSpec.index("weapon_on_ground")] = float(not self.armed)
+        obs[StateSpec.index("weapon_dx")] = 0.01 if not self.armed else 0.0
+        obs[StateSpec.index("weapon_dy")] = 0.0
+        return obs
+
+    def step(self, action):
+        self.steps += 1
+        action_id = int(np.asarray(action).reshape(-1)[0])
+        self.actions.append(action_id)
+        if action_id == int(Action.PICKUP):
+            # Action inference changes the state immediately. The independent
+            # visual source confirms it on the following classifier refresh.
+            self.armed = True
+        visually_confirmed = self.steps >= 2
+        return self._obs(), 0.0, False, False, {
+            "player_exists": 1.0,
+            "player_respawn_timer": 0.0,
+            "op_delta_damage": 0.0,
+            "self_delta_damage": 0.0,
+            "player_weapon_visual_valid": float(visually_confirmed),
+            "player_weapon_visual_armed": float(visually_confirmed),
+            "player_weapon_visual_confidence": 0.99 if visually_confirmed else 0.0,
+            "player_weapon_visual_fresh": float(visually_confirmed),
+            "weapon_pickup_action": float(action_id == int(Action.PICKUP)),
+        }
+
+
+def test_weapon_success_and_pickup_bonus_wait_for_visual_confirmation() -> None:
+    spec = replace(
+        build_phase_spec("weapon_acquisition", terminate_on_death=False),
+        reset_drop_weapon_when_armed=False,
+        step_penalty=0.0,
+        progress_scale=0.0,
+    )
+    env = StageGoalEnv(_VisualWeaponEnv(), spec)
+    env.reset(seed=7)
+
+    _, first_reward, _, first_truncated, first = env.step(int(Action.PICKUP))
+    _, confirmed_reward, _, confirmed_truncated, confirmed = env.step(int(Action.NOOP))
+
+    assert first["goal_error"] < spec.success_threshold
+    assert first["goal_success"] == 0.0
+    assert first["weapon_success_blocked_visual"] == 1.0
+    assert first["weapon_pickup_bonus_applied"] == 0.0
+    assert not first_truncated
+    assert confirmed["weapon_visual_confirmed"] == 1.0
+    assert confirmed["goal_success"] == 1.0
+    assert confirmed["weapon_pickup_bonus_applied"] == pytest.approx(spec.weapon_pickup_bonus)
+    assert confirmed_reward >= spec.weapon_pickup_bonus + spec.success_bonus
+    assert confirmed_truncated
+
+
 class _SpacingSafetyEnv(DummyStageEnv):
     def __init__(self, *, offstage: bool) -> None:
         super().__init__()
@@ -360,3 +420,36 @@ def test_reset_perturbation_emits_discrete_actions_and_preserves_jump(monkeypatc
     assert len(base.actions) == 2
     assert all(0 <= action < ACTION_DIM for action in base.actions)
     assert any(action_components(action).jump for action in base.actions)
+
+
+def test_missing_classifier_downgrades_the_requirement_instead_of_raising() -> None:
+    """Without a classifier the requirement is unsatisfiable, so clear it and warn.
+
+    The requirement lives on the phase spec; the classifier lives on the env. An
+    exception here forced every entry point that builds a StageGoalEnv -- collect,
+    BC, PPO, retention eval -- to opt out by hand, and each missing opt-out was
+    found only by crashing mid-run, twice overnight. Downgrading makes possession
+    fall back to action inference, which is what produced every working archive.
+    """
+    import gymnasium as gym
+
+    from train.curriculum_config import build_phase_spec
+    from train.llc_stage_common import StageGoalEnv
+
+    class _NoClassifierEnv(gym.Env):
+        observation_space = gym.spaces.Box(-1.0, 1.0, (168,))
+        action_space = gym.spaces.Discrete(27)
+        weapon_classifier = None
+
+        def reset(self, **_kwargs):
+            return None, {}
+
+        def step(self, _action):
+            return None, 0.0, False, False, {}
+
+    spec = build_phase_spec("weapon_acquisition", death_penalty=1.0, terminate_on_death=True)
+    assert spec.require_visual_weapon_confirmation, "phase no longer sets the requirement"
+
+    env = StageGoalEnv(_NoClassifierEnv(), spec)
+
+    assert env.stage_spec.require_visual_weapon_confirmation is False

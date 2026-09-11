@@ -24,6 +24,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from dataclasses import replace as dc_replace
+
 import gymnasium as gym
 import numpy as np
 
@@ -157,7 +159,16 @@ def _make_env(cfg: TrainConfig, spec) -> gym.Env:
         action_repeat_min_steps=1,
         action_repeat_max_steps=1,
         tap_latch_steps=1,
+        weapon_classifier_enabled=bool(getattr(cfg, "weapon_classifier", False)),
+        weapon_classifier_checkpoint=str(
+            getattr(cfg, "weapon_classifier_checkpoint", "train/models/weapon_classifier_r18.pt")
+        ),
     )
+    # Visual confirmation is a reward gate that only the classifier can satisfy.
+    # Without one attached it can never be met, so the phase would reject every
+    # acquisition and learn nothing while appearing to run normally.
+    if not config.weapon_classifier_enabled and getattr(spec, "require_visual_weapon_confirmation", False):
+        spec = dc_replace(spec, require_visual_weapon_confirmation=False)
     base = BrawlDeepEnv(config=config)
     env = StageGoalEnv(base, spec)
     if cfg.move_mouse_to_goal:
@@ -179,6 +190,7 @@ def _make_eval_env(cfg: TrainConfig, spec) -> gym.Env:
         action_repeat_min_steps=1,
         action_repeat_max_steps=1,
         tap_latch_steps=1,
+        weapon_classifier_enabled=bool(getattr(cfg, "weapon_classifier", False)),
     )
     base = BrawlDeepEnv(config=config)
     env = StageGoalEnv(base, eval_spec)

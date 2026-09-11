@@ -51,6 +51,13 @@ class _StubEnv:
             "canon_mirrored": 1.0 if self.mirrored else 0.0,
             "op_delta_damage": 2.5,
             "frame_skip": 3,
+            "weapon_visible_this_frame": 1.0,
+            "weapon_pickup_action": 1.0,
+            "player_weapon_visual_valid": 1.0,
+            "player_weapon_visual_armed": 1.0,
+            "player_weapon_visual_confidence": 0.97,
+            "player_weapon_visual_fresh": 1.0,
+            "weapon_visual_confirmed": 1.0,
         }
         if self.executed_action is not None:
             info["effective_action"] = self.executed_action
@@ -235,6 +242,13 @@ def test_reward_ingredients_are_captured_from_info(tmp_path) -> None:
     steps = data["action"] != TERMINAL_ACTION
     assert np.allclose(data["op_delta_damage"][steps], 2.5)
     assert np.all(data["frame_skip"][steps] == 3)
+    assert np.all(data["weapon_visible_this_frame"][steps] == 1.0)
+    assert np.all(data["weapon_pickup_action"][steps] == 1.0)
+    assert np.all(data["player_weapon_visual_valid"][steps] == 1.0)
+    assert np.all(data["player_weapon_visual_armed"][steps] == 1.0)
+    assert np.allclose(data["player_weapon_visual_confidence"][steps], 0.97)
+    assert np.all(data["player_weapon_visual_fresh"][steps] == 1.0)
+    assert np.all(data["weapon_visual_confirmed"][steps] == 1.0)
 
 
 def test_observation_dim_change_is_rejected(tmp_path) -> None:

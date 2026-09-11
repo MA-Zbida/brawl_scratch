@@ -90,6 +90,27 @@ def test_cadence_runs_on_the_expected_frames() -> None:
     assert ran == [True, False, False, False] * 3
 
 
+def test_held_classifier_prediction_is_not_reported_as_fresh() -> None:
+    """A cached armed result may update state, but cannot prove a new pickup."""
+    from perception.weapon_classifier import WeaponClassifier
+
+    classifier = WeaponClassifier.__new__(WeaponClassifier)
+    classifier.interval = 4
+    classifier._frame = 1  # cadence skips this update
+    classifier._cache = {
+        "player": WeaponPrediction(armed=True, confidence=0.99, valid=True, fresh=True)
+    }
+
+    result = classifier.update(
+        np.zeros((32, 32, 3), dtype=np.uint8),
+        {"player": (0.5, 0.5, 0.2, 0.2)},
+    )
+
+    assert result["player"].armed is True
+    assert result["player"].valid is True
+    assert result["player"].fresh is False
+
+
 def test_crop_uses_training_padding_and_clamps_to_the_frame() -> None:
     """Cropping differently than training degrades the model with no error anywhere."""
     from perception.weapon_classifier import WeaponClassifier

@@ -330,6 +330,7 @@ def build_phase_spec(
             player_has_weapon_bonus=0.02,
             weapon_pickup_bonus=2.0,
             weapon_pickup_bonus_once_per_episode=True,
+            require_visual_weapon_confirmation=True,
             step_penalty=0.05,
             offstage_penalty_scale=0.1,
             proximity_scale=0.0,

@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from dataclasses import replace
+
 import numpy as np
 import torch as th
 from stable_baselines3 import PPO
@@ -81,6 +83,11 @@ def parse_args() -> argparse.Namespace:
 
 def _build_env(max_episode_steps: int, phase: str) -> StageGoalEnv:
     spec = build_phase_spec(phase, death_penalty=1.0, terminate_on_death=True)
+    # This environment is a contract shim: BC reads the observation and action
+    # spaces from it and never steps it. Visual weapon confirmation is a reward
+    # gate on acquisition, and no acquisition happens here, so requiring it would
+    # only make BC refuse to construct an env it does not use.
+    spec = replace(spec, require_visual_weapon_confirmation=False)
     config = EnvConfig(
         terminate_on_stock_out=False,
         max_episode_steps=max_episode_steps,

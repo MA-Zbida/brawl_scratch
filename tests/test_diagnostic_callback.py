@@ -94,3 +94,43 @@ def test_dashboard_categorical_entropy_is_normalized() -> None:
     uniform_counts = np.ones((27,), dtype=np.int64)
 
     assert StageDashboardCallback._action_entropy(uniform_counts) == 1.0
+
+
+def test_dashboard_csv_includes_weapon_perception_provenance(tmp_path) -> None:
+    callback = StageDashboardCallback(
+        save_dir=tmp_path,
+        model_name="weapon",
+        enable_csv=True,
+        enable_plot=False,
+    )
+    callback._on_training_start()
+    callback.locals = {
+        "infos": [{
+            "stage_action": int(Action.PICKUP),
+            "weapon_visible_this_frame": 0.0,
+            "weapon_pickup_action": 0.0,
+            "player_weapon_visual_valid": 1.0,
+            "player_weapon_visual_armed": 0.0,
+            "player_weapon_visual_confidence": 0.98,
+            "player_weapon_visual_fresh": 1.0,
+            "weapon_visual_confirmed": 0.0,
+            "weapon_success_blocked_visual": 1.0,
+        }],
+        "rewards": np.asarray([0.0], dtype=np.float32),
+        "dones": np.asarray([False]),
+    }
+    callback._on_step()
+    callback._on_training_end()
+
+    header = (tmp_path / "weapon_steps.csv").read_text(encoding="utf-8").splitlines()[0]
+    for field in (
+        "weapon_visible_this_frame",
+        "weapon_pickup_action",
+        "player_weapon_visual_valid",
+        "player_weapon_visual_armed",
+        "player_weapon_visual_confidence",
+        "player_weapon_visual_fresh",
+        "weapon_visual_confirmed",
+        "weapon_success_blocked_visual",
+    ):
+        assert field in header

@@ -5,16 +5,43 @@ question quickly: can a single sequential LLC checkpoint pass through movement,
 weapon, spacing, and combat training without a broken data, checkpoint, or
 retention path?
 
-Recovery and all-skills consolidation are deliberately deferred. No phase is
-promoted as "mastered" from this 4,096-step pilot.
+Recovery PPO and all-skills consolidation are deliberately deferred. Recovery
+still contributes its existing validated archive through one BC-only handoff;
+there is no recovery collection stage because its teacher only becomes useful
+after the setup has already put the fighter offstage.
+
+## Canonical runner
+
+The phase commands below remain the expanded protocol, but the supported entry
+point is now the resumable driver:
+
+```powershell
+# Prove that the whole control flow closes with tiny budgets first.
+experiments\easy_bot_v0\run_chain.ps1 --smoke
+
+# Continue the production chain after the preserved weapon PPO checkpoint.
+experiments\easy_bot_v0\run_chain.ps1 --from spacing
+
+# Run spacing only, then stop after its retention evaluation.
+experiments\easy_bot_v0\run_chain.ps1 --from spacing_bc --to spacing --timesteps 200000
+
+# After changing the opponent setup, run combat only.
+experiments\easy_bot_v0\run_chain.ps1 --from combat --to combat --timesteps 200000
+```
+
+The driver runs preflight first, records stdout and stderr in one UTF-8 log, and
+writes a completion marker only after the stage exits zero and its artifacts
+exist. Recovery is always `recovery_bc`; it is never collected or PPO-trained.
 
 ## Frozen contract
 
 - Interpreter: `C:\venvs\brawl312\Scripts\python.exe`
 - Output directory: `train/models/easy_bot_v0`
-- Phase order: movement -> weapon -> spacing -> combat -> recovery -> consolidation
+- Chain order: movement base -> recovery BC -> weapon -> spacing -> combat
 - Compute split: MLP policy and optimizer on CPU; TensorRT detection remains on CUDA
-- Perception: YOLO every step; weapon classifier integration remains off
+- Perception: YOLO every step; weapon classifier disabled. The existing classifier
+  reports mean P(armed)=0.873 on unarmed live crops because its export-time crop
+  domain differs from live capture, so possession falls back to action inference.
 - PPO: 4,096 steps per active phase, `n_steps=512`, `batch_size=256`
 - Evaluation: two sequential skill episodes after each PPO phase
 - Source data: only the four archives named in `manifest.json`

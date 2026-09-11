@@ -109,4 +109,13 @@ class DxcamFrameProvider:
         return self._last_good_frame
 
     def close(self) -> None:
-        self._camera.stop()
+        # Stop the capture thread, then hand the camera back. Stopping alone
+        # leaves it registered in dxcam's per-process factory, so the next
+        # provider gets "instance already exists" instead of a working camera.
+        camera, self._camera = self._camera, None
+        if camera is None:
+            return
+        try:
+            camera.stop()
+        finally:
+            capture_first.release_camera(camera)

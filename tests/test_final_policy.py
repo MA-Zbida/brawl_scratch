@@ -122,6 +122,8 @@ def test_transfer_copies_compatible_state_and_heads_and_reports_goal_skips() -> 
         for index, parameter in enumerate(skill.policy.parameters(), start=1):
             parameter.fill_(index / 100.0)
 
+    fresh_value = final.policy.value_net.weight.detach().clone()
+    fresh_critic = final.policy.mlp_extractor.value_net[0].weight.detach().clone()
     report = transfer_skill_policy(skill.policy, final.policy)
     source = skill.policy.state_dict()
     target = final.policy.state_dict()
@@ -139,7 +141,8 @@ def test_transfer_copies_compatible_state_and_heads_and_reports_goal_skips() -> 
         source["features_extractor.post_film.1.weight"],
     )
     assert torch.equal(target["action_net.weight"], source["action_net.weight"])
-    assert torch.equal(target["value_net.weight"], source["value_net.weight"])
+    assert torch.equal(target["value_net.weight"], fresh_value)
+    assert torch.equal(final.policy.mlp_extractor.value_net[0].weight, fresh_critic)
     assert report.transferred_count > 0
     assert report.skipped_count > 0
     assert any("goal_encoder" in item.source for item in report.skipped)

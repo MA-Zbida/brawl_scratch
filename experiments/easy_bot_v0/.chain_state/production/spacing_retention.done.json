@@ -1,0 +1,8 @@
+{
+    "stage":  "spacing_retention",
+    "source":  "executed",
+    "completed_at":  "2026-08-25T19:54:14.7183387Z",
+    "artifacts":  [
+                      "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\train\\models\\easy_bot_v0\\llc_spacing_neutral_retention_eval.csv"
+                  ]
+}

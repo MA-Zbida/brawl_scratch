@@ -21,13 +21,21 @@ class FinalAgentConfig:
     seed: int = 42
     delay: float = 3.0
     device: str = "cpu"
-    learning_rate: float = 3e-4
+    learning_rate: float = 1e-4
     n_steps: int = 512
     batch_size: int = 256
-    gamma: float = 0.99
+    gamma: float = 0.999
     gae_lambda: float = 0.95
-    clip_range: float = 0.2
-    ent_coef: float = 0.02
+    clip_range: float = 0.1
+    ent_coef: float = 0.01
+    n_epochs: int = 4
+    target_kl: float = 0.01
+    mode: str = "training_room"
+    checkpoint_every: int = 10240
+    eval_every: int = 51200
+    eval_episodes: int = 10
+    world_replay: str = ""
+    forever: bool = False
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     yolo_every: int = 1
@@ -72,13 +80,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--delay", type=float, default=3.0)
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--n-steps", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--gamma", type=float, default=0.999)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--clip-range", type=float, default=0.2)
-    parser.add_argument("--ent-coef", type=float, default=0.02)
+    parser.add_argument("--clip-range", type=float, default=0.1)
+    parser.add_argument("--ent-coef", type=float, default=0.01)
+    parser.add_argument("--n-epochs", type=int, default=4)
+    parser.add_argument("--target-kl", type=float, default=0.01)
+    parser.add_argument("--mode", choices=["training_room", "manual_matches"], default="training_room")
+    parser.add_argument("--checkpoint-every", type=int, default=10240)
+    parser.add_argument("--eval-every", type=int, default=51200, help="0 disables scheduled evaluation")
+    parser.add_argument("--eval-episodes", type=int, default=10, help="Fixed-duration windows in training room")
+    parser.add_argument("--world-replay", default="", help="Opt-in compressed transition directory")
+    parser.add_argument("--forever", action="store_true", help="Repeat training budgets until Ctrl+C")
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument("--yolo-every", type=int, default=1)
@@ -95,4 +111,14 @@ def parse_args(argv: Sequence[str] | None = None) -> FinalAgentConfig:
         raise SystemExit("--n-steps and --batch-size must be positive")
     if int(args.max_episode_steps) <= 0:
         raise SystemExit("--max-episode-steps must be positive")
+    if args.n_steps % args.batch_size:
+        raise SystemExit("--batch-size must divide --n-steps")
+    if args.n_epochs <= 0 or args.target_kl <= 0 or args.learning_rate <= 0:
+        raise SystemExit("epochs, KL limit, and learning rate must be positive")
+    if not 0 < args.gamma <= 1 or not 0 <= args.gae_lambda <= 1:
+        raise SystemExit("gamma must be in (0, 1] and GAE lambda in [0, 1]")
+    if args.checkpoint_every <= 0 or args.eval_every < 0 or args.eval_episodes <= 0:
+        raise SystemExit("checkpoint/evaluation intervals must be valid positive counts (eval-every may be 0)")
+    if args.forever and args.timesteps == 0:
+        raise SystemExit("--forever requires positive --timesteps per training block")
     return FinalAgentConfig(**vars(args))

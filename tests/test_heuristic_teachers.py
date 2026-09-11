@@ -47,12 +47,27 @@ def test_movement_jumps_when_target_y_is_above_player() -> None:
 def test_weapon_teacher_presses_num5_when_close_and_unarmed() -> None:
     obs = _obs()
     obs[StateSpec.index("player_has_weapon")] = 0.0
+    obs[StateSpec.index("weapon_on_ground")] = 1.0
     obs[StateSpec.index("weapon_dx")] = 0.03
     obs[StateSpec.index("weapon_dy")] = 0.01
 
     action = heuristic_action("weapon_acquisition", obs)
 
     assert action == int(Action.PICKUP), describe(action)
+
+
+def test_weapon_teacher_never_picks_up_when_no_ground_weapon_exists() -> None:
+    """Absent weapon offsets are zero, which must not mean "exactly in range"."""
+    obs = _obs()
+    obs[StateSpec.index("player_has_weapon")] = 0.0
+    obs[StateSpec.index("weapon_on_ground")] = 0.0
+    obs[StateSpec.index("weapon_dx")] = 0.0
+    obs[StateSpec.index("weapon_dy")] = 0.0
+    teacher = HeuristicTeacher(HeuristicConfig(pickup_retry_cooldown_steps=4))
+
+    actions = [teacher.action("weapon_acquisition", obs) for _ in range(12)]
+
+    assert int(Action.PICKUP) not in actions, [describe(action) for action in actions]
 
 
 def test_weapon_teacher_keeps_moving_when_already_armed() -> None:
@@ -337,6 +352,7 @@ def test_combat_sweep_includes_defensive_dodge_and_non_attack_action() -> None:
 def test_weapon_pickup_is_not_repeated_on_consecutive_in_range_steps() -> None:
     obs = _obs()
     obs[StateSpec.index("player_has_weapon")] = 0.0
+    obs[StateSpec.index("weapon_on_ground")] = 1.0
     obs[StateSpec.index("weapon_dx")] = 0.01
     obs[StateSpec.index("weapon_dy")] = 0.01
     teacher = HeuristicTeacher(HeuristicConfig(pickup_retry_cooldown_steps=4))

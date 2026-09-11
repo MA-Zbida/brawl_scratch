@@ -72,6 +72,13 @@ class TrainConfig:
     death_penalty: float = 1.0
     terminate_on_death: bool = True
     move_mouse_to_goal: bool = False
+    #: Visual weapon confirmation. Off by default: the only trained checkpoint
+    #: reached 95.7% cross-validated and then scored a mean P(armed) of 0.873 on
+    #: unarmed live crops (train/serve skew -- 960x960 JPEG exports vs raw 1920x1080
+    #: captures). Enabling it corrupts `player_has_weapon` throughout training with
+    #: no visible symptom. Turn on once retrained on live crops.
+    weapon_classifier: bool = False
+    weapon_classifier_checkpoint: str = "train/models/weapon_classifier_r18.pt"
     yolo_every: int = 1
     # Transition recording is opt-in because compression and disk writes compete
     # with the real-time loop; reserve it for deliberate world-model sessions.
@@ -185,6 +192,11 @@ def parse_args() -> TrainConfig:
     p.add_argument("--pcgrad", dest="pcgrad", action="store_true", default=None)
     p.add_argument("--no-pcgrad", dest="pcgrad", action="store_false")
     p.add_argument("--plot-every", type=int)
+    p.add_argument("--weapon-classifier", dest="weapon_classifier", action="store_true",
+                   help="Enable visual weapon confirmation. The current checkpoint is "
+                        "known to misclassify live crops; retrain before using this.")
+    p.add_argument("--no-weapon-classifier", dest="weapon_classifier", action="store_false")
+    p.set_defaults(weapon_classifier=False)
     p.add_argument("--log-csv", action="store_true", default=None)
     p.add_argument("--diag-report-every", type=int)
     p.add_argument("--moving-avg", type=int)

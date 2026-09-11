@@ -38,6 +38,12 @@ from feature_extractor.memory.canonicalize import (
 from feature_extractor.memory.structured_memory import Memory
 from feature_extractor.memory.state_spec import StateSpec
 from feature_extractor.yolo.extract import Extract
+from perception.weapon_classifier import (
+    DEFAULT_MIN_CONFIDENCE,
+    WeaponClassifier,
+    WeaponPrediction,
+    WeaponStateFusion,
+)
 from reward.extract_rgb import get_rgb
 from reward.rgb_to_dmg import get_dmg
 from reward.stock import get_stock
@@ -60,6 +66,17 @@ class EnvConfig:
     # shrinks the self-indicator below what the P2 head learned to find, and nothing
     # in the pipeline reports the mismatch.
     yolo_imgsz: int = 960
+    # The crop classifier is independent evidence of possession. It runs at a
+    # sparse cadence because weapon state changes far more slowly than movement.
+    weapon_classifier_enabled: bool = False
+    # The resnet18 checkpoint (95.7% cross-validated), not the small CNN (78.1%).
+    # Below ~90% the classifier is worse than action inference for the agent's own
+    # weapon state, so the weak model would make `player_has_weapon` noisier rather
+    # than cleaner while looking like an upgrade.
+    weapon_classifier_checkpoint: str = "train/models/weapon_classifier_r18.pt"
+    weapon_classifier_device: str = ""
+    weapon_classifier_interval: int = 4
+    weapon_classifier_min_confidence: float = DEFAULT_MIN_CONFIDENCE
     # Temporal window. The policy is a plain MLP, so history is supplied by
     # stacking rather than recurrence: recurrent PPO is markedly more
     # sample-hungry, and this setup is bounded by wall-clock, not by compute.
@@ -99,6 +116,7 @@ class BrawlDeepEnv(gym.Env):
         recovery_provider: Optional[Callable[..., Tuple[Optional[bool], Optional[bool]]]] = None,
         stocks_health_provider: Optional[Callable[..., Tuple[Optional[float], Optional[float], Optional[float], Optional[float]]]] = None,
         config: Optional[EnvConfig] = None,
+        weapon_classifier: Optional[WeaponClassifier] = None,
     ):
         super().__init__()
 
@@ -125,6 +143,22 @@ class BrawlDeepEnv(gym.Env):
             infer_height=self.config.yolo_infer_height,
             imgsz=self.config.yolo_imgsz,
         )
+        self.weapon_classifier = weapon_classifier
+        if self.weapon_classifier is None and self.config.weapon_classifier_enabled:
+            self.weapon_classifier = WeaponClassifier(
+                self.config.weapon_classifier_checkpoint,
+                device=self.config.weapon_classifier_device,
+                interval=self.config.weapon_classifier_interval,
+                min_confidence=self.config.weapon_classifier_min_confidence,
+            )
+        self._player_weapon_fusion = WeaponStateFusion(
+            min_confidence=self.config.weapon_classifier_min_confidence
+        )
+        self._opponent_weapon_fusion = WeaponStateFusion(
+            min_confidence=self.config.weapon_classifier_min_confidence
+        )
+        self._weapon_predictions: dict[str, WeaponPrediction] = {}
+        self._weapon_disarm_event = False
         self.input_controller = input_controller or PyDirectInputController()
         self.reward_provider = reward_provider or NullRewardProvider()
         self.ground_contact_provider = ground_contact_provider
@@ -188,6 +222,61 @@ class BrawlDeepEnv(gym.Env):
             shape=(obs_dim,),
             dtype=np.float32,
         )
+
+    def _weapon_classifier_boxes(self) -> dict[str, tuple[float, float, float, float]]:
+        """Return classifier crops from the identity-resolved fighter states."""
+        boxes: dict[str, tuple[float, float, float, float]] = {}
+        for name, fighter in (
+            ("player", self.memory.player),
+            ("opponent", self.memory.opponent),
+        ):
+            if not fighter.exists or fighter.bbox_w <= 0.0 or fighter.bbox_h <= 0.0:
+                continue
+            # Memory stores foot y; the classifier was trained on the detector's
+            # centre-based crop contract.
+            center_y = float(fighter.y - (fighter.bbox_h / 2.0))
+            boxes[name] = (
+                float(fighter.x),
+                center_y,
+                float(fighter.bbox_w),
+                float(fighter.bbox_h),
+            )
+        return boxes
+
+    def _update_weapon_classification(self, frame: Optional[np.ndarray]) -> None:
+        self._weapon_disarm_event = False
+        if self.weapon_classifier is None:
+            self._weapon_predictions = {}
+            return
+
+        predictions = self.weapon_classifier.update(frame, self._weapon_classifier_boxes())
+        self._weapon_predictions = predictions
+        for name, fighter, fusion in (
+            ("player", self.memory.player, self._player_weapon_fusion),
+            ("opponent", self.memory.opponent, self._opponent_weapon_fusion),
+        ):
+            prediction = predictions.get(name)
+            armed, disarmed = fusion.resolve(fighter.weapon_state > 0.0, prediction)
+            fighter.weapon_state = 1.0 if armed else 0.0
+            if name == "player" and disarmed:
+                self._weapon_disarm_event = True
+
+    def _weapon_info(self) -> dict[str, float]:
+        prediction = self._weapon_predictions.get("player")
+        return {
+            "weapon_classifier_enabled": float(self.weapon_classifier is not None),
+            "player_weapon_visual_valid": float(prediction is not None and prediction.valid),
+            "player_weapon_visual_armed": float(
+                prediction is not None and prediction.valid and prediction.armed
+            ),
+            "player_weapon_visual_confidence": float(
+                prediction.confidence if prediction is not None else 0.0
+            ),
+            "player_weapon_visual_fresh": float(
+                prediction is not None and prediction.fresh
+            ),
+            "player_weapon_visual_disarm_event": float(self._weapon_disarm_event),
+        }
 
     @staticmethod
     def _observation_feature_names() -> list[str]:
@@ -328,7 +417,14 @@ class BrawlDeepEnv(gym.Env):
             buf[cursor : cursor + self._dynamic_dim] = past
             cursor += self._dynamic_dim
 
-        return buf
+        # Copy out of the reusable buffer. Returning `buf` itself hands every caller
+        # the same array, so an observation held across a step silently rewrites
+        # itself: `reset_obs` and `step_obs` were literally the same object. That
+        # corrupts anything that retains observations -- replay logs, demo
+        # collectors, before/after comparisons -- with no error and no symptom
+        # beyond wrong numbers. One 168-float copy per step is not measurable
+        # against a 21 ms step.
+        return buf.copy()
 
     def _distance_player_to_weapon(self) -> float:
         """Fast lookup from relational features."""
@@ -498,6 +594,7 @@ class BrawlDeepEnv(gym.Env):
             detections,
             dt=reset_dt,
         )
+        self._update_weapon_classification(self._last_frame)
         self._last_step_time = now
 
         # Re-sync health/stocks from UI on reset without introducing artificial stock-loss events.
@@ -547,6 +644,13 @@ class BrawlDeepEnv(gym.Env):
             "player_respawn_timer": float(self.memory.player_respawn_timer),
             "self_stock_lost_step": 0.0,
             "op_stock_lost_step": 0.0,
+            "weapon_visible_this_frame": float(
+                1.0 if self.memory.weapon_visible_this_frame else 0.0
+            ),
+            "weapon_on_ground": float(1.0 if self.memory.weapon.exists else 0.0),
+            "weapon_pickup_action": 0.0,
+            "weapon_drop_action": 0.0,
+            **self._weapon_info(),
         }
         return obs, info
 
@@ -623,6 +727,7 @@ class BrawlDeepEnv(gym.Env):
             )
             dist_to_weapon = self._distance_player_to_weapon()
             self.memory.update_player_weapon_from_action(action_pick_throw=frame_pick_throw, dist_to_weapon=dist_to_weapon)
+            self._update_weapon_classification(self._last_frame)
             self.memory.update_action(effective_action)
             memory_dt = time.perf_counter() - t0
 
@@ -718,8 +823,10 @@ class BrawlDeepEnv(gym.Env):
             "self_stocks_left": float(self.memory.self_stocks_left),
             "player_weapon_state": float(self.memory.player.weapon_state),
             "weapon_visible_this_frame": float(1.0 if self.memory.weapon_visible_this_frame else 0.0),
+            "weapon_on_ground": float(1.0 if self.memory.weapon.exists else 0.0),
             "weapon_pickup_action": float(1.0 if self.memory.weapon_pickup_action_this_frame else 0.0),
             "weapon_drop_action": float(1.0 if self.memory.weapon_drop_action_this_frame else 0.0),
+            **self._weapon_info(),
             "reward_breakdown": reward_breakdown_total if reward_breakdown_total else {"total_reward": reward},
             "frame_skip": int(repeat_steps),
         }

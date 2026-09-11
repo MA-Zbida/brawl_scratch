@@ -1,0 +1,357 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-08-25T20:57:18.887794+00:00",
+  "source_policy": "exact current canonical filenames only; no *_3h, pilot, failed-run, or alternate-version fallback",
+  "models_dir": "train/models/easy_bot_v0",
+  "demos_dir": "train/models/recollected",
+  "primary_phases": [
+    "movement_fluency",
+    "weapon_acquisition",
+    "spacing_neutral",
+    "combat_execution"
+  ],
+  "smoothing_window_episodes": 20,
+  "minimum_evaluation_episodes": 30,
+  "retention_gate": 0.85,
+  "publication_ready": false,
+  "issues": [
+    "movement_fluency retention evaluation uses only 2 evaluation episodes; minimum is 30",
+    "weapon_acquisition retention evaluation is missing",
+    "spacing_neutral retention evaluation uses only 3 evaluation episodes; minimum is 30",
+    "combat_execution retention evaluation uses only 3 evaluation episodes; minimum is 30",
+    "missing evaluation cell: weapon_acquisition checkpoint on movement_fluency",
+    "missing evaluation cell: weapon_acquisition checkpoint on weapon_acquisition",
+    "independent training seeds are not represented in this evidence bundle",
+    "matched-budget scratch baselines are missing for transfer claims",
+    "mechanism ablations are missing for FiLM/replay/KL/PCGrad claims",
+    "goal-independent match-play benchmark is missing"
+  ],
+  "sources": [
+    {
+      "path": "train/models/easy_bot_v0/llc_combat_execution.zip",
+      "role": "current_policy_checkpoint",
+      "bytes": 4046195,
+      "sha256": "3ac4ff5cf8ae6c342c2402640bc62ef06b1fd22c1464189a29e6cc34ccde1efe",
+      "modified_at_utc": "2026-08-25T20:26:04.715007+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_combat_execution.zip.metadata.json",
+      "role": "current_checkpoint_metadata",
+      "bytes": 706,
+      "sha256": "e616d2858506d0ec139e9a679441652879a3afe04c9b53619b0afaaaaf008ad8",
+      "modified_at_utc": "2026-08-25T20:26:04.716564+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_combat_execution_episodes.csv",
+      "role": "current_training_episodes",
+      "bytes": 3843,
+      "sha256": "7b92abfcc15e87e2cd9848a499b751327be3950ec4aec3bba73a7c85ab6d5996",
+      "modified_at_utc": "2026-08-25T20:26:00.955304+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_combat_execution_retention_eval.csv",
+      "role": "current_retention_evaluation",
+      "bytes": 1358,
+      "sha256": "cd07114da764d7aee5d551aa8c532f6aca9aa1967a52caafebd752b8580a3657",
+      "modified_at_utc": "2026-08-25T20:27:37.640020+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_movement_fluency.zip",
+      "role": "current_policy_checkpoint",
+      "bytes": 4052386,
+      "sha256": "6eaa07a50ab106e6b027f997d3354dd414a2f9f6b31397fb459b697a478f444a",
+      "modified_at_utc": "2026-08-14T16:48:43.311385+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_movement_fluency.zip.metadata.json",
+      "role": "current_checkpoint_metadata",
+      "bytes": 655,
+      "sha256": "daef03c40730825071b3274d0997a438b9f0e37e02d24b9bd2dc4dac95ccbd23",
+      "modified_at_utc": "2026-08-14T16:48:43.312390+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_movement_fluency_episodes.csv",
+      "role": "current_training_episodes",
+      "bytes": 6128,
+      "sha256": "f245ebdd41e5c239c0b8b6d4e0e3a12aa118e844a2e54da3f30a9e0b20b2b89b",
+      "modified_at_utc": "2026-08-14T10:53:51.232747+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_movement_fluency_retention_eval.csv",
+      "role": "current_retention_evaluation",
+      "bytes": 479,
+      "sha256": "01d651b798e43e9d8a4bff8f54878502878a82b238c9368e43a8c015901c9de1",
+      "modified_at_utc": "2026-08-14T11:06:19.539232+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_spacing_neutral.zip",
+      "role": "current_policy_checkpoint",
+      "bytes": 4051017,
+      "sha256": "82d8bf20dc2a68b036bc90d593b41927d67ba1b4960779cd3ca3fde3ba280a99",
+      "modified_at_utc": "2026-08-25T19:53:12.119006+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_spacing_neutral.zip.metadata.json",
+      "role": "current_checkpoint_metadata",
+      "bytes": 704,
+      "sha256": "5ff45eca7e2786ade58280ad14253ff1728463c9917d7ac46a4647122adbec1b",
+      "modified_at_utc": "2026-08-25T19:53:12.120011+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_spacing_neutral_episodes.csv",
+      "role": "current_training_episodes",
+      "bytes": 109832,
+      "sha256": "daa84eece56f3896c3d3fb14f766bcbcc1853a5bb82e99c517ace5ed50de2f60",
+      "modified_at_utc": "2026-08-25T19:53:08.547035+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_spacing_neutral_retention_eval.csv",
+      "role": "current_retention_evaluation",
+      "bytes": 1085,
+      "sha256": "b97632d504852aacda68d4ed7fa920d7825b0fffa0de550949b5b8594e927f34",
+      "modified_at_utc": "2026-08-25T19:54:12.395632+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_weapon_acquisition.zip",
+      "role": "current_policy_checkpoint",
+      "bytes": 4050569,
+      "sha256": "3570707fb1584357384f768a999a65996f6bf8d7628b35bf92f2b8c157dd0335",
+      "modified_at_utc": "2026-08-21T02:39:46.945143+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_weapon_acquisition.zip.metadata.json",
+      "role": "current_checkpoint_metadata",
+      "bytes": 659,
+      "sha256": "a625c2a2c95b1569074d9c48bb967db50dd13e1ab9ae847e582540a315523001",
+      "modified_at_utc": "2026-08-21T02:39:46.948141+00:00"
+    },
+    {
+      "path": "train/models/easy_bot_v0/llc_weapon_acquisition_episodes.csv",
+      "role": "current_training_episodes",
+      "bytes": 189488,
+      "sha256": "a2fb796b4632b02a83872194a554b66f5dd9f6acbd3fa1fbd1308ac2b00fa4fa",
+      "modified_at_utc": "2026-08-21T02:39:45.477067+00:00"
+    },
+    {
+      "path": "train/models/recollected/combat_execution_demos.npz",
+      "role": "current_canonical_demonstrations",
+      "bytes": 1644462,
+      "sha256": "1621015973a95ec1ce68dceccac4441adae0fd5512fb9cdf8ce3742ebfbdc7e7",
+      "modified_at_utc": "2026-08-25T20:20:00.757425+00:00"
+    },
+    {
+      "path": "train/models/recollected/movement_fluency_demos.npz",
+      "role": "current_canonical_demonstrations",
+      "bytes": 206202,
+      "sha256": "8c1d548e2b3853ed8b7d6bf58a86a4b1b73e019ac1a2c907025dada9677943bd",
+      "modified_at_utc": "2026-08-12T22:05:31.400772+00:00"
+    },
+    {
+      "path": "train/models/recollected/spacing_neutral_demos.npz",
+      "role": "current_canonical_demonstrations",
+      "bytes": 235411,
+      "sha256": "311de7d294ba6865309e820987de3b039a50f19da62d9beca83072d341e55f5b",
+      "modified_at_utc": "2026-08-21T20:06:04.097240+00:00"
+    },
+    {
+      "path": "train/models/recollected/weapon_acquisition_demos.npz",
+      "role": "current_canonical_demonstrations",
+      "bytes": 334503,
+      "sha256": "a85dd817f80ccac2ef19a03a8d826d82e3f5bad77fe89503eb809eb7393711e7",
+      "modified_at_utc": "2026-08-20T01:25:56.161901+00:00"
+    }
+  ],
+  "generated_outputs": [
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/demo_quality.png",
+      "role": "generated_evidence",
+      "bytes": 122715,
+      "sha256": "ee27a46bc69daa80cb3ba796ec9a02a31dc87268407ce15e083f83514cc3f27c",
+      "modified_at_utc": "2026-08-25T20:57:14.536904+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/demo_quality.pdf",
+      "role": "generated_evidence",
+      "bytes": 31878,
+      "sha256": "0f1fa4002948ff2c61c10ccbbb114fcd996a13c304d3d33a94a8406df2fbfc7d",
+      "modified_at_utc": "2026-08-25T20:57:14.912886+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/corrected_learning_success.png",
+      "role": "generated_evidence",
+      "bytes": 287859,
+      "sha256": "1e6f30c707c14517b1c5be1f319bb2385ace75c578652b1a29a4dbae4fef87bd",
+      "modified_at_utc": "2026-08-25T20:57:15.590877+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/corrected_learning_success.pdf",
+      "role": "generated_evidence",
+      "bytes": 50105,
+      "sha256": "7d97900b9d6d57a8e1aadd8f0139792b720a819148085043874e0fc43dab866a",
+      "modified_at_utc": "2026-08-25T20:57:15.935533+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/corrected_goal_error.png",
+      "role": "generated_evidence",
+      "bytes": 330086,
+      "sha256": "92a447e5d018c666736e1af7c285bfea6c342bd6cc7dcab00515e41a1a4f4b54",
+      "modified_at_utc": "2026-08-25T20:57:16.668740+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/corrected_goal_error.pdf",
+      "role": "generated_evidence",
+      "bytes": 84393,
+      "sha256": "0362157a3a3f1c632cf1f0d1ce69859185664ddd87a4bc48cec4b66942e106a2",
+      "modified_at_utc": "2026-08-25T20:57:17.102647+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/corrected_skill_score_matrix.png",
+      "role": "generated_evidence",
+      "bytes": 98888,
+      "sha256": "b00a9c5476f0370c0bf78aabc83ef8a7495509a912ae484542808b6bcd80fd12",
+      "modified_at_utc": "2026-08-25T20:57:17.647093+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/corrected_skill_score_matrix.pdf",
+      "role": "generated_evidence",
+      "bytes": 32431,
+      "sha256": "ff8d692d865202a910b03aa06cd79151d46edccb044a032e655d72943d7288c0",
+      "modified_at_utc": "2026-08-25T20:57:17.975337+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/corrected_retention_matrix.png",
+      "role": "generated_evidence",
+      "bytes": 98719,
+      "sha256": "0c0d3b99b41643bf5c318fd4cb32e07775a04f8d15538f1ad37657e7f89ee178",
+      "modified_at_utc": "2026-08-25T20:57:18.356292+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/corrected_retention_matrix.pdf",
+      "role": "generated_evidence",
+      "bytes": 31642,
+      "sha256": "ad0f8fff67546f3e827690af1c04011bb99eeac98e11696646f2dc31abc58184",
+      "modified_at_utc": "2026-08-25T20:57:18.661319+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/paper_metrics.csv",
+      "role": "generated_evidence",
+      "bytes": 12656,
+      "sha256": "4879fc1df023ef499d6d805571440d8c921742c84a00ce34a8896dc5b09bcadd",
+      "modified_at_utc": "2026-08-25T20:57:18.664248+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/paper_tables.tex",
+      "role": "generated_evidence",
+      "bytes": 779,
+      "sha256": "467bddc6949b34e7c244bf098ca5ba5ffda31f2f8de357e72da33c4642bcd8f0",
+      "modified_at_utc": "2026-08-25T20:57:18.664820+00:00"
+    },
+    {
+      "path": "brawlhalla_gcrl_paper/evidence/evidence_readiness.md",
+      "role": "generated_evidence",
+      "bytes": 2032,
+      "sha256": "9718d4ec4a9479f72996ee37f14c5019adf8809856890e579044687125432891",
+      "modified_at_utc": "2026-08-25T20:57:18.665339+00:00"
+    }
+  ],
+  "demo_summaries": [
+    {
+      "phase": "movement_fluency",
+      "samples": 1596,
+      "episodes": 50,
+      "attempts": 50,
+      "rejected_trivial": 0,
+      "distinct_actions": 11,
+      "normalized_action_entropy": 0.5203373535197456,
+      "idle_rate": 0.03007518796992481,
+      "movement_rate": 0.9655388471177945,
+      "dodge_rate": 0.0043859649122807015,
+      "attack_rate": 0.0,
+      "pickup_rate": 0.0,
+      "median_episode_steps": 32.0,
+      "single_step_rate": 0.0,
+      "invalid_goal_rows": 0,
+      "source_path": "train/models/recollected/movement_fluency_demos.npz"
+    },
+    {
+      "phase": "weapon_acquisition",
+      "samples": 2817,
+      "episodes": 50,
+      "attempts": 136,
+      "rejected_trivial": 0,
+      "distinct_actions": 6,
+      "normalized_action_entropy": 0.3299770852323066,
+      "idle_rate": 0.01987930422435215,
+      "movement_rate": 0.9613063542776003,
+      "dodge_rate": 0.0,
+      "attack_rate": 0.0,
+      "pickup_rate": 0.018814341498047567,
+      "median_episode_steps": 55.0,
+      "single_step_rate": 0.0,
+      "invalid_goal_rows": 0,
+      "source_path": "train/models/recollected/weapon_acquisition_demos.npz"
+    },
+    {
+      "phase": "spacing_neutral",
+      "samples": 1970,
+      "episodes": 50,
+      "attempts": 154,
+      "rejected_trivial": 79,
+      "distinct_actions": 9,
+      "normalized_action_entropy": 0.5647884846289384,
+      "idle_rate": 0.026395939086294416,
+      "movement_rate": 0.9426395939086294,
+      "dodge_rate": 0.030964467005076143,
+      "attack_rate": 0.0,
+      "pickup_rate": 0.0,
+      "median_episode_steps": 28.5,
+      "single_step_rate": 0.0,
+      "invalid_goal_rows": 0,
+      "source_path": "train/models/recollected/spacing_neutral_demos.npz"
+    },
+    {
+      "phase": "combat_execution",
+      "samples": 13205,
+      "episodes": 50,
+      "attempts": 130,
+      "rejected_trivial": 0,
+      "distinct_actions": 11,
+      "normalized_action_entropy": 0.5765255889961031,
+      "idle_rate": 0.0,
+      "movement_rate": 0.5971223021582733,
+      "dodge_rate": 0.02862552063612268,
+      "attack_rate": 0.37425217720560394,
+      "pickup_rate": 0.0,
+      "median_episode_steps": 223.5,
+      "single_step_rate": 0.0,
+      "invalid_goal_rows": 0,
+      "source_path": "train/models/recollected/combat_execution_demos.npz"
+    }
+  ],
+  "training_summaries": {
+    "movement_fluency": {
+      "transitions": 4047,
+      "episodes": 55,
+      "final_window_success": 0.8500000000000003,
+      "final_window_goal_error": 0.1371468937680991
+    },
+    "weapon_acquisition": {
+      "transitions": 200172,
+      "episodes": 1716,
+      "final_window_success": 0.9000000000000001,
+      "final_window_goal_error": 0.3151886744972589
+    },
+    "spacing_neutral": {
+      "transitions": 50105,
+      "episodes": 1069,
+      "final_window_success": 0.9500000000000002,
+      "final_window_goal_error": 0.071168779473671
+    },
+    "combat_execution": {
+      "transitions": 10055,
+      "episodes": 22,
+      "final_window_success": 0.3,
+      "final_window_goal_error": 0.06999264172900456
+    }
+  }
+}

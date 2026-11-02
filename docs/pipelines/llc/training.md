@@ -178,4 +178,4 @@ offstage rate, environment steps, and real interaction seconds.
 | `runs/legacy/final_agent/final_agent*.zip.transfer.json` | copied/skipped tensor report |
 | `runs/legacy/final_agent/matches.csv` | full-match metrics and wall-clock interaction time |
 
-Figures for the report are regenerated from these CSVs by [`brawl/analysis/`](../../../analysis/).
+Figures for the report are regenerated from these CSVs by [`brawl/analysis/`](../../../brawl/analysis/).

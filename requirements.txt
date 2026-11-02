@@ -1,10 +1,11 @@
-# Brawlhalla LLC — live training stack (Python 3.12, CUDA 12.x)
+# Brawlhalla RL — live training stack (Python 3.12, CUDA 12.x)
 #
 # torch is NOT listed here: it must come from the PyTorch CUDA index, not PyPI.
 # Install it FIRST, in its own command, then this file. See docs/setup.md.
 #
 #   python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-#   python -m pip install -r requirements-llc.txt
+#   python -m pip install -r requirements.txt
+#   python -m pip install -e .
 #
 # Installing them together lets the resolver pull the CPU-only torch from PyPI,
 # which fails silently: everything imports, torch.cuda.is_available() is False,
@@ -23,7 +24,9 @@ keyboard>=0.13.5
 
 # ── RL ──────────────────────────────────────────────────────────────────────
 gymnasium>=0.29
-stable-baselines3[extra]>=2.3.0
+# SB3 and contrib must use the same version for recurrent buffer compatibility.
+stable-baselines3[extra]==2.9.0
+sb3-contrib==2.9.0
 
 # ── numerics, plotting, tests ───────────────────────────────────────────────
 numpy>=1.26

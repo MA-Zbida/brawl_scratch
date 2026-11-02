@@ -8,9 +8,12 @@ __pycache__/
 venv/
 env/
 ENV/
+# The generic "env/" rule above would hide the package folder.
+!brawl/env/
 
 # Tool caches
 .pytest_cache/
+.pytest_tmp/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -28,24 +31,15 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Local training / debug outputs
-debug/
-train/models/
-
-# Experiment tracking and logs
-runs/
+# --- Project outputs (large, machine-specific) ---
+# runs/: every training run, diagnostic and scratch output (runs/legacy/<era>/ for pre-hypothesis work).
+# data/: datasets, demos, world replay and frozen input models (weapon classifier, ...).
+/runs/
+/data/
+/work/
 wandb/
 logs/
 *.log
-
-# Codex scratch workspace
-work/
-
-# Local datasets and experiment outputs (large, machine-specific)
-brawlhalla-yolo-data/
-yolo26-p2-result/
-dev/
-assets/figures/
 
 # TensorRT engines are machine-specific: a plan is tied to the GPU architecture,
 # driver and TensorRT version that built it, so a committed .engine is unusable to
@@ -55,6 +49,3 @@ assets/figures/
 
 # Downloaded/exported result archives
 *.zip
-
-# Dataset sources for world model and weapon classifier
-data

@@ -1,4 +1,0 @@
-# Install into the CUDA-enabled brawl312 environment; do not reinstall torch.
-# SB3 and contrib must use the same version for recurrent buffer compatibility.
-stable-baselines3==2.9.0
-sb3-contrib==2.9.0

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brawl"
+version = "0.3.0"
+description = "Vision-only reinforcement learning in a live, non-embedded real-time game (Brawlhalla)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["brawl*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# A repo-local temp folder avoids Windows permission problems with the default pytest temp dir
+# and keeps test runs from leaving pytest_* folders in outputs/ or work/.
+addopts = "--basetemp=.pytest_tmp"

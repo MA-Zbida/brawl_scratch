@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from reward.match_objective import MatchObjective
+from brawl.reward.match_objective import MatchObjective
 
 
 def event(**kwargs):
@@ -55,7 +55,7 @@ def test_nonfinite_damage_is_not_a_reward():
 
 
 def test_final_ppo_defaults_are_the_approved_small_updates():
-    from train.final_config import parse_args
+    from brawl.pipelines.final_agent.config import parse_args
     cfg = parse_args(["--init-from", "skill.zip", "--world-replay", "replay"])
     assert cfg.learning_rate == 1e-4
     assert cfg.n_steps == 512 and cfg.batch_size == 256
@@ -66,7 +66,7 @@ def test_final_ppo_defaults_are_the_approved_small_updates():
 
 def test_match_wrapper_continues_stock_loss_and_truncates_without_loss(tmp_path):
     import gymnasium as gym
-    from train.match_env import MatchTrainingEnv
+    from brawl.env.match import MatchTrainingEnv
 
     class Fake(gym.Env):
         observation_space = gym.spaces.Box(-1, 1, (3,))
@@ -91,8 +91,8 @@ def test_match_wrapper_continues_stock_loss_and_truncates_without_loss(tmp_path)
 
 def test_training_room_survives_more_than_three_losses_without_match_bonus(tmp_path):
     import gymnasium as gym
-    from train.match_env import MatchTrainingEnv
-    from feature_extractor.memory.state_spec import StateSpec
+    from brawl.env.match import MatchTrainingEnv
+    from brawl.state.state_spec import StateSpec
 
     class Arena(gym.Env):
         observation_space = gym.spaces.Box(-np.inf, np.inf, (146,), dtype=np.float32)
@@ -128,12 +128,12 @@ def test_training_room_survives_more_than_three_losses_without_match_bonus(tmp_p
 def test_real_ppo_rollouts_evaluate_save_and_record_neutral_update_gaps(tmp_path):
     import gymnasium as gym
     from stable_baselines3.common.vec_env import DummyVecEnv
-    from train.final_campaign import FinalCampaign
-    from train.final_config import parse_args
-    from train.final_policy import build_final_model
-    from train.match_env import MatchTrainingEnv, ReplayGymWrapper
-    from train.checkpoint_roles import make_checkpoint_metadata, FINAL_AGENT
-    from world_model.replay_log import WorldReplayWriter, read_session
+    from brawl.pipelines.final_agent.campaign import FinalCampaign
+    from brawl.pipelines.final_agent.config import parse_args
+    from brawl.pipelines.final_agent.policy import build_final_model
+    from brawl.env.match import MatchTrainingEnv, ReplayGymWrapper
+    from brawl.training.checkpoints import make_checkpoint_metadata, FINAL_AGENT
+    from brawl.world_model.replay_log import WorldReplayWriter, read_session
 
     class Arena(gym.Env):
         observation_space = gym.spaces.Box(-np.inf, np.inf, (146,), dtype=np.float32)
@@ -173,16 +173,16 @@ def test_real_ppo_rollouts_evaluate_save_and_record_neutral_update_gaps(tmp_path
     assert data["update_gap"].sum() >= 3
     assert data["evaluation"].sum() > 0
     assert data["match_reward_damage_dealt"].sum() > 0
-    from analysis.plot_final_training import plot_run
+    from brawl.analysis.plot_final_training import plot_run
     assert plot_run(tmp_path).stat().st_size > 10000
 
 
 def test_entrypoint_saves_optimizer_metrics_and_resumes_on_cpu(tmp_path, monkeypatch):
     import gymnasium as gym
-    from train import final_agent
-    from train.final_config import parse_args
-    from train.final_policy import build_final_model
-    from train.checkpoint_roles import make_checkpoint_metadata, FINAL_AGENT
+    from brawl.pipelines.final_agent import run as final_agent
+    from brawl.pipelines.final_agent.config import parse_args
+    from brawl.pipelines.final_agent.policy import build_final_model
+    from brawl.training.checkpoints import make_checkpoint_metadata, FINAL_AGENT
 
     class Arena(gym.Env):
         observation_space = gym.spaces.Box(-np.inf, np.inf, (146,), dtype=np.float32)

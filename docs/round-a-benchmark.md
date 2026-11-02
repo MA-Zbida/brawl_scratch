@@ -32,7 +32,7 @@ The installed brawl312 environment now includes sb3-contrib 2.9.0. On another
 machine, after installing the correct CUDA torch independently:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m pip install -r requirements-round-a.txt
+C:\venvs\brawl312\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 Never silently reuse structured-only NPZ demos for a visual model. Video that
@@ -45,7 +45,7 @@ Configure **Wu Shang vs moving NON-ATTACKING Medium Mordex, Small Brawlhaven,
 continuous respawns**. Settings are manual; the program cannot verify the menu.
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.round_a `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.round_a.run `
   --stage collect --episodes-per-drill 5 `
   --run-dir train\models\round_a\collection_pilot_v1
 ```
@@ -66,7 +66,7 @@ dataset, depending on setup/episode lengths. All arms use the same resized frame
 preparation in live play, even when the policy does not consume pixels.
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.round_a `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.round_a.run `
   --stage preflight `
   --demos train\models\round_a\collection_pilot_v1\demos `
   --run-dir train\models\round_a\preflight_v1
@@ -85,7 +85,7 @@ seeing scored outcomes.
 After choosing the common resolution/cadence, use a fresh directory:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.round_a `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.round_a.run `
   --stage collect --episodes-per-drill 30 `
   --run-dir train\models\round_a\collection_v1
 ```
@@ -99,7 +99,7 @@ video. Evaluation/update-gap rows are tagged and never fed back to PPO.
 
 ```powershell
 foreach ($candidate in @('mlp', 'recurrent', 'multi')) {
-  C:\venvs\brawl312\Scripts\python.exe -m train.round_a `
+  C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.round_a.run `
     --stage pretrain --candidate $candidate `
     --demos train\models\round_a\collection_v1\demos `
     --run-dir "train\models\round_a\bc_${candidate}_s42"
@@ -133,7 +133,7 @@ The synthetic path is safe without a game:
 
 ```powershell
 foreach ($candidate in @('mlp', 'recurrent', 'multi')) {
-  C:\venvs\brawl312\Scripts\python.exe -m train.round_a `
+  C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.round_a.run `
     --stage smoke --candidate $candidate
   if ($LASTEXITCODE -ne 0) { throw "Smoke failed for $candidate" }
 }
@@ -145,7 +145,7 @@ Example for the MLP; replace `mlp` in BOTH candidate and checkpoint path for the
 other arms. Each starts from its own BC initializer, not another candidate's PPO.
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.round_a `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.round_a.run `
   --stage train --candidate mlp `
   --demos train\models\round_a\collection_v1\demos `
   --resume train\models\round_a\bc_mlp_s42\bc_init.zip `
@@ -189,7 +189,7 @@ all interrupted run manifests for total-cost accounting.
 ## 6. Frozen evaluation and bounded manual-review clips
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.round_a `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.round_a.run `
   --stage evaluate --candidate mlp `
   --resume train\models\round_a\ppo_mlp_s42\latest.zip `
   --demos train\models\round_a\collection_v1\demos `
@@ -223,7 +223,7 @@ cadence counts are recorded by usage; compare missed deadlines as well as the
 initial qualification. To compare runs without touching the game:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m analysis.plot_round_a `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.analysis.plot_round_a `
   train\models\round_a\ppo_mlp_s42 `
   train\models\round_a\ppo_recurrent_s42 `
   train\models\round_a\ppo_multi_s42 `
@@ -317,7 +317,7 @@ microbenchmarks, **not evidence that live 30 Hz now passes**.
 Reproduce without launching the game (new output filename each time):
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m tools.benchmark_round_a_overhead `
+C:\venvs\brawl312\Scripts\python.exe -m scripts.round_a.benchmark_round_a_overhead `
   --checkpoint train\models\round_a\pilot_bc_mlp_40ep_s42\bc_init.zip `
   --output work\round_a_overhead_repeat.json
 ```

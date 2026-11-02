@@ -8,8 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from tools.verify_experiment_manifest import verify_manifest
-from train.phase_registry import PHASE_ORDER
+from scripts.llc.verify_experiment_manifest import verify_manifest
+from brawl.pipelines.llc.phase_registry import PHASE_ORDER
 
 
 def _sha256(path: Path) -> str:

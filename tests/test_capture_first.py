@@ -27,21 +27,21 @@ REPO = Path(__file__).resolve().parent.parent
 _HEAVY_IMPORT = re.compile(
     r"^\s*(import torch|from torch|import ultralytics|from ultralytics"
     r"|import stable_baselines3|from stable_baselines3"
-    r"|from env import|from feature_extractor|from train\.|from algo)",
+    r"|(from|import) brawl\.(env|state|perception|pipelines|training|algo)\b)",
     re.M,
 )
 
 #: Entry points that construct a live environment.
 LIVE_ENTRY_POINTS = [
-    "tools/debug_observation_overlay.py",
-    "train/collect_bc_locomotion_demos.py",
-    "train/pretrain_bc_locomotion.py",
-    "train/train_curriculum.py",
-    "train/evaluate_retention.py",
-    "train/final_agent.py",
-    "train/transfer_skill_checkpoint.py",
-    "train/run_match.py",
-    "evaluate.py",
+    "scripts/llc/debug_observation_overlay.py",
+    "brawl/pipelines/llc/collect_demos.py",
+    "brawl/pipelines/llc/pretrain_bc.py",
+    "brawl/pipelines/llc/train_curriculum.py",
+    "brawl/pipelines/llc/evaluate_retention.py",
+    "brawl/pipelines/final_agent/run.py",
+    "brawl/pipelines/final_agent/transfer_skill_checkpoint.py",
+    "brawl/pipelines/final_agent/run_match.py",
+    "brawl/pipelines/llc/evaluate.py",
 ]
 
 
@@ -51,25 +51,29 @@ def test_entry_point_actually_launches(rel):
 
     Two bugs shipped past parse-only checks: `import capture_first` placed above
     `from __future__` (a SyntaxError), and then the same import failing with
-    ModuleNotFoundError because launching `python tools/x.py` puts *tools/* on
+    ModuleNotFoundError because launching `python tools/x.py` put *tools/* on
     sys.path rather than the repo root.
 
     Both are invisible to `ast.parse`, which is why this spawns the interpreter the
-    way a user would. Missing third-party packages are tolerated — this is checking
-    the bootstrap, not the dependency set — but anything wrong with capture_first,
-    the path setup, or syntax is a failure.
+    way a user would: package entry points with `python -m brawl...`, scripts by path.
+    Missing third-party packages are tolerated — this is checking the bootstrap, not
+    the dependency set — but anything wrong with capture_first, the package install,
+    or syntax is a failure.
     """
     import subprocess
 
+    launch = ["-m", rel[:-3].replace("/", ".")] if rel.startswith("brawl/") else [rel]
     proc = subprocess.run(
-        [sys.executable, rel, "--help"],
+        [sys.executable, *launch, "--help"],
         cwd=REPO, capture_output=True, text=True, timeout=300,
     )
     combined = proc.stdout + proc.stderr
 
-    assert "No module named 'capture_first'" not in combined, (
-        f"{rel}: capture_first is not importable when the script is launched directly. "
-        "The sys.path bootstrap must precede it."
+    assert "No module named 'brawl" not in combined, (
+        f"{rel}: the brawl package is not importable. Install it with `pip install -e .`."
+    )
+    assert "No module named 'scripts" not in combined, (
+        f"{rel}: scripts/ is not importable; its sys.path bootstrap must precede the import."
     )
     assert "SyntaxError" not in combined, f"{rel} does not parse:\n{combined[-800:]}"
     for marker in ("IndentationError", "NameError: name '_sys'", "NameError: name '_Path'"):
@@ -114,7 +118,7 @@ def test_future_import_stays_first(rel):
 def test_capture_first_precedes_every_torch_pulling_import(rel):
     source = (REPO / rel).read_text(encoding="utf-8")
 
-    idx = source.find("import capture_first")
+    idx = source.find("import brawl.capture_first")
     assert idx >= 0, f"{rel} builds a live env but never imports capture_first"
 
     heavy = [m.start() for m in _HEAVY_IMPORT.finditer(source)]
@@ -126,10 +130,10 @@ def test_capture_first_precedes_every_torch_pulling_import(rel):
 
 
 def test_env_imports_capture_first_before_the_detector():
-    """env.py pulls in Extract -> ultralytics -> torch at module scope."""
-    source = (REPO / "env.py").read_text(encoding="utf-8")
-    assert source.index("import capture_first") < source.index(
-        "from feature_extractor.yolo.extract import Extract"
+    """brawl/env/live.py pulls in Extract -> ultralytics -> torch at module scope."""
+    source = (REPO / "brawl/env/live.py").read_text(encoding="utf-8")
+    assert source.index("import brawl.capture_first") < source.index(
+        "from brawl.perception.yolo import Extract"
     )
 
 
@@ -140,9 +144,9 @@ def _fresh_module(dxcam_stub, torch_loaded: bool):
     re-runs its C++ operator registration, which raises and poisons every later test
     in the process -- the flag is set directly instead, which is all `status()` reads.
     """
-    sys.modules.pop("capture_first", None)
+    sys.modules.pop("brawl.capture_first", None)
     sys.modules["dxcam"] = dxcam_stub
-    import capture_first
+    import brawl.capture_first as capture_first
 
     capture_first.acquire(force=True)
     capture_first._torch_already_loaded = torch_loaded
@@ -153,13 +157,18 @@ def _fresh_module(dxcam_stub, torch_loaded: bool):
 def _restore_modules():
     """Leave sys.modules exactly as found, so ordering between tests cannot matter."""
     saved_dxcam = sys.modules.get("dxcam")
-    saved_capture = sys.modules.get("capture_first")
+    saved_capture = sys.modules.get("brawl.capture_first")
     yield
-    for name, saved in (("dxcam", saved_dxcam), ("capture_first", saved_capture)):
+    for name, saved in (("dxcam", saved_dxcam), ("brawl.capture_first", saved_capture)):
         if saved is None:
             sys.modules.pop(name, None)
         else:
             sys.modules[name] = saved
+    # A re-import also rebinds the submodule attribute on the package itself.
+    import brawl
+
+    if saved_capture is not None:
+        brawl.capture_first = saved_capture
 
 
 def _stub(working: tuple[int, int] | None):
@@ -214,5 +223,5 @@ def test_failure_without_torch_does_not_blame_torch():
 
 def test_module_is_inert_under_pytest():
     """Test runs must not grab a real duplicator from the desktop."""
-    source = (REPO / "capture_first.py").read_text(encoding="utf-8")
+    source = (REPO / "brawl/capture_first.py").read_text(encoding="utf-8")
     assert '"pytest" not in sys.modules' in source

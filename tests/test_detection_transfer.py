@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from feature_extractor.yolo.extract import Extract
+from brawl.perception.yolo import Extract
 
 
 class CountingTensor:

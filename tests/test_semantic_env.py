@@ -3,12 +3,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from control.input import NullInputController
-from control.semantic_actions import BY_NAME, ControlContext
-from env import EnvConfig
-from feature_extractor.memory.state_spec import StateSpec
-from train.semantic_contract import ACTION_DIM, OBSERVATION_DIM
-from train.semantic_env import SemanticBrawlEnv
+from brawl.control.input import NullInputController
+from brawl.control.semantic_actions import BY_NAME, ControlContext
+from brawl.env.live import EnvConfig
+from brawl.state.state_spec import StateSpec
+from brawl.pipelines.semantic57.contract import ACTION_DIM, OBSERVATION_DIM
+from brawl.pipelines.semantic57.env import SemanticBrawlEnv
 
 
 class Frames:

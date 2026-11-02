@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tools.llc_preflight import Check, check_module, check_python, summarize
+from scripts.llc.llc_preflight import Check, check_module, check_python, summarize
 
 
 def test_preflight_summary_passes_clean_checks() -> None:
@@ -27,18 +27,18 @@ def test_preflight_summary_can_fail_on_warnings() -> None:
 
 
 def test_preflight_summary_fails_on_failures() -> None:
-    text, code = summarize([Check("torch", "FAIL", "missing", "python -m pip install -r requirements-llc.txt")])
+    text, code = summarize([Check("torch", "FAIL", "missing", "python -m pip install -r requirements.txt")])
 
     assert code == 2
     assert "Stop: fix FAIL rows" in text
-    assert "fix: python -m pip install -r requirements-llc.txt" in text
+    assert "fix: python -m pip install -r requirements.txt" in text
 
 
 def test_missing_required_module_points_to_requirements_file() -> None:
     check = check_module("definitely_not_a_real_llc_module", "fake-package", "test", required=True)
 
     assert check.status == "FAIL"
-    assert "requirements-llc.txt" in check.fix
+    assert "requirements.txt" in check.fix
     assert "fake-package" in check.fix
 
 

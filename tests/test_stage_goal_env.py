@@ -11,18 +11,18 @@ pytest.importorskip("ultralytics")
 
 import gymnasium as gym
 
-from action_space import ACTION_DIM, Action, components as action_components
+from brawl.control.action_space import ACTION_DIM, Action, components as action_components
 
 
 def _is_attack(action) -> bool:
     comp = action_components(int(np.asarray(action).reshape(-1)[0]))
     return bool(comp.light or comp.heavy)
 
-from feature_extractor.memory.state_spec import StateSpec
-from feature_extractor.memory.canonicalize import mirror_goal_target
-from train.curriculum_config import build_phase_spec
-from train.curriculum_goals import GOAL_INDEX, default_goal_target
-from train.llc_stage_common import StageGoalEnv
+from brawl.state.state_spec import StateSpec
+from brawl.state.canonicalize import mirror_goal_target
+from brawl.pipelines.llc.curriculum_config import build_phase_spec
+from brawl.training.curriculum_goals import GOAL_INDEX, default_goal_target
+from brawl.pipelines.llc.stage_common import StageGoalEnv
 
 
 class _DummyPlayer:
@@ -451,8 +451,8 @@ def test_missing_classifier_downgrades_the_requirement_instead_of_raising() -> N
     """
     import gymnasium as gym
 
-    from train.curriculum_config import build_phase_spec
-    from train.llc_stage_common import StageGoalEnv
+    from brawl.pipelines.llc.curriculum_config import build_phase_spec
+    from brawl.pipelines.llc.stage_common import StageGoalEnv
 
     class _NoClassifierEnv(gym.Env):
         observation_space = gym.spaces.Box(-1.0, 1.0, (168,))

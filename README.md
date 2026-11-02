@@ -107,36 +107,36 @@ Requires Windows, Python 3.12, a CUDA 12.x GPU, and Brawlhalla running in Traini
 ```powershell
 C:\venvs\brawl312\Scripts\Activate.ps1
 python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
-python -m pip install -r requirements-llc.txt
-python tools/llc_preflight.py --device cuda
+python -m pip install -r requirements.txt
+python scripts/llc/llc_preflight.py --device cuda
 ```
 
 Verify perception before doing anything else — if the overlay is wrong, everything downstream is:
 
 ```powershell
-python tools/debug_observation_overlay.py --phase movement_fluency --show --max-steps 1000
+python scripts/llc/debug_observation_overlay.py --phase movement_fluency --show --max-steps 1000
 ```
 
 Collect teacher demonstrations, pretrain, and fine-tune the skill policy:
 
 ```powershell
-python -m train.collect_heuristic_curriculum_demos --episodes-per-phase 50
-python -m train.pretrain_bc_locomotion --phase movement_fluency
-python -m train.train_curriculum --phase movement_fluency --resume train/models/llc_movement_fluency_bc_init.zip
+python -m brawl.pipelines.llc.collect_heuristic_demos --episodes-per-phase 50
+python -m brawl.pipelines.llc.pretrain_bc --phase movement_fluency
+python -m brawl.pipelines.llc.train_curriculum --phase movement_fluency --resume train/models/llc_movement_fluency_bc_init.zip
 ```
 
 Once all five families pass retention, initialize and train the final agent:
 
 ```powershell
-python -m train.transfer_skill_checkpoint --skill-checkpoint train/models/llc_all_skills_llc.zip --output train/models/final_agent/final_agent_init.zip --device cpu
-python -m train.final_agent --resume train/models/final_agent/final_agent_init.zip --device cpu
-python -m train.run_match --model train/models/final_agent/final_agent.zip --device cpu
+python -m brawl.pipelines.final_agent.transfer_skill_checkpoint --skill-checkpoint train/models/llc_all_skills_llc.zip --output train/models/final_agent/final_agent_init.zip --device cpu
+python -m brawl.pipelines.final_agent.run --resume train/models/final_agent/final_agent_init.zip --device cpu
+python -m brawl.pipelines.final_agent.run_match --model train/models/final_agent/final_agent.zip --device cpu
 ```
 
 The advisor tool reports what the project state says should happen next:
 
 ```powershell
-python tools/llc_next_action.py
+python scripts/llc/llc_next_action.py
 ```
 
 ---
@@ -144,8 +144,8 @@ python tools/llc_next_action.py
 ## Repository map
 
 ```
-env.py                     Gymnasium environment: capture, action injection, reward assembly
-config.py                  Stage geometry and UI probe calibration
+brawl/env/live.py                     Gymnasium environment: capture, action injection, reward assembly
+brawl/calibration.py                  Stage geometry and UI probe calibration
 feature_extractor/
   yolo/                    Detector wrapper and weights
   memory/                  Structured game state + observation spec

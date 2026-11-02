@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from action_space import Action
-from train.llc_stage_common import DiagnosticCallback, StageDashboardCallback
+from brawl.control.action_space import Action
+from brawl.pipelines.llc.stage_common import DiagnosticCallback, StageDashboardCallback
 
 
 def test_diagnostic_callback_reports_discrete_action_mix(capsys) -> None:

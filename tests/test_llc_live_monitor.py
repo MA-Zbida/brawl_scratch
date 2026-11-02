@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 
-from tools.llc_live_monitor import build_snapshot, summarize_episodes, summarize_steps
+from scripts.llc.llc_live_monitor import build_snapshot, summarize_episodes, summarize_steps
 
 
 def _args(tmp_path, **overrides) -> argparse.Namespace:

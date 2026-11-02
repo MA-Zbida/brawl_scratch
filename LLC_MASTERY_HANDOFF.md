@@ -30,16 +30,16 @@ This branch turns the LLC into a measured skill ladder with anti-collapse toolin
   - snapshot-pool KL anchoring
   - replay/anchor/PCGrad CLI knobs
 - Added tools:
-  - `tools/llc_preflight.py`
-  - `tools/llc_next_action.py`
-  - `tools/llc_live_monitor.py`
-  - `tools/validate_llc_demos.py`
-  - `tools/check_llc_phase_gate.py`
-  - `tools/evaluate_retention.py` as `python -m train.evaluate_retention`
-  - `tools/plot_llc_diagnostics.py`
-  - `tools/summarize_llc_run.py`
-  - `tools/record_llc_observation.py`
-  - `tools/print_llc_phase_commands.py`
+  - `scripts/llc/llc_preflight.py`
+  - `scripts/llc/llc_next_action.py`
+  - `scripts/llc/llc_live_monitor.py`
+  - `scripts/llc/validate_llc_demos.py`
+  - `scripts/llc/check_llc_phase_gate.py`
+  - `tools/evaluate_retention.py` as `python -m brawl.pipelines.llc.evaluate_retention`
+  - `scripts/llc/plot_llc_diagnostics.py`
+  - `scripts/llc/summarize_llc_run.py`
+  - `scripts/llc/record_llc_observation.py`
+  - `scripts/llc/print_llc_phase_commands.py`
 - Final-agent initialization is deferred until the skill policy passes `all_skills_llc` retention and manual approval.
 
 ## Setup
@@ -55,8 +55,8 @@ Use a fixed setup until the LLC is stable:
 Install the live stack:
 
 ```powershell
-python -m pip install -r requirements-llc.txt
-python tools/llc_preflight.py --device cuda
+python -m pip install -r requirements.txt
+python scripts/llc/llc_preflight.py --device cuda
 ```
 
 If CUDA fails after installing requirements, reinstall `torch` from the official PyTorch selector for your CUDA version, or run with `--device cpu`.
@@ -66,7 +66,7 @@ If CUDA fails after installing requirements, reinstall `torch` from the official
 The safest way to operate this project is to ask the advisor what to do next:
 
 ```powershell
-python tools/llc_next_action.py
+python scripts/llc/llc_next_action.py
 ```
 
 It inspects local demos, checkpoints, eval CSVs, plots, reports, and manual observation approvals. If it says `STOP`, do not advance.
@@ -74,7 +74,7 @@ It inspects local demos, checkpoints, eval CSVs, plots, reports, and manual obse
 To print every command in the ladder:
 
 ```powershell
-python tools/print_llc_phase_commands.py --phase all
+python scripts/llc/print_llc_phase_commands.py --phase all
 ```
 
 ## Perception Check
@@ -82,7 +82,7 @@ python tools/print_llc_phase_commands.py --phase all
 Before demos or training:
 
 ```powershell
-python tools/debug_observation_overlay.py --phase movement_fluency --show --max-steps 1000 --yolo-every 1
+python scripts/llc/debug_observation_overlay.py --phase movement_fluency --show --max-steps 1000 --yolo-every 1
 ```
 
 Do not continue if boxes, stocks, damage, weapon state, platform position, or relative positions are wrong.
@@ -90,17 +90,17 @@ Do not continue if boxes, stocks, damage, weapon state, platform position, or re
 ## Collect Demos
 
 ```powershell
-python -m train.collect_bc_locomotion_demos --phase recovery_mastery --episodes 20 --max-episode-steps 120
-python -m train.collect_bc_locomotion_demos --phase movement_fluency --episodes 40 --max-episode-steps 90 --move-mouse-to-goal
-python -m train.collect_bc_locomotion_demos --phase weapon_acquisition --episodes 30 --max-episode-steps 140
-python -m train.collect_bc_locomotion_demos --phase spacing_neutral --episodes 30 --max-episode-steps 180
-python -m train.collect_bc_locomotion_demos --phase combat_execution --episodes 50 --max-episode-steps 240
+python -m brawl.pipelines.llc.collect_demos --phase recovery_mastery --episodes 20 --max-episode-steps 120
+python -m brawl.pipelines.llc.collect_demos --phase movement_fluency --episodes 40 --max-episode-steps 90 --move-mouse-to-goal
+python -m brawl.pipelines.llc.collect_demos --phase weapon_acquisition --episodes 30 --max-episode-steps 140
+python -m brawl.pipelines.llc.collect_demos --phase spacing_neutral --episodes 30 --max-episode-steps 180
+python -m brawl.pipelines.llc.collect_demos --phase combat_execution --episodes 50 --max-episode-steps 240
 ```
 
 Validate before BC:
 
 ```powershell
-python tools/validate_llc_demos.py --phase all --min-samples 100
+python scripts/llc/validate_llc_demos.py --phase all --min-samples 100
 ```
 
 Bad demos become bad anchors. Recollect phases with high idle, low entropy, missing goal masks, wrong phase metadata, or no combat attacks.
@@ -120,19 +120,19 @@ For each phase:
 Use:
 
 ```powershell
-python tools/llc_next_action.py --phase recovery_mastery
-python tools/llc_next_action.py --phase movement_fluency
-python tools/llc_next_action.py --phase weapon_acquisition
-python tools/llc_next_action.py --phase spacing_neutral
-python tools/llc_next_action.py --phase combat_execution
-python tools/llc_next_action.py --phase all_skills_llc
+python scripts/llc/llc_next_action.py --phase recovery_mastery
+python scripts/llc/llc_next_action.py --phase movement_fluency
+python scripts/llc/llc_next_action.py --phase weapon_acquisition
+python scripts/llc/llc_next_action.py --phase spacing_neutral
+python scripts/llc/llc_next_action.py --phase combat_execution
+python scripts/llc/llc_next_action.py --phase all_skills_llc
 ```
 
 While PPO is running, monitor collapse signals in another terminal:
 
 ```powershell
-python tools/llc_live_monitor.py --phase movement_fluency
-python tools/llc_live_monitor.py --phase combat_execution
+python scripts/llc/llc_live_monitor.py --phase movement_fluency
+python scripts/llc/llc_live_monitor.py --phase combat_execution
 ```
 
 Treat `STOP SIGNALS` as real. Pause before advancing if the monitor reports high idle, low entropy, high whiff rate, negative combat trade, or retention/amnesia failure.
@@ -166,7 +166,7 @@ Default current-phase minimum skill scores:
 Run gate manually when needed:
 
 ```powershell
-python tools/check_llc_phase_gate.py --eval-csv train/models/llc_PHASE_retention_eval.csv --phase PHASE
+python scripts/llc/check_llc_phase_gate.py --eval-csv train/models/llc_PHASE_retention_eval.csv --phase PHASE
 ```
 
 Advance only when:
@@ -182,7 +182,7 @@ Advance only when:
 After plots and report:
 
 ```powershell
-python tools/record_llc_observation.py --phase PHASE --approved yes --notes "what you saw"
+python scripts/llc/record_llc_observation.py --phase PHASE --approved yes --notes "what you saw"
 ```
 
 Use `--approved no` if your eyes disagree with the metrics. The advisor will block advancement.
@@ -193,8 +193,8 @@ After the skill policy passes every gate, convert it into a genuinely goal-free
 initializer, then fine-tune one policy on match reward:
 
 ```powershell
-python -m train.transfer_skill_checkpoint --skill-checkpoint train/models/llc_all_skills_llc.zip --output train/models/final_agent/final_agent_init.zip --device cpu
-python -m train.final_agent --resume train/models/final_agent/final_agent_init.zip --device cpu
+python -m brawl.pipelines.final_agent.transfer_skill_checkpoint --skill-checkpoint train/models/llc_all_skills_llc.zip --output train/models/final_agent/final_agent_init.zip --device cpu
+python -m brawl.pipelines.final_agent.run --resume train/models/final_agent/final_agent_init.zip --device cpu
 ```
 
 The final checkpoint consumes the 146-dimensional state/history observation. It

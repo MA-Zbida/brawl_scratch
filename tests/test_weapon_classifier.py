@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from perception.weapon_classifier import WeaponPrediction, WeaponStateFusion
+from brawl.perception.weapon_classifier import WeaponPrediction, WeaponStateFusion
 
 
 class _FakeClassifier:
@@ -92,7 +92,7 @@ def test_cadence_runs_on_the_expected_frames() -> None:
 
 def test_held_classifier_prediction_is_not_reported_as_fresh() -> None:
     """A cached armed result remains observable, but is not new fusion evidence."""
-    from perception.weapon_classifier import WeaponClassifier
+    from brawl.perception.weapon_classifier import WeaponClassifier
 
     classifier = WeaponClassifier.__new__(WeaponClassifier)
     classifier.interval = 4
@@ -113,7 +113,7 @@ def test_held_classifier_prediction_is_not_reported_as_fresh() -> None:
 
 def test_crop_uses_training_padding_and_clamps_to_the_frame() -> None:
     """Cropping differently than training degrades the model with no error anywhere."""
-    from perception.weapon_classifier import WeaponClassifier
+    from brawl.perception.weapon_classifier import WeaponClassifier
 
     frame = np.zeros((200, 300, 3), dtype=np.uint8)
     # Call the unbound method so no checkpoint is needed.
@@ -126,7 +126,7 @@ def test_crop_uses_training_padding_and_clamps_to_the_frame() -> None:
 
 
 def test_degenerate_box_yields_no_crop(tmp_path) -> None:
-    from perception.weapon_classifier import WeaponClassifier
+    from brawl.perception.weapon_classifier import WeaponClassifier
 
     frame = np.zeros((200, 300, 3), dtype=np.uint8)
     tiny = WeaponClassifier.crop.__get__(_FakeClassifier(pad=0.0))(frame, 0.5, 0.5, 0.001, 0.001)
@@ -142,7 +142,7 @@ def test_cached_visual_state_cannot_undo_a_new_pickup_or_throw(intent):
 
 
 def test_lost_fighter_invalidates_cached_visual_state_even_on_skipped_frame():
-    from perception.weapon_classifier import WeaponClassifier
+    from brawl.perception.weapon_classifier import WeaponClassifier
     classifier = WeaponClassifier.__new__(WeaponClassifier)
     classifier.interval, classifier._frame = 4, 1
     classifier._cache = {'player': WeaponPrediction(True, .99)}
@@ -151,7 +151,7 @@ def test_lost_fighter_invalidates_cached_visual_state_even_on_skipped_frame():
 
 
 def test_missing_frame_cannot_return_a_valid_weapon_prediction():
-    from perception.weapon_classifier import WeaponClassifier
+    from brawl.perception.weapon_classifier import WeaponClassifier
     classifier = WeaponClassifier.__new__(WeaponClassifier)
     classifier.interval, classifier._frame = 4, 1
     classifier._cache = {'player': WeaponPrediction(True, .99)}
@@ -159,7 +159,7 @@ def test_missing_frame_cannot_return_a_valid_weapon_prediction():
 
 
 def test_refresh_prunes_absent_fighters_and_retains_invalid_crop_status():
-    from perception.weapon_classifier import WeaponClassifier
+    from brawl.perception.weapon_classifier import WeaponClassifier
     classifier = WeaponClassifier.__new__(WeaponClassifier)
     classifier.interval, classifier._frame, classifier.pad = 4, 0, 0.
     classifier._cache = {'absent': WeaponPrediction(True, .99)}
@@ -177,8 +177,8 @@ def test_refresh_prunes_absent_fighters_and_retains_invalid_crop_status():
 
 def test_pre_input_capture_cannot_undo_current_pickup_intent():
     from types import SimpleNamespace
-    from action_space import Action
-    from feature_extractor.memory.state_spec import StateSpec
+    from brawl.control.action_space import Action
+    from brawl.state.state_spec import StateSpec
     from test_observation_window import make_env, det
     env, extractor = make_env(action_repeat_steps=1)
     env.weapon_classifier = SimpleNamespace(update=lambda frame, boxes: {
@@ -228,7 +228,7 @@ def test_unobserved_identity_cannot_supply_weapon_crops():
 
 
 def test_crop_observer_gets_exact_input_only_when_inference_runs():
-    from perception.weapon_classifier import WeaponClassifier
+    from brawl.perception.weapon_classifier import WeaponClassifier
     classifier = WeaponClassifier.__new__(WeaponClassifier)
     classifier.interval, classifier._frame, classifier.pad = 4, 0, 0.
     classifier._cache = {}
@@ -249,8 +249,8 @@ def test_crop_observer_gets_exact_input_only_when_inference_runs():
 def test_inference_tensor_matches_training_image_preprocessing(tmp_path):
     import cv2
     import torch
-    from perception.weapon_classifier import WeaponClassifier
-    from train.train_weapon_classifier import load_images
+    from brawl.perception.weapon_classifier import WeaponClassifier
+    from brawl.pipelines.weapon_classifier.train import load_images
 
     class InspectModel(torch.nn.Module):
         def forward(self, batch):
@@ -274,8 +274,8 @@ def test_inference_tensor_matches_training_image_preprocessing(tmp_path):
 
 def test_inference_crop_matches_labelling_crop():
     from pathlib import Path
-    from perception.weapon_classifier import WeaponClassifier
-    from tools.label_weapon_crops import Crop, crop_pixels
+    from brawl.perception.weapon_classifier import WeaponClassifier
+    from scripts.ops.label_weapon_crops import Crop, crop_pixels
     frame = np.random.default_rng(2).integers(0, 256, (108, 192, 3), dtype=np.uint8)
     for box in [(.5, .5, .1, .2), (.01, .99, .1, .2)]:
         expected = crop_pixels(frame, Crop(Path('unused.png'), 0, *box), .45)

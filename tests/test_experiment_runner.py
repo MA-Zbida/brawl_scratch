@@ -10,7 +10,7 @@ import pytest
 
 
 def test_legacy_primitive_defaults_are_preserved():
-    from train.primitive_pipeline import parser
+    from brawl.pipelines.primitive27.run import parser
     args = vars(parser().parse_args([]))
     expected = dict(stage='all', run_dir=None, demos=None, resume=None, no_prompt=False,
         episodes_per_drill=30, attempts_factor=4, setup_steps=240, collection_steps=600,
@@ -24,15 +24,15 @@ def test_legacy_primitive_defaults_are_preserved():
 
 def test_primitive_entrypoint_does_not_import_experimental_runner_or_gpu():
     result = subprocess.run([sys.executable, '-c',
-        'import sys; import train.primitive_pipeline; '
-        'assert "train.semantic_pipeline" not in sys.modules; '
-        'assert "torch" not in sys.modules; assert "capture_first" not in sys.modules'],
+        'import sys; import brawl.pipelines.primitive27.run; '
+        'assert "brawl.pipelines.semantic57.run" not in sys.modules; '
+        'assert "torch" not in sys.modules; assert "brawl.capture_first" not in sys.modules'],
         env=os.environ | {'BRAWL_NO_EARLY_CAPTURE': '1'}, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
 
 def experiment(tmp_path, parameters=None, **extra):
-    from train.experiment_config import COMPONENTS
+    from brawl.training.experiment_config import COMPONENTS
     path = tmp_path/'experiment.json'
     path.write_text(json.dumps(dict(schema_version=1, name='test', components=COMPONENTS,
                                     parameters=parameters or {}) | extra))
@@ -40,8 +40,8 @@ def experiment(tmp_path, parameters=None, **extra):
 
 
 def test_config_cli_and_escape_hatch_have_explicit_precedence(tmp_path):
-    from train.experiment_config import parse_experiment_args
-    from train.primitive_pipeline import parser
+    from brawl.training.experiment_config import parse_experiment_args
+    from brawl.pipelines.primitive27.run import parser
     path = experiment(tmp_path, {'timesteps': 8192, 'learning_rate': .0002, 'no_prompt': False})
     args, spec = parse_experiment_args(parser(), ['--experiment', str(path), '--timesteps', '2048',
                                                '--set', 'learning_rate=0.00005'])
@@ -54,16 +54,16 @@ def test_config_cli_and_escape_hatch_have_explicit_precedence(tmp_path):
 @pytest.mark.parametrize('parameters', [dict(typo=1), dict(n_steps=True), dict(n_steps=1.5),
     dict(no_prompt='false'), dict(stage='bogus'), dict(learning_rate=float('nan'))])
 def test_invalid_configuration_is_rejected(tmp_path, parameters):
-    from train.experiment_config import parse_experiment_args
-    from train.primitive_pipeline import parser
+    from brawl.training.experiment_config import parse_experiment_args
+    from brawl.pipelines.primitive27.run import parser
     path = experiment(tmp_path, parameters)
     with pytest.raises(ValueError):
         parse_experiment_args(parser(), ['--experiment', str(path)])
 
 
 def test_unimplemented_method_fails_before_capture(tmp_path):
-    from train.primitive_pipeline import main
-    from train.experiment_config import COMPONENTS
+    from brawl.pipelines.primitive27.run import main
+    from brawl.training.experiment_config import COMPONENTS
     path = experiment(tmp_path, components=COMPONENTS | {'policy': 'lstm'})
     with pytest.raises(ValueError, match='Unsupported'):
         main(['--experiment', str(path), '--stage', 'smoke', '--run-dir', str(tmp_path/'run')])
@@ -71,8 +71,8 @@ def test_unimplemented_method_fails_before_capture(tmp_path):
 
 
 def test_baseline_config_and_cli_are_equivalent():
-    from train.experiment_config import parse_experiment_args
-    from train.primitive_pipeline import parser
+    from brawl.training.experiment_config import parse_experiment_args
+    from brawl.pipelines.primitive27.run import parser
     args, spec = parse_experiment_args(parser(), [
         '--experiment', 'experiments/baselines/structured27_bc_ppo_v1.json'])
     assert spec['name'] == 'structured27_bc_ppo_v1'
@@ -80,7 +80,7 @@ def test_baseline_config_and_cli_are_equivalent():
 
 
 def test_configured_smoke_records_resolved_configuration_and_hashes(tmp_path):
-    from train.primitive_pipeline import main
+    from brawl.pipelines.primitive27.run import main
     path = experiment(tmp_path, {'stage': 'smoke', 'seed': 42})
     out = tmp_path/'smoke'
     main(['--experiment', str(path), '--run-dir', str(out)])
@@ -88,7 +88,7 @@ def test_configured_smoke_records_resolved_configuration_and_hashes(tmp_path):
     assert resolved['parameters']['stage'] == 'smoke'
     assert resolved['components']['algorithm'] == 'ppo'
     assert resolved['artifacts']['experiment']['sha256']
-    assert resolved['source_sha256']['train/pipeline_runner.py']
+    assert resolved['source_sha256']['brawl/training/runner.py']
     assert resolved['protocol']['retention']['min_retention'] == .9
     assert json.loads((out/'status.json').read_text())['synthetic']
     model = json.loads((out/'model_config.json').read_text())
@@ -100,23 +100,23 @@ def test_configured_smoke_records_resolved_configuration_and_hashes(tmp_path):
 @pytest.mark.parametrize('setting', ['unknown=4', 'seed=true', 'seed=1.5', 'no_prompt=falsey',
                                     'learning_rate=NaN', 'stage=bogus', 'timesteps'])
 def test_invalid_escape_hatch_is_rejected(setting):
-    from train.experiment_config import parse_experiment_args
-    from train.primitive_pipeline import parser
+    from brawl.training.experiment_config import parse_experiment_args
+    from brawl.pipelines.primitive27.run import parser
     with pytest.raises(ValueError):
         parse_experiment_args(parser(), ['--set', setting])
 
 
 def test_boolean_and_path_override(tmp_path):
-    from train.experiment_config import parse_experiment_args
-    from train.primitive_pipeline import parser
+    from brawl.training.experiment_config import parse_experiment_args
+    from brawl.pipelines.primitive27.run import parser
     args, _ = parse_experiment_args(parser(), ['--set', 'no_prompt=false',
                                              '--set', f'world_replay={tmp_path}'])
     assert args.no_prompt is False and args.world_replay == tmp_path
 
 
 def test_duplicate_keys_and_schema_typos_rejected(tmp_path):
-    from train.experiment_config import parse_experiment_args
-    from train.primitive_pipeline import parser
+    from brawl.training.experiment_config import parse_experiment_args
+    from brawl.pipelines.primitive27.run import parser
     path = tmp_path/'invalid.json'
     for contents in ['{"schema_version":1,"schema_version":2}', '[]',
                      '{"schema_version":1,"typo":true}']:
@@ -126,9 +126,9 @@ def test_duplicate_keys_and_schema_typos_rejected(tmp_path):
 
 
 def test_explicit_geometry_experiment_rejects_a_different_checkpoint_encoder():
-    from train.experiment_config import validate_model_components
-    from train.primitive_pipeline import _space_env
-    from train.primitive_training import build_model
+    from brawl.training.experiment_config import validate_model_components
+    from brawl.pipelines.primitive27.run import _space_env
+    from brawl.pipelines.primitive27.training import build_model
     from stable_baselines3.common.torch_layers import FlattenExtractor
     model = build_model(_space_env())
     validate_model_components(model)

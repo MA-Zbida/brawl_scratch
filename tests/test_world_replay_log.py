@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from world_model.replay_log import (
+from brawl.world_model.replay_log import (
     TERMINAL_ACTION,
     WorldReplayRecorder,
     WorldReplayWriter,

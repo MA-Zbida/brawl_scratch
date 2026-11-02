@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from action_space import Action
-from tools import debug_observation_overlay as overlay
+from brawl.control.action_space import Action
+from scripts.llc import debug_observation_overlay as overlay
 
 
 @pytest.mark.parametrize(

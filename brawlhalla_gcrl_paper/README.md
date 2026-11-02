@@ -32,7 +32,7 @@ Every projected value renders as `[P:...]` in the PDF, so synthetic/expected val
 From the repository root, using the pinned environment:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m analysis.paper_evidence
+C:\venvs\brawl312\Scripts\python.exe -m brawl.analysis.paper_evidence
 ```
 
 The command writes PNG and vector PDF figures, a long-form metrics CSV, generated

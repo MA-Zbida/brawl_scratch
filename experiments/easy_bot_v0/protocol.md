@@ -69,9 +69,9 @@ this experiment.
 ## Gate 1 - verify the frozen inputs
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m tools.verify_experiment_manifest
-C:\venvs\brawl312\Scripts\python.exe -m tools.llc_preflight --device cuda --strict-warnings
-C:\venvs\brawl312\Scripts\python.exe -m tools.validate_llc_demos `
+C:\venvs\brawl312\Scripts\python.exe -m scripts.llc.verify_experiment_manifest
+C:\venvs\brawl312\Scripts\python.exe -m scripts.llc.llc_preflight --device cuda --strict-warnings
+C:\venvs\brawl312\Scripts\python.exe -m scripts.llc.validate_llc_demos `
   train\models\recollected\movement_fluency_demos.npz `
   train\models\recollected\weapon_acquisition_demos.npz `
   train\models\recollected\spacing_neutral_demos_v2.npz `
@@ -88,7 +88,7 @@ Use the already-verified movement BC initializer. This is the only independent
 BC initializer allowed into the sequential chain.
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum `
   --phase movement_fluency `
   --resume train\models\llc_movement_fluency_bc_init.zip `
   --timesteps 4096 `
@@ -109,7 +109,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
 Then run the two-episode skill check:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.evaluate_retention `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.evaluate_retention `
   --model train\models\easy_bot_v0\llc_movement_fluency.zip `
   --phase movement_fluency `
   --phases movement_fluency `
@@ -131,7 +131,7 @@ BC the weapon demos into the movement PPO checkpoint, then PPO with both demo
 archives anchoring the same policy.
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.pretrain_bc_locomotion `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.pretrain_bc `
   --phase weapon_acquisition `
   --demos train\models\recollected\weapon_acquisition_demos.npz `
   --resume train\models\easy_bot_v0\llc_movement_fluency.zip `
@@ -143,7 +143,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.pretrain_bc_locomotion `
   --output train\models\easy_bot_v0\llc_weapon_acquisition_bc_init.zip `
   --device cpu
 
-C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum `
   --phase weapon_acquisition `
   --resume train\models\easy_bot_v0\llc_weapon_acquisition_bc_init.zip `
   --timesteps 4096 `
@@ -160,7 +160,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
   --diag-report-every 512 `
   --eval-every-steps 0
 
-C:\venvs\brawl312\Scripts\python.exe -m train.evaluate_retention `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.evaluate_retention `
   --model train\models\easy_bot_v0\llc_weapon_acquisition.zip `
   --phase weapon_acquisition `
   --phases movement_fluency,weapon_acquisition `
@@ -179,7 +179,7 @@ is interacting with the same game.
 ## Gate 4 - spacing handoff
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.pretrain_bc_locomotion `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.pretrain_bc `
   --phase spacing_neutral `
   --demos train\models\recollected\spacing_neutral_demos_v2.npz `
   --resume train\models\easy_bot_v0\llc_weapon_acquisition.zip `
@@ -191,7 +191,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.pretrain_bc_locomotion `
   --output train\models\easy_bot_v0\llc_spacing_neutral_bc_init.zip `
   --device cpu
 
-C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum `
   --phase spacing_neutral `
   --resume train\models\easy_bot_v0\llc_spacing_neutral_bc_init.zip `
   --timesteps 4096 `
@@ -208,7 +208,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
   --diag-report-every 512 `
   --eval-every-steps 0
 
-C:\venvs\brawl312\Scripts\python.exe -m train.evaluate_retention `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.evaluate_retention `
   --model train\models\easy_bot_v0\llc_spacing_neutral.zip `
   --phase spacing_neutral `
   --phases movement_fluency,weapon_acquisition,spacing_neutral `
@@ -223,7 +223,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.evaluate_retention `
 ## Gate 5 - combat handoff
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.pretrain_bc_locomotion `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.pretrain_bc `
   --phase combat_execution `
   --demos train\models\recollected\combat_execution_demos.npz `
   --resume train\models\easy_bot_v0\llc_spacing_neutral.zip `
@@ -235,7 +235,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.pretrain_bc_locomotion `
   --output train\models\easy_bot_v0\llc_combat_execution_bc_init.zip `
   --device cpu
 
-C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum `
   --phase combat_execution `
   --resume train\models\easy_bot_v0\llc_combat_execution_bc_init.zip `
   --timesteps 4096 `
@@ -252,7 +252,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum `
   --diag-report-every 512 `
   --eval-every-steps 0
 
-C:\venvs\brawl312\Scripts\python.exe -m train.evaluate_retention `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.evaluate_retention `
   --model train\models\easy_bot_v0\llc_combat_execution.zip `
   --phase combat_execution `
   --phases movement_fluency,weapon_acquisition,spacing_neutral,combat_execution `
@@ -266,7 +266,7 @@ C:\venvs\brawl312\Scripts\python.exe -m train.evaluate_retention `
 
 ## Gate 6 - first Easy-bot match
 
-Blocked for now. `train/run_match.py` currently switches model files while the
+Blocked for now. `brawl/pipelines/final_agent/run_match.py` currently switches model files while the
 environment remains conditioned on the combat goal. Its weapon and spacing
 decisions therefore do not test the intended skill policies, and missing recovery
 can be silently labelled as recovery while actually running combat.
@@ -322,7 +322,7 @@ physical starting frame, so each row records start error and excludes trivial
 starts from its score.
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.compare_movement_checkpoints `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.compare_checkpoints `
   --bc-model train\models\llc_movement_fluency_bc_init.zip `
   --ppo-model train\models\easy_bot_v0\llc_movement_fluency.zip `
   --csv train\models\easy_bot_v0\movement_bc_ppo_diagnostic.csv `

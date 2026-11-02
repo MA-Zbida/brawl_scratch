@@ -379,14 +379,14 @@ function Invoke-PipelineStage(
 try {
     # Preflight deliberately runs on every invocation. A stale marker is not proof
     # that today's capture, model, and archive lifecycle still works.
-    Invoke-NativeStage "preflight" @("tools\preflight_pipeline.py")
+    Invoke-NativeStage "preflight" @("scripts\llc\preflight_pipeline.py")
 
     # Recovery is BC-only from the existing validated archive. There is no
     # recovery_collect stage: its heuristic only becomes useful once setup has
     # already moved the fighter offstage, so another collection pass buys nothing.
     Invoke-PipelineStage "recovery_bc" $RecoveryArtifacts {
         Invoke-NativeStage "recovery_bc" @(
-            "-m", "train.pretrain_bc_locomotion",
+            "-m", "brawl.pipelines.llc.pretrain_bc",
             "--phase", "recovery_mastery",
             "--demos", $RecoveryDemo,
             "--resume", $MovementModel,
@@ -402,7 +402,7 @@ try {
 
     Invoke-PipelineStage "weapon_collect" @($WeaponDemo) {
         Invoke-NativeStage "weapon_collect" @(
-            "train\collect_bc_locomotion_demos.py",
+            "brawl\pipelines\llc\collect_demos.py",
             "--phase", "weapon_acquisition",
             "--episodes", "$Episodes",
             "--output", $WeaponDemo,
@@ -413,14 +413,14 @@ try {
             "--world-replay", $WorldReplay
         )
         Invoke-NativeStage "weapon_demo_validation" @(
-            "tools\validate_llc_demos.py", $WeaponDemo,
+            "scripts\llc\validate_llc_demos.py", $WeaponDemo,
             "--phase", "weapon_acquisition", "--min-samples", "1"
         )
     } -ImportExisting
 
     Invoke-PipelineStage "weapon_bc" $WeaponBcArtifacts {
         Invoke-NativeStage "weapon_bc" @(
-            "-m", "train.pretrain_bc_locomotion",
+            "-m", "brawl.pipelines.llc.pretrain_bc",
             "--phase", "weapon_acquisition",
             "--demos", $WeaponDemo,
             "--resume", $RecoveryModel,
@@ -437,7 +437,7 @@ try {
     $WeaponAnchors = "$MovementDemo;$RecoveryDemo;$WeaponDemo"
     Invoke-PipelineStage "weapon_ppo" $WeaponArtifacts {
         Invoke-NativeStage "weapon_ppo" @(
-            "-m", "train.train_curriculum",
+            "-m", "brawl.pipelines.llc.train_curriculum",
             "--phase", "weapon_acquisition",
             "--resume", $WeaponBcModel,
             "--timesteps", "$PpoSteps",
@@ -456,7 +456,7 @@ try {
     $WeaponRetention = Join-Path $ModelDir "llc_weapon_acquisition_retention_eval.csv"
     Invoke-PipelineStage "weapon_retention" @($WeaponRetention) {
         Invoke-NativeStage "weapon_retention" @(
-            "-m", "train.evaluate_retention",
+            "-m", "brawl.pipelines.llc.evaluate_retention",
             "--model", $WeaponModel,
             "--phase", "weapon_acquisition",
             "--phases", "movement_fluency,recovery_mastery,weapon_acquisition",
@@ -470,7 +470,7 @@ try {
 
     Invoke-PipelineStage "spacing_collect" @($SpacingDemo) {
         Invoke-NativeStage "spacing_collect" @(
-            "train\collect_bc_locomotion_demos.py",
+            "brawl\pipelines\llc\collect_demos.py",
             "--phase", "spacing_neutral",
             "--episodes", "$Episodes",
             "--output", $SpacingDemo,
@@ -481,14 +481,14 @@ try {
             "--world-replay", $WorldReplay
         )
         Invoke-NativeStage "spacing_demo_validation" @(
-            "tools\validate_llc_demos.py", $SpacingDemo,
+            "scripts\llc\validate_llc_demos.py", $SpacingDemo,
             "--phase", "spacing_neutral", "--min-samples", "1"
         )
     }
 
     Invoke-PipelineStage "spacing_bc" $SpacingBcArtifacts {
         Invoke-NativeStage "spacing_bc" @(
-            "-m", "train.pretrain_bc_locomotion",
+            "-m", "brawl.pipelines.llc.pretrain_bc",
             "--phase", "spacing_neutral",
             "--demos", $SpacingDemo,
             "--resume", $WeaponModel,
@@ -505,7 +505,7 @@ try {
     $SpacingAnchors = "$WeaponAnchors;$SpacingDemo"
     Invoke-PipelineStage "spacing_ppo" $SpacingArtifacts {
         Invoke-NativeStage "spacing_ppo" @(
-            "-m", "train.train_curriculum",
+            "-m", "brawl.pipelines.llc.train_curriculum",
             "--phase", "spacing_neutral",
             "--resume", $SpacingBcModel,
             "--timesteps", "$PpoSteps",
@@ -522,7 +522,7 @@ try {
     $SpacingRetention = Join-Path $ModelDir "llc_spacing_neutral_retention_eval.csv"
     Invoke-PipelineStage "spacing_retention" @($SpacingRetention) {
         Invoke-NativeStage "spacing_retention" @(
-            "-m", "train.evaluate_retention",
+            "-m", "brawl.pipelines.llc.evaluate_retention",
             "--model", $SpacingModel, "--phase", "spacing_neutral",
             "--phases", "movement_fluency,recovery_mastery,weapon_acquisition,spacing_neutral",
             "--episodes", "$RetentionEpisodes", "--max-episode-steps", "200",
@@ -533,21 +533,21 @@ try {
 
     Invoke-PipelineStage "combat_collect" @($CombatDemo) {
         Invoke-NativeStage "combat_collect" @(
-            "train\collect_bc_locomotion_demos.py",
+            "brawl\pipelines\llc\collect_demos.py",
             "--phase", "combat_execution", "--episodes", "$Episodes",
             "--output", $CombatDemo, "--max-collection-attempts", "$Attempts",
             "--min-episode-steps", "4", "--max-episode-steps", "600",
             "--no-weapon-classifier", "--world-replay", $WorldReplay
         )
         Invoke-NativeStage "combat_demo_validation" @(
-            "tools\validate_llc_demos.py", $CombatDemo,
+            "scripts\llc\validate_llc_demos.py", $CombatDemo,
             "--phase", "combat_execution", "--min-samples", "1"
         )
     }
 
     Invoke-PipelineStage "combat_bc" $CombatBcArtifacts {
         Invoke-NativeStage "combat_bc" @(
-            "-m", "train.pretrain_bc_locomotion",
+            "-m", "brawl.pipelines.llc.pretrain_bc",
             "--phase", "combat_execution", "--demos", $CombatDemo,
             "--resume", $SpacingModel, "--epochs", "$BcEpochs",
             "--batch-size", "512", "--learning-rate", "0.0002",
@@ -559,7 +559,7 @@ try {
     $CombatAnchors = "$SpacingAnchors;$CombatDemo"
     Invoke-PipelineStage "combat_ppo" $CombatArtifacts {
         Invoke-NativeStage "combat_ppo" @(
-            "-m", "train.train_curriculum",
+            "-m", "brawl.pipelines.llc.train_curriculum",
             "--phase", "combat_execution", "--resume", $CombatBcModel,
             "--timesteps", "$PpoSteps", "--n-steps", "512",
             "--batch-size", "256", "--max-episode-steps", "600",
@@ -574,7 +574,7 @@ try {
     $CombatRetention = Join-Path $ModelDir "llc_combat_execution_retention_eval.csv"
     Invoke-PipelineStage "combat_retention" @($CombatRetention) {
         Invoke-NativeStage "combat_retention" @(
-            "-m", "train.evaluate_retention", "--model", $CombatModel,
+            "-m", "brawl.pipelines.llc.evaluate_retention", "--model", $CombatModel,
             "--phase", "combat_execution",
             "--phases", "movement_fluency,recovery_mastery,weapon_acquisition,spacing_neutral,combat_execution",
             "--episodes", "$RetentionEpisodes", "--max-episode-steps", "300",

@@ -16,7 +16,7 @@ def report(pickup=20/33, attack=.75, recovery=.79):
 
 
 def test_one_pickup_flip_after_update_is_not_forgetting():
-    from train.primitive_retention import PrimitiveRetentionGuard
+    from brawl.training.primitive_retention import PrimitiveRetentionGuard
     guard = PrimitiveRetentionGuard()
     assert guard.observe(report(), 0)['action'] == 'continue'
     result = guard.observe(report(pickup=19/33), 512)
@@ -25,14 +25,14 @@ def test_one_pickup_flip_after_update_is_not_forgetting():
 
 
 def test_initial_bc_qualification_is_not_relaxed():
-    from train.primitive_retention import PrimitiveRetentionGuard
+    from brawl.training.primitive_retention import PrimitiveRetentionGuard
     result = PrimitiveRetentionGuard().observe(report(pickup=19/33), 0)
     assert result['action'] == 'stop'
     assert result['reason'] == 'initial_bc_gate_failed'
 
 
 def test_persistent_drop_stops_after_three_distinct_updates_not_duplicate_logs():
-    from train.primitive_retention import PrimitiveRetentionGuard
+    from brawl.training.primitive_retention import PrimitiveRetentionGuard
     guard = PrimitiveRetentionGuard()
     baseline = report()
     guard.observe(baseline, 0)
@@ -47,7 +47,7 @@ def test_persistent_drop_stops_after_three_distinct_updates_not_duplicate_logs()
 
 
 def test_recovery_resets_streak_and_does_not_move_baseline():
-    from train.primitive_retention import PrimitiveRetentionGuard
+    from brawl.training.primitive_retention import PrimitiveRetentionGuard
     guard = PrimitiveRetentionGuard()
     guard.observe(report(), 0)
     guard.observe(report(pickup=17/33), 512)
@@ -60,7 +60,7 @@ def test_recovery_resets_streak_and_does_not_move_baseline():
 
 
 def test_severe_collapse_stops_immediately():
-    from train.primitive_retention import PrimitiveRetentionGuard
+    from brawl.training.primitive_retention import PrimitiveRetentionGuard
     guard = PrimitiveRetentionGuard()
     guard.observe(report(), 0)
     result = guard.observe(report(attack=.2), 512)
@@ -71,7 +71,7 @@ def test_severe_collapse_stops_immediately():
 
 @pytest.mark.parametrize('change', ['nan', 'missing', 'samples', 'backwards'])
 def test_corrupt_or_changed_evidence_fails_closed(change):
-    from train.primitive_retention import PrimitiveRetentionGuard
+    from brawl.training.primitive_retention import PrimitiveRetentionGuard
     guard = PrimitiveRetentionGuard()
     guard.observe(report(), 512)
     current = copy.deepcopy(report())

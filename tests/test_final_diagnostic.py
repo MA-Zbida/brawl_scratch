@@ -82,7 +82,7 @@ class Policy:
 
 
 def test_weapon_crop_recording_requires_visual_fusion():
-    from tools.record_final_diagnostic import parse_args
+    from scripts.final_agent.record_final_diagnostic import parse_args
     with pytest.raises(SystemExit):
         parse_args(['--model', 'test.zip', '--weapon-crops'])
     args = parse_args(['--model', 'test.zip', '--weapon-crops',
@@ -92,8 +92,8 @@ def test_weapon_crop_recording_requires_visual_fusion():
 
 def test_weapon_crop_sink_preserves_pixels_and_capture_identity(tmp_path):
     import cv2
-    from perception.weapon_classifier import WeaponPrediction
-    from tools.record_final_diagnostic import WeaponCropSink
+    from brawl.perception.weapon_classifier import WeaponPrediction
+    from scripts.final_agent.record_final_diagnostic import WeaponCropSink
     capture = SimpleNamespace(capture_id=42)
     patch = np.arange(12 * 15 * 3, dtype=np.uint8).reshape(12, 15, 3)
     with (tmp_path / 'crops.jsonl').open('x', encoding='utf-8') as stream:
@@ -109,8 +109,8 @@ def test_weapon_crop_sink_preserves_pixels_and_capture_identity(tmp_path):
 
 @pytest.mark.parametrize('fail', [False, True])
 def test_recording_crops_restores_observer_and_closes_on_error(tmp_path, fail):
-    from perception.weapon_classifier import WeaponPrediction
-    from tools.record_final_diagnostic import record_diagnostic
+    from brawl.perception.weapon_classifier import WeaponPrediction
+    from scripts.final_agent.record_final_diagnostic import record_diagnostic
 
     class CropArena(Arena):
         def step(self, action):
@@ -139,7 +139,7 @@ def test_recording_crops_restores_observer_and_closes_on_error(tmp_path, fail):
 
 
 def test_disabled_classifier_cannot_record_crops_and_closes_arena(tmp_path):
-    from tools.record_final_diagnostic import record_diagnostic
+    from scripts.final_agent.record_final_diagnostic import record_diagnostic
     base = Arena()
     with pytest.raises(ValueError, match='enabled visual classifier'):
         record_diagnostic(SimpleNamespace(policy=Policy()), base, tmp_path, weapon_crops=True)
@@ -147,7 +147,7 @@ def test_disabled_classifier_cannot_record_crops_and_closes_arena(tmp_path):
 
 
 def test_capture_probe_owns_frame_and_does_not_claim_sensor_freshness():
-    from tools.record_final_diagnostic import CaptureProbe
+    from scripts.final_agent.record_final_diagnostic import CaptureProbe
     provider = Frames()
     probe = CaptureProbe(provider, Clock())
     first = probe.get_frame()
@@ -161,7 +161,7 @@ def test_capture_probe_owns_frame_and_does_not_claim_sensor_freshness():
 
 @pytest.mark.parametrize('video', [False, True])
 def test_recording_aligns_actions_frames_probabilities_and_training_reward(tmp_path, video):
-    from tools.record_final_diagnostic import record_diagnostic
+    from scripts.final_agent.record_final_diagnostic import record_diagnostic
     base = Arena()
     model = SimpleNamespace(policy=Policy())
     result = record_diagnostic(model, base, tmp_path, windows=2, seconds=120.,
@@ -193,7 +193,7 @@ def test_recording_aligns_actions_frames_probabilities_and_training_reward(tmp_p
 
 
 def test_failure_flushes_partial_data_and_closes_env(tmp_path):
-    from tools.record_final_diagnostic import record_diagnostic
+    from scripts.final_agent.record_final_diagnostic import record_diagnostic
     base = Arena(fail=True)
     with pytest.raises(RuntimeError, match='synthetic failure'):
         record_diagnostic(SimpleNamespace(policy=Policy()), base, tmp_path,
@@ -204,7 +204,7 @@ def test_failure_flushes_partial_data_and_closes_env(tmp_path):
 
 
 def test_cli_defaults_are_frozen_cpu_and_video_is_opt_in():
-    from tools.record_final_diagnostic import parse_args
+    from scripts.final_agent.record_final_diagnostic import parse_args
     args = parse_args(['--model', 'test.zip'])
     assert args.windows == 2 and args.seconds == 120
     assert args.device == 'cpu' and not args.stochastic and not args.video
@@ -213,10 +213,10 @@ def test_cli_defaults_are_frozen_cpu_and_video_is_opt_in():
 
 
 def test_real_env_and_ppo_keep_weights_and_show_capture_before_input(tmp_path):
-    from env import BrawlDeepEnv, EnvConfig, NullInputController
-    from train.final_policy import build_final_model
-    from reward.match_objective import NoMatchReward
-    from tools.record_final_diagnostic import record_diagnostic
+    from brawl.env.live import BrawlDeepEnv, EnvConfig, NullInputController
+    from brawl.pipelines.final_agent.policy import build_final_model
+    from brawl.reward.match_objective import NoMatchReward
+    from scripts.final_agent.record_final_diagnostic import record_diagnostic
 
     base = BrawlDeepEnv(
         frame_provider=Frames(), extractor=SimpleNamespace(predict=lambda frame: []),
@@ -235,7 +235,7 @@ def test_real_env_and_ppo_keep_weights_and_show_capture_before_input(tmp_path):
 
 
 def test_none_frame_has_no_video_frame_or_fabricated_capture_id(tmp_path):
-    from tools.record_final_diagnostic import record_diagnostic
+    from scripts.final_agent.record_final_diagnostic import record_diagnostic
     base = Arena()
     sequence = iter([np.zeros((96, 160, 3), dtype=np.uint8), None])
     base.frame_provider.get_frame = lambda: next(sequence)
@@ -248,7 +248,7 @@ def test_none_frame_has_no_video_frame_or_fabricated_capture_id(tmp_path):
 
 def test_encoder_failure_releases_writer_and_environment(tmp_path, monkeypatch):
     import cv2
-    from tools.record_final_diagnostic import record_diagnostic
+    from scripts.final_agent.record_final_diagnostic import record_diagnostic
     released = []
     writer = SimpleNamespace(isOpened=lambda: False, release=lambda: released.append(True))
     monkeypatch.setattr(cv2, 'VideoWriter', lambda *args: writer)
@@ -260,7 +260,7 @@ def test_encoder_failure_releases_writer_and_environment(tmp_path, monkeypatch):
 
 
 def test_keyboard_interrupt_preserves_partial_rows(tmp_path):
-    from tools.record_final_diagnostic import record_diagnostic
+    from scripts.final_agent.record_final_diagnostic import record_diagnostic
     base = Arena()
     original = base.step
     def step(action):
@@ -275,7 +275,7 @@ def test_keyboard_interrupt_preserves_partial_rows(tmp_path):
 
 
 def test_wall_clock_window_ends_before_step_cap(tmp_path):
-    from tools.record_final_diagnostic import record_diagnostic
+    from scripts.final_agent.record_final_diagnostic import record_diagnostic
     base = Arena()
     result = record_diagnostic(SimpleNamespace(policy=Policy()), base, tmp_path,
                                windows=2, seconds=.02, max_steps=100, clock=Clock())
@@ -283,7 +283,7 @@ def test_wall_clock_window_ends_before_step_cap(tmp_path):
 
 
 def test_failed_capture_does_not_make_cached_policy_input_look_younger(tmp_path):
-    from tools.record_final_diagnostic import record_diagnostic
+    from scripts.final_agent.record_final_diagnostic import record_diagnostic
     base = Arena()
     sequence = iter([np.zeros((96, 160, 3), dtype=np.uint8), None,
                      np.ones((96, 160, 3), dtype=np.uint8)])
@@ -297,9 +297,10 @@ def test_failed_capture_does_not_make_cached_policy_input_look_younger(tmp_path)
 @pytest.mark.parametrize('source', ['action', 'visual_fusion'])
 def test_entrypoint_writes_checkpoint_provenance_without_training(tmp_path, monkeypatch, source):
     import hashlib
-    from env import EnvConfig
-    from tools import record_final_diagnostic as diagnostic
-    from train import final_policy, final_agent, checkpoint_roles
+    from brawl.env.live import EnvConfig
+    from scripts.final_agent import record_final_diagnostic as diagnostic
+    from brawl.pipelines.final_agent import policy as final_policy, run as final_agent
+    from brawl.training import checkpoints as checkpoint_roles
     checkpoint = tmp_path / 'source.zip'
     checkpoint.write_bytes(b'synthetic-checkpoint')
     classifier_checkpoint = tmp_path / 'new classifier.pt'

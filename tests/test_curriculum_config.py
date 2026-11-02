@@ -7,9 +7,9 @@ pytest.importorskip("gymnasium")
 pytest.importorskip("stable_baselines3")
 pytest.importorskip("ultralytics")
 
-from train.curriculum_config import PHASES, build_phase_spec
-from train.curriculum_goals import GOAL_INDEX
-from train.retention import PHASE_ORDER
+from brawl.pipelines.llc.curriculum_config import PHASES, build_phase_spec
+from brawl.training.curriculum_goals import GOAL_INDEX
+from brawl.pipelines.llc.retention import PHASE_ORDER
 
 
 def test_phase_registry_and_retention_use_the_same_order() -> None:

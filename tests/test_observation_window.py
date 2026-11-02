@@ -15,9 +15,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from env import BrawlDeepEnv, EnvConfig, NullInputController
-from feature_extractor.memory.state_spec import StateSpec
-from perception.weapon_classifier import WeaponPrediction
+from brawl.env.live import BrawlDeepEnv, EnvConfig, NullInputController
+from brawl.state.state_spec import StateSpec
+from brawl.perception.weapon_classifier import WeaponPrediction
 
 
 class StubFrames:
@@ -186,7 +186,7 @@ def _observe(env, extractor, player_x, opponent_x):
 
 def test_reflected_scenes_yield_identical_observations():
     """The whole point: one skill instead of two."""
-    from feature_extractor.memory.canonicalize import STAGE_CENTER_X
+    from brawl.state.canonicalize import STAGE_CENTER_X
 
     env, extractor = make_env(history_offsets=(2,))
     reflect = lambda x: (2.0 * STAGE_CENTER_X) - x
@@ -221,7 +221,7 @@ def test_mirror_flag_travels_in_info_not_the_observation():
 
 def test_canonical_action_reaches_the_game_as_the_right_physical_key():
     """MOVE_TOWARD is physical right normally and physical left when mirrored."""
-    from action_space import KEY_LEFT, KEY_RIGHT, Action, to_keys
+    from brawl.control.action_space import KEY_LEFT, KEY_RIGHT, Action, to_keys
 
     env, extractor = make_env()
 
@@ -278,7 +278,7 @@ def test_detector_receives_the_raw_frame_by_default():
     """No pre-resize: Ultralytics letterboxes internally, so doing it here too
     resamples the frame twice and costs the most expensive interpolation OpenCV
     has on a full 1920x1080 image."""
-    from feature_extractor.yolo.extract import Extract
+    from brawl.perception.yolo import Extract
     import inspect
 
     params = inspect.signature(Extract.__init__).parameters

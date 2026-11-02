@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from tools.record_llc_observation import observation_status, write_observation
+from scripts.llc.record_llc_observation import observation_status, write_observation
 
 
 def _args(tmp_path, **overrides) -> argparse.Namespace:

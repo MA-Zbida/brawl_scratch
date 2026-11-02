@@ -1,0 +1,435 @@
+#!/usr/bin/env python
+"""Record gameplay + phase success diagnostics while you play manually.
+
+Output video layout:
+- Left panel: observations, success YES/NO, and active success elements.
+- Right panel: raw gameplay frame (no YOLO boxes).
+
+This script does not control your character. You play manually in-game; the script
+only reads keyboard state so action-dependent observation features stay consistent.
+
+Usage:
+    python scripts/llc/debug_observation_overlay.py --phase movement_fluency --show --max-steps 1000
+    python scripts/llc/debug_observation_overlay.py --phase combat_execution --show --max-steps 4000
+"""
+
+
+from __future__ import annotations
+
+
+
+# Acquire the screen duplicator before torch loads. On hybrid graphics importing
+# torch moves the process to the discrete GPU, and DXGI duplication of the
+# integrated-GPU display output then becomes impossible. Must stay above every
+# import that pulls in torch (ultralytics, stable_baselines3, env, ...).
+#
+# The sys.path bootstrap has to come first: running this file directly puts its
+# own directory on sys.path, not the repo root, so capture_first is not
+# importable without it. sys and pathlib are safe -- neither loads torch.
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+
+import brawl.capture_first  # noqa: E402,F401  (import order is load-bearing)
+
+import argparse
+import sys
+import time
+from collections.abc import Collection
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import cv2
+import keyboard
+import numpy as np
+
+# Ensure project root is on sys.path when invoked directly.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from brawl.control.action_space import Action
+from brawl.calibration import UI_REGIONS
+from brawl.env.live import BrawlDeepEnv, EnvConfig, NullInputController
+from brawl.state.state_spec import StateSpec
+from brawl.pipelines.llc.curriculum_config import PHASES, build_phase_spec
+from brawl.pipelines.llc.stage_common import StageGoalEnv, StageSpec
+
+
+MOVEMENT_KEYS = ("a", "d", "s", "w")
+JUMP_KEY = "space"
+DODGE_KEY = "e"
+# keyboard scan codes for numpad 4/5/6.
+ATTACK_KEYS = {75: 1, 77: 2, 76: 3}
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Record phase-aware observation debug video while playing")
+    p.add_argument("--phase", type=str, required=True, choices=list(PHASES), help="Phase used for success logic")
+    p.add_argument("--output", type=str, default="", help="Output video path (.mp4). Auto-generated if empty")
+    p.add_argument("--out-dir", type=str, default="debug", help="Directory for auto-generated output")
+    p.add_argument("--target-fps", type=int, default=20, help="Environment step rate")
+    p.add_argument("--yolo-every", type=int, default=3, help="Run YOLO every N steps")
+    p.add_argument("--yolo-conf", type=float, default=0.15, help="YOLO confidence threshold")
+    p.add_argument("--max-steps", type=int, default=0, help="Stop after this many steps (0 = unlimited)")
+    p.add_argument("--delay", type=float, default=3.0, help="Seconds before capture starts")
+    p.add_argument("--panel-width", type=int, default=1100, help="Left text panel width in pixels")
+    p.add_argument("--font-scale", type=float, default=0.62, help="Observation text font scale")
+    p.add_argument("--line-height", type=int, default=24, help="Observation text line height")
+    p.add_argument("--death-penalty", type=float, default=1.0, help="Phase spec death penalty")
+    p.add_argument("--no-terminate-on-death", action="store_true")
+    p.add_argument("--show", action="store_true", help="Show live preview window while recording")
+    p.add_argument("--window-name", type=str, default="obs-debug", help="Preview window title")
+    return p.parse_args()
+
+
+def _action_from_pressed_keys(
+    pressed: Collection[str | int],
+    *,
+    mirrored: bool,
+) -> int:
+    """Collapse physical keyboard state into the categorical canonical action.
+
+    Manual play can contain chords the 27-action controller deliberately excludes.
+    The precedence below preserves the old recorder's dodge-over-attack rule, then
+    records the first tap family before falling back to locomotion.
+    """
+    physical_hdir = -1 if "a" in pressed else (1 if "d" in pressed else 0)
+    hdir = -physical_hdir if mirrored else physical_hdir
+    vdir = 1 if "s" in pressed else (-1 if "w" in pressed else 0)
+
+    if DODGE_KEY in pressed:
+        dodge_actions = {
+            (0, 0): Action.DODGE_SPOT,
+            (1, 0): Action.DODGE_TOWARD,
+            (-1, 0): Action.DODGE_AWAY,
+            (0, -1): Action.DODGE_UP,
+            (0, 1): Action.DODGE_DOWN,
+            (1, -1): Action.DODGE_UP_TOWARD,
+            (-1, -1): Action.DODGE_UP_AWAY,
+            (1, 1): Action.DODGE_DOWN_TOWARD,
+            (-1, 1): Action.DODGE_DOWN_AWAY,
+        }
+        return int(dodge_actions[(hdir, vdir)])
+
+    if 75 in pressed:
+        if vdir > 0:
+            return int(Action.LIGHT_DOWN)
+        if hdir > 0:
+            return int(Action.LIGHT_TOWARD)
+        if hdir < 0:
+            return int(Action.LIGHT_AWAY)
+        return int(Action.LIGHT_NEUTRAL)
+
+    if 77 in pressed:
+        if vdir > 0:
+            return int(Action.HEAVY_DOWN)
+        if hdir > 0:
+            return int(Action.HEAVY_TOWARD)
+        if hdir < 0:
+            return int(Action.HEAVY_AWAY)
+        return int(Action.HEAVY_NEUTRAL)
+
+    if 76 in pressed:
+        return int(Action.PICKUP)
+
+    if JUMP_KEY in pressed:
+        if hdir > 0:
+            return int(Action.JUMP_TOWARD)
+        if hdir < 0:
+            return int(Action.JUMP_AWAY)
+        return int(Action.JUMP)
+
+    if vdir > 0:
+        if hdir > 0:
+            return int(Action.FAST_FALL_TOWARD)
+        if hdir < 0:
+            return int(Action.FAST_FALL_AWAY)
+        return int(Action.FAST_FALL)
+    if hdir > 0:
+        return int(Action.MOVE_TOWARD)
+    if hdir < 0:
+        return int(Action.MOVE_AWAY)
+    return int(Action.NOOP)
+
+
+def read_keyboard_action(*, mirrored: bool) -> int:
+    keys = (*MOVEMENT_KEYS, JUMP_KEY, DODGE_KEY, *ATTACK_KEYS)
+    pressed = {key for key in keys if keyboard.is_pressed(key)}
+    return _action_from_pressed_keys(pressed, mirrored=mirrored)
+
+
+def make_env(args: argparse.Namespace) -> tuple[StageGoalEnv, StageSpec]:
+    spec = build_phase_spec(
+        phase=args.phase,
+        death_penalty=float(args.death_penalty),
+        terminate_on_death=not bool(args.no_terminate_on_death),
+    )
+    config = EnvConfig(
+        terminate_on_stock_out=False,
+        ui_regions=dict(UI_REGIONS),
+        yolo_conf=float(args.yolo_conf),
+        yolo_infer_every_n_steps=max(1, int(args.yolo_every)),
+        yolo_verbose=False,
+        emit_detailed_info=False,
+        profile_step_timing=True,
+        action_repeat_steps=1,
+        tap_latch_steps=1,
+        max_episode_steps=0,
+    )
+    base = BrawlDeepEnv(config=config, input_controller=NullInputController())
+    return StageGoalEnv(base, spec), spec
+
+
+def _format_base_obs_lines(obs: np.ndarray) -> list[str]:
+    names = StateSpec.names()
+    arr = np.asarray(obs, dtype=np.float32).reshape(-1)
+    base_dim = int(StateSpec.dim())
+    base = arr[:base_dim]
+    lines: list[str] = []
+    for i, name in enumerate(names):
+        value = float(base[i]) if i < base.shape[0] else float("nan")
+        lines.append(f"{i:02d} {name}: {value:+0.4f}")
+    return lines
+
+
+def _format_success_lines(info: dict[str, Any], spec: StageSpec) -> tuple[list[str], bool]:
+    goal_success = float(info.get("goal_success", 0.0)) > 0.5
+    goal_error = float(info.get("goal_error", 0.0))
+
+    names = list(info.get("stage_feature_names", []))
+    raw_goal_feats = np.asarray(info.get("raw_goal_feats", np.zeros((0,), dtype=np.float32)), dtype=np.float32).reshape(-1)
+    goal_target = np.asarray(info.get("goal_target", np.zeros_like(raw_goal_feats)), dtype=np.float32).reshape(-1)
+    goal_mask = np.asarray(info.get("goal_mask", np.zeros_like(raw_goal_feats)), dtype=np.float32).reshape(-1)
+
+    lines: list[str] = [
+        f"phase: {str(info.get('stage_name', spec.name))}",
+        f"SUCCESS: {'YES' if goal_success else 'NO'}",
+        f"goal_error: {goal_error:.4f}",
+        f"success_threshold: {float(spec.success_threshold):.4f}",
+        f"goal_new_sampled: {int(bool(info.get('goal_new_sampled', False)))}",
+    ]
+
+    if float(info.get("sequential_goal_enabled", 0.0)) > 0.5:
+        phase = int(info.get("sequential_phase", 1))
+        state = "ARMED_RETURN" if phase == 2 else "SEEK_OFFSTAGE"
+        lines.extend(
+            [
+                f"sequence: {state} (phase={phase})",
+                f"terminal_success: {int(float(info.get('terminal_success', 0.0)) > 0.5)}",
+            ]
+        )
+
+    lines.append("active success elements:")
+
+    active_idx = [i for i, w in enumerate(goal_mask.tolist()) if float(w) > 0.0]
+    if not active_idx:
+        lines.append("  (none)")
+        return lines, goal_success
+
+    for idx in active_idx:
+        name = names[idx] if idx < len(names) else f"f{idx}"
+        cur = float(raw_goal_feats[idx]) if idx < raw_goal_feats.shape[0] else 0.0
+        tgt = float(goal_target[idx]) if idx < goal_target.shape[0] else 0.0
+        w = float(goal_mask[idx]) if idx < goal_mask.shape[0] else 0.0
+        lines.append(f"  {name:22s} cur={cur:0.3f} tgt={tgt:0.3f} w={w:0.2f} |d|={abs(cur - tgt):0.3f}")
+
+    return lines, goal_success
+
+
+def draw_obs_panel(
+    panel_width: int,
+    panel_height: int,
+    obs: np.ndarray,
+    step_idx: int,
+    reward: float,
+    action: int,
+    info: dict[str, Any],
+    spec: StageSpec,
+    font_scale: float,
+    line_height: int,
+) -> np.ndarray:
+    panel = np.full((panel_height, panel_width, 3), 255, dtype=np.uint8)
+    text_color = (0, 0, 0)
+
+    header = [
+        f"step: {step_idx}",
+        f"reward: {float(reward):+.4f}",
+        f"action: {Action(int(action)).name} ({int(action)})",
+        (
+            "weapon diag: "
+            f"state={float(info.get('player_weapon_state', 0.0)):.1f} "
+            f"vis={int(float(info.get('weapon_visible_this_frame', 0.0)) > 0.5)} "
+            f"act={int(float(info.get('weapon_pickup_action', 0.0)) > 0.5)} "
+            f"drop={int(float(info.get('weapon_drop_action', 0.0)) > 0.5)}"
+        ),
+    ]
+
+    y = 32
+    for line in header:
+        cv2.putText(panel, line, (18, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale + 0.06, text_color, 2, cv2.LINE_AA)
+        y += line_height
+
+    success_lines, success = _format_success_lines(info, spec)
+    success_color = (0, 140, 0) if success else (0, 0, 180)
+    y += 6
+    for i, line in enumerate(success_lines):
+        if y >= panel_height - 10:
+            break
+        color = success_color if i == 1 else text_color
+        cv2.putText(panel, line, (18, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 2, cv2.LINE_AA)
+        y += line_height
+
+    y += 8
+    cv2.line(panel, (12, y), (panel_width - 12, y), (0, 0, 0), 1, cv2.LINE_AA)
+    y += line_height
+
+    obs_lines = _format_base_obs_lines(obs)
+    n = len(obs_lines)
+    left_count = (n + 1) // 2
+    left_lines = obs_lines[:left_count]
+    right_lines = obs_lines[left_count:]
+
+    x_left = 18
+    x_right = panel_width // 2 + 8
+
+    for i, line in enumerate(left_lines):
+        yy = y + i * line_height
+        if yy >= panel_height - 10:
+            break
+        cv2.putText(panel, line, (x_left, yy), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 2, cv2.LINE_AA)
+
+    for i, line in enumerate(right_lines):
+        yy = y + i * line_height
+        if yy >= panel_height - 10:
+            break
+        cv2.putText(panel, line, (x_right, yy), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 2, cv2.LINE_AA)
+
+    return panel
+
+
+def resolve_output_path(output: str, out_dir: str, phase: str) -> Path:
+    if output.strip():
+        out_path = Path(output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        return out_path
+
+    d = Path(out_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return d / f"obs_debug_{phase}_{ts}.mp4"
+
+
+def main() -> None:
+    args = parse_args()
+    out_path = resolve_output_path(args.output, args.out_dir, args.phase)
+
+    env, spec = make_env(args)
+    step_interval = 1.0 / max(1, int(args.target_fps))
+
+    print("=" * 68)
+    print("  OBSERVATION + SUCCESS DEBUG RECORDER")
+    print("=" * 68)
+    print(f"  Phase        : {args.phase}")
+    print(f"  Output video : {out_path}")
+    print(f"  Target FPS   : {args.target_fps}")
+    print(f"  YOLO every N : {args.yolo_every} step(s)")
+    print("  Overlay      : observations + SUCCESS signal + active success elements")
+    print("  Right panel  : raw gameplay frame (no YOLO boxes)")
+    print("  Controls     : Play normally in-game. Press Ctrl+C to stop.")
+    if args.show:
+        print(f"  Preview      : Enabled ({args.window_name})")
+    print("=" * 68)
+    print(f"Starting in {args.delay:.1f}s... switch to Brawlhalla.")
+    time.sleep(max(0.0, float(args.delay)))
+
+    obs, info = env.reset()
+
+    writer: cv2.VideoWriter | None = None
+    step_idx = 0
+
+    try:
+        while True:
+            t0 = time.perf_counter()
+            mirrored = bool(float(info.get("canon_mirrored", 0.0)) > 0.5)
+            action = read_keyboard_action(mirrored=mirrored)
+            obs_step, reward, terminated, truncated, info_step = env.step(action)
+
+            obs_for_draw = obs_step
+            info_for_draw = info_step
+
+            if terminated or truncated:
+                obs, info = env.reset()
+            else:
+                obs = obs_step
+                info = info_step
+
+            frame = getattr(env.unwrapped, "_last_frame", None)
+            if frame is None:
+                elapsed = time.perf_counter() - t0
+                sleep = step_interval - elapsed
+                if sleep > 0:
+                    time.sleep(sleep)
+                continue
+
+            panel = draw_obs_panel(
+                panel_width=int(args.panel_width),
+                panel_height=frame.shape[0],
+                obs=obs_for_draw,
+                step_idx=step_idx,
+                reward=float(reward),
+                action=action,
+                info=info_for_draw,
+                spec=spec,
+                font_scale=float(args.font_scale),
+                line_height=int(args.line_height),
+            )
+
+            canvas = np.concatenate([panel, frame], axis=1)
+
+            if writer is None:
+                h, w = canvas.shape[:2]
+                fourcc_fn = getattr(cv2, "VideoWriter_fourcc", None)
+                if callable(fourcc_fn):
+                    fourcc_value: Any = fourcc_fn(*"mp4v")
+                    fourcc = int(fourcc_value)
+                else:
+                    fourcc = int(cv2.VideoWriter.fourcc(*"mp4v"))
+                writer = cv2.VideoWriter(str(out_path), fourcc, float(args.target_fps), (w, h))
+                if not writer.isOpened():
+                    raise RuntimeError(f"Could not open video writer: {out_path}")
+
+            writer.write(canvas)
+
+            if args.show:
+                cv2.imshow(args.window_name, canvas)
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord("q")):
+                    print("Stopped by keypress.")
+                    break
+
+            step_idx += 1
+            if step_idx % 200 == 0:
+                print(f"  recorded steps: {step_idx}")
+
+            if args.max_steps > 0 and step_idx >= int(args.max_steps):
+                print(f"Reached max_steps={args.max_steps}, stopping.")
+                break
+
+            elapsed = time.perf_counter() - t0
+            sleep = step_interval - elapsed
+            if sleep > 0:
+                time.sleep(sleep)
+
+    except KeyboardInterrupt:
+        print("\nStopped by Ctrl+C.")
+    finally:
+        if writer is not None:
+            writer.release()
+        cv2.destroyAllWindows()
+        env.close()
+
+    print(f"Saved: {out_path}")
+
+
+if __name__ == "__main__":
+    main()

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from perception.async_pipeline import AsyncPerception
+from brawl.perception.async_pipeline import AsyncPerception
 
 
 class CountingProvider:

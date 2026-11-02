@@ -3,7 +3,7 @@
 ## Control loop
 
 One environment step, as implemented in `BrawlDeepEnv.step`
-([`env.py`](../env.py)):
+([`brawl/env/live.py`](../env.py)):
 
 1. **Capture** — `DxcamFrameProvider.get_frame()` returns the most recent desktop frame. Capture runs
    non-blocking in video mode, so a step never waits for a fresh frame; if none is ready the previous
@@ -23,7 +23,7 @@ only on the first frame of the repeat.
 ## Perception
 
 The detector is an Ultralytics YOLO model exported to TensorRT
-([`feature_extractor/yolo/extract.py`](../feature_extractor/yolo/extract.py)).
+([`brawl/perception/yolo.py`](../feature_extractor/yolo/extract.py)).
 
 **Agent identity is resolved causally.** The agent is the character carrying the blue self-indicator
 triangle, not a character identified by legend appearance. This keeps the labelling scheme valid when
@@ -31,7 +31,7 @@ legends are swapped and when the opponent pool grows — a legend-identity schem
 for every new character.
 
 Identity resolution lives in
-[`feature_extractor/memory/detection_schema.py`](../feature_extractor/memory/detection_schema.py). The
+[`brawl/state/detection_schema.py`](../feature_extractor/memory/detection_schema.py). The
 schema is inferred per frame, so the legacy 5-class engine keeps working until the retrained weights
 are swapped in.
 
@@ -51,7 +51,7 @@ the indicator is what disambiguates it.
 - `WeaponState` for the nearest visible ground weapon
 - fixed `Platform` geometry and `Physics` constants
 
-Stage geometry (`PLATFORM_BOUNDS` in [`config.py`](../config.py)) is a manual calibration for one map
+Stage geometry (`PLATFORM_BOUNDS` in [`brawl/calibration.py`](../config.py)) is a manual calibration for one map
 at one resolution. Grounded, edge, offstage and ledge-distance features are all computed against it.
 
 See [observation-space.md](observation-space.md) for which state variables are measured and which are
@@ -62,9 +62,9 @@ simulated — the distinction is load-bearing.
 Damage and stocks are not available from the detector, so they are decoded from fixed UI pixel
 coordinates (`UI_REGIONS`):
 
-- `reward/extract_rgb.py` samples the pixel
-- `reward/rgb_to_dmg.py` maps colour to a damage value
-- `reward/stock.py` detects the stock-loss colour flash
+- `brawl/reward/extract_rgb.py` samples the pixel
+- `brawl/reward/rgb_to_dmg.py` maps colour to a damage value
+- `brawl/reward/stock.py` detects the stock-loss colour flash
 
 `PixelStocksHealthProvider` debounces stock events with a confirmation window, a cooldown, and a
 per-side lock, because the flash persists across several frames.
@@ -81,7 +81,7 @@ final agent:        [state/history (146)]                         -> action
 ### Goal-conditioned skill pretraining
 
 `StageGoalEnv` augments the observation to `[state | goal_target | goal_mask]`, then
-`StageGoalFiLMExtractor` ([`feature_extractor/film_extractor.py`](../feature_extractor/film_extractor.py)):
+`StageGoalFiLMExtractor` ([`brawl/pipelines/llc/film_extractor.py`](../feature_extractor/film_extractor.py)):
 
 1. extracts the goal-relevant state features and normalises them to a common range
 2. computes the masked goal error and a velocity-weighted alignment signal
@@ -112,7 +112,7 @@ receives a skill target or goal-progress reward.
 
 ## Action space
 
-`Discrete(27)` — a single categorical head over whole moves, defined in [`action_space.py`](../action_space.py):
+`Discrete(27)` — a single categorical head over whole moves, defined in [`brawl/control/action_space.py`](../action_space.py):
 
 | Group | Count | Members |
 |---|---|---|
@@ -146,7 +146,7 @@ exposed via `action_masks()` and in `info`, and takes effect once training moves
 ## Training algorithm
 
 During skill pretraining, `AnchoredReplayPPO`
-([`algo/anchored_replay_ppo.py`](../algo/anchored_replay_ppo.py)) extends Stable-Baselines3 PPO
+([`brawl/algo/anchored_replay_ppo.py`](../algo/anchored_replay_ppo.py)) extends Stable-Baselines3 PPO
 with four mechanisms aimed at catastrophic forgetting:
 
 - **Replay mixing** — each minibatch blends on-policy samples with stored transitions, sampled with

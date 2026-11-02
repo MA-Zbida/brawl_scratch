@@ -3,7 +3,7 @@
 ## Goal space
 
 All phases share one 11-dimensional goal vector, defined in
-[`train/curriculum_goals.py`](../train/curriculum_goals.py):
+[`brawl/training/curriculum_goals.py`](../train/curriculum_goals.py):
 
 | # | Feature | Family |
 |---:|---|---|
@@ -42,7 +42,7 @@ The observation carries both target and mask, so the policy knows *which* goal i
 
 ## Phase specifications
 
-Each phase is a `StageSpec` ([`train/curriculum_config.py`](../train/curriculum_config.py)) bundling
+Each phase is a `StageSpec` ([`brawl/pipelines/llc/curriculum_config.py`](../train/curriculum_config.py)) bundling
 the goal sampler, mask, reward shaping and action restrictions.
 
 | Phase | Mask | Success threshold | Reward clip | Attacks |
@@ -54,7 +54,7 @@ the goal sampler, mask, reward shaping and action restrictions.
 | `recovery_mastery` | ledge dx, dy | 0.08 | 4.0 | disabled |
 | `all_skills_llc` | sampled per episode | 0.10 | 6.0 | all |
 
-The canonical progression order is defined in `train/phase_registry.py`. Recovery
+The canonical progression order is defined in `brawl/pipelines/llc/phase_registry.py`. Recovery
 is currently deferred until after combat so the first end-to-end pilot is not
 blocked by unreliable offstage setup.
 
@@ -96,7 +96,7 @@ Consequences worth being aware of when reading results:
 ## Retention gates
 
 Phase advancement is gated on retention of earlier skills
-([`train/retention.py`](../train/retention.py)):
+([`brawl/pipelines/llc/retention.py`](../train/retention.py)):
 
 ```
 retention = current_score / best_score_so_far
@@ -110,7 +110,7 @@ inspection agrees. Thresholds and the operational protocol are in
 
 ## Scripted teachers
 
-[`train/heuristic_teachers.py`](../train/heuristic_teachers.py) provides a deterministic policy per
+[`brawl/training/teachers.py`](../train/heuristic_teachers.py) provides a deterministic policy per
 goal family, used to bootstrap behaviour cloning.
 
 These are **reactive deadband controllers over the same observation the policy receives**. They hold

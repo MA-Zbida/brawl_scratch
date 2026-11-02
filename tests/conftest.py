@@ -1,6 +1,6 @@
 """Test bootstrap.
 
-`env.py` imports the YOLO wrapper at module scope, which pulls in `ultralytics`.
+`brawl/env/live.py` imports the YOLO wrapper at module scope, which pulls in `ultralytics`.
 That makes the environment untestable on any interpreter without the full live
 stack installed — which is why no test imported `env` before this file existed.
 

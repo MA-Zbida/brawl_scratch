@@ -5,7 +5,7 @@ import sys
 from argparse import Namespace
 from pathlib import Path
 
-from train.collect_heuristic_curriculum_demos import PHASES, command_for_phase, parse_phase_list
+from brawl.pipelines.llc.collect_heuristic_demos import PHASES, command_for_phase, parse_phase_list
 
 
 def test_direct_script_help_resolves_repo_imports() -> None:
@@ -13,7 +13,8 @@ def test_direct_script_help_resolves_repo_imports() -> None:
     result = subprocess.run(
         [
             sys.executable,
-            str(repo_root / "train" / "collect_heuristic_curriculum_demos.py"),
+            "-m",
+            "brawl.pipelines.llc.collect_heuristic_demos",
             "--help",
         ],
         cwd=repo_root,
@@ -73,7 +74,7 @@ def test_command_for_phase_runs_heuristic_single_phase_collector() -> None:
     cmd = command_for_phase(_args(), "weapon_acquisition")
     joined = " ".join(cmd)
 
-    assert "python -m train.collect_bc_locomotion_demos" in joined
+    assert "python -m brawl.pipelines.llc.collect_demos" in joined
     assert "--phase weapon_acquisition" in joined
     assert "--teacher heuristic" in joined
     assert "--episodes 50" in joined

@@ -6,11 +6,11 @@ import gymnasium as gym
 import numpy as np
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from train.curriculum_config import build_phase_spec
-from train.train_config import make_config
-import train.train_curriculum as train_curriculum
-from train.train_curriculum import _maybe_wrap_world_replay
-from world_model import WorldReplayRecorder
+from brawl.pipelines.llc.curriculum_config import build_phase_spec
+from brawl.pipelines.llc.train_config import make_config
+import brawl.pipelines.llc.train_curriculum as train_curriculum
+from brawl.pipelines.llc.train_curriculum import _maybe_wrap_world_replay
+from brawl.world_model import WorldReplayRecorder
 
 
 class _FakeEnv:

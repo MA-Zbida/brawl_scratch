@@ -1,6 +1,6 @@
 # The discrete27 fighting baseline
 
-Use `python -m train.primitive_pipeline`. This is the main fighting-baseline
+Use `python -m brawl.pipelines.primitive27.run`. This is the main fighting-baseline
 experiment; semantic57 remains intact for comparison. No old archive or checkpoint
 is overwritten, converted, or silently reused.
 
@@ -20,7 +20,7 @@ move; the live gate and operator inspection are still required.
 From the repository root in PowerShell:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.primitive_pipeline `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.primitive27.run `
   --stage all `
   --episodes-per-drill 30 --bc-epochs 40 `
   --timesteps 4096 --n-steps 512 --batch-size 256 `

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tools.run_unattended_core_curriculum import build_run_plan
+from scripts.llc.run_unattended_core_curriculum import build_run_plan
 
 
 def _option(argv: tuple[str, ...], name: str) -> str:

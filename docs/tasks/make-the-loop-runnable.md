@@ -22,7 +22,7 @@ That is what needs fixing, not any individual bug.
 
 ### 1. A preflight command that exercises every stage without the game
 
-`tools/preflight_pipeline.py`. It must construct and tear down the real objects
+`scripts/llc/preflight_pipeline.py`. It must construct and tear down the real objects
 each stage uses — not mocks — and fail loudly on any problem, in seconds:
 
 - Build a `BrawlDeepEnv` and a `StageGoalEnv` **for every phase** in `PHASES`,
@@ -103,7 +103,7 @@ Use 30.5 Hz for any PPO wall-clock estimate.
 
 ## Definition of done
 
-1. `python tools\preflight_pipeline.py` passes in under 60 seconds.
+1. `python scripts\llc\preflight_pipeline.py` passes in under 60 seconds.
 2. `run_chain.ps1 --smoke` completes the whole chain in under 10 minutes.
 3. `run_chain.ps1 --from spacing` resumes without redoing weapon.
 4. A deliberately introduced stderr warning in any stage does **not** abort the run.

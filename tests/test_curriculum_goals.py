@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from feature_extractor.memory.state_spec import StateSpec
-from train.curriculum_goals import CURRICULUM_GOAL_FEATURES, GOAL_DIM, GOAL_INDEX, extract_curriculum_goal_features
+from brawl.state.state_spec import StateSpec
+from brawl.training.curriculum_goals import CURRICULUM_GOAL_FEATURES, GOAL_DIM, GOAL_INDEX, extract_curriculum_goal_features
 
 
 def test_curriculum_feature_extraction_matches_goal_space() -> None:

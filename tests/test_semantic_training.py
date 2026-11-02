@@ -6,11 +6,11 @@ import numpy as np
 import pytest
 import torch
 
-from control.semantic_actions import ACTIONS, BY_NAME, ControlContext
-from control.semantic_executor import SemanticExecutor
-from control.input import NullInputController
-from train.semantic_contract import OBSERVATION_DIM, BASE_DIM, ACTION_DIM, metadata, validate_metadata
-from train.semantic_policy import build_model, load_model, save_model
+from brawl.control.semantic_actions import ACTIONS, BY_NAME, ControlContext
+from brawl.control.semantic_executor import SemanticExecutor
+from brawl.control.input import NullInputController
+from brawl.pipelines.semantic57.contract import OBSERVATION_DIM, BASE_DIM, ACTION_DIM, metadata, validate_metadata
+from brawl.pipelines.semantic57.policy import build_model, load_model, save_model
 
 
 class MaskEnv(gym.Env):

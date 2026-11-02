@@ -8,14 +8,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from feature_extractor.memory.state_spec import StateSpec
-from train import collect_bc_locomotion_demos as collector
-from train.collect_bc_locomotion_demos import (
+from brawl.state.state_spec import StateSpec
+from brawl.pipelines.llc import collect_demos as collector
+from brawl.pipelines.llc.collect_demos import (
     CollectionRejections,
     RecoveryArming,
     prepare_nontrivial_goal,
 )
-from train.curriculum_config import build_phase_spec
+from brawl.pipelines.llc.curriculum_config import build_phase_spec
 
 
 def _obs(*, offstage: bool) -> np.ndarray:

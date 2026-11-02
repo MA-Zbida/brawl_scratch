@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from train.retention import (
+from brawl.pipelines.llc.retention import (
     PHASE_ORDER,
     parse_phase_list,
     phase_score_threshold,

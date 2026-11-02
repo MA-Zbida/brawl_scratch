@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from feature_extractor.memory.structured_memory import Memory
+from brawl.state.structured_memory import Memory
 
 
 def det(class_name: str, cx: float, cy: float, w: float, h: float, conf: float = 0.9) -> dict:

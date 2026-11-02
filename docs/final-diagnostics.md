@@ -10,7 +10,7 @@ Nothing in this tool updates the checkpoint or changes the training reward.
 From the repository root in PowerShell:
 
 ~~~powershell
-C:\venvs\brawl312\Scripts\python.exe -m tools.record_final_diagnostic --model train\models\easy_bot_v0\final_agent\mordex_5h_baseline_20260911-121932_87f330\latest.zip --windows 2 --seconds 120 --video --delay 5
+C:\venvs\brawl312\Scripts\python.exe -m scripts.final_agent.record_final_diagnostic --model train\models\easy_bot_v0\final_agent\mordex_5h_baseline_20260911-121932_87f330\latest.zip --windows 2 --seconds 120 --video --delay 5
 ~~~
 
 Then repeat with best.zip instead of latest.zip. Each invocation creates a fresh
@@ -84,7 +84,7 @@ exchanges separately from actual match results.
 ### Fixed HUD setup contract
 
 The reader deliberately uses fixed slots, without portrait tracking. At 1920x1080,
-the current `config.py` calibration expects **Wu Shang on the right** and
+the current `brawl/calibration.py` calibration expects **Wu Shang on the right** and
 **Mordex on the left** in the top-right HUD. This is independent of which side
 of the stage either fighter occupies.
 
@@ -153,7 +153,7 @@ of the policy's ignored pickup opportunities.
 Use the same explicit setting in frozen diagnostics and final training:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m tools.record_final_diagnostic `
+C:\venvs\brawl312\Scripts\python.exe -m scripts.final_agent.record_final_diagnostic `
   --model train\models\easy_bot_v0\final_agent\mordex_5h_baseline_20260911-121932_87f330\latest.zip `
   --windows 2 --seconds 60 --device cpu --video `
   --weapon-state-source visual_fusion
@@ -224,7 +224,7 @@ automatically inferred labels.
 Run this short frozen check with opt-in exact inputs:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m tools.record_final_diagnostic `
+C:\venvs\brawl312\Scripts\python.exe -m scripts.final_agent.record_final_diagnostic `
   --model train\models\easy_bot_v0\final_agent\mordex_5h_baseline_20260911-121932_87f330\latest.zip `
   --windows 2 --seconds 60 --device cpu --video `
   --weapon-state-source visual_fusion --weapon-crops
@@ -250,7 +250,7 @@ separate encounters/recordings for held-out evaluation; never label from predict
 Open `weapon_label_preview.png` once in the editor, then run:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m tools.label_weapon_crops `
+C:\venvs\brawl312\Scripts\python.exe -m scripts.ops.label_weapon_crops `
   --crops-dir outputs\final_diagnostics\latest_20260913-115051_f9b536\weapon_crops `
   --out data\weapon_crops_live_20260913 `
   --preview weapon_label_preview.png --scale 4
@@ -284,7 +284,7 @@ The policy remains on CPU; classifier device selection is independent.
 First run a short frozen integration check, with no additional crop dataset:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m tools.record_final_diagnostic `
+C:\venvs\brawl312\Scripts\python.exe -m scripts.final_agent.record_final_diagnostic `
   --model train\models\easy_bot_v0\final_agent\mordex_5h_baseline_20260911-121932_87f330\latest.zip `
   --windows 2 --seconds 60 --device cpu --video `
   --weapon-state-source visual_fusion `
@@ -299,7 +299,7 @@ that the policy refuses pickups. Recording does not train or modify weights.
 After the sensing check passes, continue into a separate, bounded training run:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.final_agent `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.final_agent.run `
   --resume train\models\easy_bot_v0\final_agent\mordex_5h_baseline_20260911-121932_87f330\latest.zip `
   --save-dir train\models\easy_bot_v0\final_agent `
   --model-name weapon_visual_v1_pilot `

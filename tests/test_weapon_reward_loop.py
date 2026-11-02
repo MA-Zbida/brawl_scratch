@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from train.curriculum_config import build_phase_spec
+from brawl.pipelines.llc.curriculum_config import build_phase_spec
 
 
 def _weapon_spec():
@@ -64,7 +64,7 @@ def test_step_penalty_makes_standing_still_lose():
 @pytest.mark.parametrize("phase", ["weapon_acquisition"])
 def test_pickup_is_reachable_within_the_action_space(phase):
     """The phase restricts actions; PICKUP must survive that restriction."""
-    from action_space import Action
+    from brawl.control.action_space import Action
 
     spec = build_phase_spec(phase, terminate_on_death=False)
     assert spec.allowed_actions is not None
@@ -73,7 +73,7 @@ def test_pickup_is_reachable_within_the_action_space(phase):
 
 def test_weapon_phase_cannot_attack():
     """Swinging is not part of acquiring a weapon; the phase should exclude it."""
-    from action_space import Action, components
+    from brawl.control.action_space import Action, components
 
     spec = build_phase_spec("weapon_acquisition", terminate_on_death=False)
     for action in spec.allowed_actions:
@@ -103,7 +103,7 @@ def test_completing_the_goal_beats_idling_for_a_full_episode():
     """Success must dominate the best available do-nothing return."""
     spec = _weapon_spec()
 
-    max_episode_steps = 140          # train/collect_heuristic_curriculum_demos.py
+    max_episode_steps = 140          # brawl/pipelines/llc/collect_heuristic_demos.py
     best_idle_return = max(0.0, spec.player_has_weapon_bonus - spec.step_penalty) * max_episode_steps
 
     assert spec.success_bonus > best_idle_return, (

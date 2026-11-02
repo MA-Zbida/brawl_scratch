@@ -2,7 +2,7 @@
 
 Status: **active collector/teacher fixes plus an opt-in semantic57 training pipeline.**
 Existing entry points and policies still use Discrete(27). The separate
-`train.semantic_pipeline` entry point collects new demos, pretrains BC and runs
+`brawl.pipelines.semantic57.run` entry point collects new demos, pretrains BC and runs
 masked CPU PPO. See [the runnable guide](../semantic-training.md).
 
 ## Why this gate exists
@@ -17,7 +17,7 @@ been relabelled, deleted, overwritten, or retrained by this change.
 
 ## Active fixes
 
-`perception/weapon_evidence.py` is shared by the stage reward wrapper and collector.
+`brawl/perception/weapon_evidence.py` is shared by the stage reward wrapper and collector.
 
 - Fresh, valid predictions must meet the classifier's confidence threshold (0.70
   by default). A valid crop alone is not sufficient evidence.
@@ -47,8 +47,8 @@ Tests: `test_weapon_evidence.py`, the weapon collection regression in
 
 ## Candidate semantic controls
 
-`control/semantic_actions.py` defines a **57-action candidate**, separate from
-`action_space.py`. `control/semantic_executor.py` implements non-blocking input
+`brawl/control/semantic_actions.py` defines a **57-action candidate**, separate from
+`brawl/control/action_space.py`. `brawl/control/semantic_executor.py` implements non-blocking input
 sequencing. This is a starting control vocabulary, not a claim of optimality or
 complete coverage of every game mechanic.
 
@@ -99,9 +99,9 @@ All commands below are from the repository root. Listing and dry runs do not
 import the detector, start training, or inject input.
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m tools.check_semantic_actions --list
+C:\venvs\brawl312\Scripts\python.exe -m scripts.ops.check_semantic_actions --list
 
-C:\venvs\brawl312\Scripts\python.exe -m tools.check_semantic_actions `
+C:\venvs\brawl312\Scripts\python.exe -m scripts.ops.check_semantic_actions `
   --action GC_SIGNATURE_TOWARD --context air --mirrored
 ```
 
@@ -126,7 +126,7 @@ same masked distribution. Metadata rejects legacy/reordered action registries.
 Busy sequences admit only NOOP (advance the executor); those forced ticks remain
 in PPO/replay but are omitted from BC labels.
 
-`train.semantic_pipeline` provides `all`, `collect`, `pretrain`, `train`, `evaluate`
+`brawl.pipelines.semantic57.run` provides `all`, `collect`, `pretrain`, `train`, `evaluate`
 and hardware-free `smoke` stages. It does not migrate the old anchored-replay PPO
 or old final-agent runner. It uses plain masked PPO, a fresh goal-free MLP warmed
 from integrated-teacher demonstrations, and unchanged stock/damage rewards.

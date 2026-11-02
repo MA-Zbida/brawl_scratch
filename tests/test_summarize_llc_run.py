@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 
-from tools.summarize_llc_run import build_report
+from scripts.llc.summarize_llc_run import build_report
 
 
 def _write_eval(path, rows) -> None:

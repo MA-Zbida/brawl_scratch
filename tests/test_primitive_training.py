@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 import gymnasium as gym
 
-from action_space import Action
-from feature_extractor.memory.state_spec import StateSpec
+from brawl.control.action_space import Action
+from brawl.state.state_spec import StateSpec
 
 
 def observation(**values):
@@ -18,14 +18,14 @@ def observation(**values):
 
 
 def test_close_grounded_opponent_gets_light_not_automatic_retreat():
-    from train.primitive_training import PrimitiveTeacher
+    from brawl.pipelines.primitive27.training import PrimitiveTeacher
     for dx in (.02, .04, .055):
         result = PrimitiveTeacher().action(observation(rel_dx=dx, rel_distance=dx))
         assert result.action in (Action.LIGHT_NEUTRAL, Action.LIGHT_TOWARD)
 
 
 def dataset():
-    from train.semantic_demos import DemoBatch
+    from brawl.pipelines.semantic57.demos import DemoBatch
     rows, actions, episodes, families, drills = [], [], [], [], []
     for drill_id, drill in enumerate(('weapon', 'recovery', 'combat')):
         for ep in range(4):
@@ -40,7 +40,7 @@ def dataset():
 
 
 def test_split_holds_out_whole_episodes_from_every_drill():
-    from train.primitive_training import split_episodes
+    from brawl.pipelines.primitive27.training import split_episodes
     data = dataset()
     train, val = split_episodes(data)
     assert not set(data.episodes[train]) & set(data.episodes[val])
@@ -48,7 +48,7 @@ def test_split_holds_out_whole_episodes_from_every_drill():
 
 
 def test_movement_only_policy_fails_even_with_high_overall_accuracy():
-    from train.primitive_training import gate_predictions
+    from brawl.pipelines.primitive27.training import gate_predictions
     data = dataset()
     report = gate_predictions(data, np.ones(len(data.actions), dtype=int))
     assert not report['passed']
@@ -57,7 +57,7 @@ def test_movement_only_policy_fails_even_with_high_overall_accuracy():
 
 
 def test_correct_predictions_and_missing_evidence_are_distinguished():
-    from train.primitive_training import gate_predictions
+    from brawl.pipelines.primitive27.training import gate_predictions
     data = dataset()
     assert gate_predictions(data, data.actions)['passed']
     data.actions[:] = int(Action.MOVE_TOWARD)
@@ -67,7 +67,7 @@ def test_correct_predictions_and_missing_evidence_are_distinguished():
 
 
 def test_sampling_balances_behaviours_without_using_validation():
-    from train.primitive_training import sampling_probabilities
+    from brawl.pipelines.primitive27.training import sampling_probabilities
     data = dataset()
     data.actions[:79] = int(Action.MOVE_TOWARD)
     indices = np.arange(80)
@@ -80,7 +80,7 @@ def test_sampling_balances_behaviours_without_using_validation():
 
 def test_weapon_geometry_is_identical_during_training_and_inference():
     import torch
-    from train.primitive_training import build_model
+    from brawl.pipelines.primitive27.training import build_model
     model = build_model(FakeEnv())
     obs = observation(weapon_dx=.03, weapon_dy=-.04)
     original = obs.copy()
@@ -100,7 +100,7 @@ def test_weapon_geometry_is_identical_during_training_and_inference():
 
 def test_weapon_geometry_survives_checkpoint_and_ppo(tmp_path):
     import torch
-    from train.primitive_training import build_model, save_model, load_model
+    from brawl.pipelines.primitive27.training import build_model, save_model, load_model
     torch.set_num_threads(1)
     model = build_model(FakeEnv(), n_steps=8, batch_size=4, n_epochs=1)
     model.learn(16)
@@ -115,7 +115,7 @@ def test_weapon_geometry_survives_checkpoint_and_ppo(tmp_path):
 
 
 def test_pickup_report_exposes_false_positives_without_changing_gate():
-    from train.primitive_training import gate_predictions
+    from brawl.pipelines.primitive27.training import gate_predictions
     data = dataset()
     pred = data.actions.copy()
     pred[-2:] = int(Action.PICKUP)
@@ -133,8 +133,8 @@ def test_pickup_report_exposes_false_positives_without_changing_gate():
 
 
 def test_archive_contract_rejects_semantic57_and_preserves_drills(tmp_path):
-    from train.primitive_training import save_demos, load_demos, metadata, validate_metadata
-    from train.semantic_contract import metadata as semantic_metadata
+    from brawl.pipelines.primitive27.training import save_demos, load_demos, metadata, validate_metadata
+    from brawl.pipelines.semantic57.contract import metadata as semantic_metadata
     path = tmp_path / 'demos.npz'
     save_demos(path, dataset(), {})
     assert set(load_demos(path).drills) == {'weapon', 'combat', 'recovery'}
@@ -146,8 +146,8 @@ def test_archive_contract_rejects_semantic57_and_preserves_drills(tmp_path):
 
 
 def test_failed_bc_gate_cannot_start_live_training(tmp_path, monkeypatch):
-    import train.primitive_pipeline as pipeline
-    from train.primitive_training import save_demos
+    import brawl.pipelines.primitive27.run as pipeline
+    from brawl.pipelines.primitive27.training import save_demos
     path = tmp_path / 'demos.npz'
     save_demos(path, dataset(), {})
     def forbidden(*a, **kw):
@@ -178,9 +178,9 @@ class FakeEnv(gym.Env):
 
 
 def test_full_runner_reuses_27_model_and_records_both_stages(tmp_path, monkeypatch):
-    import train.primitive_pipeline as pipeline
-    import train.primitive_training as backend
-    import train.semantic_collect as collector
+    import brawl.pipelines.primitive27.run as pipeline
+    import brawl.pipelines.primitive27.training as backend
+    import brawl.pipelines.semantic57.collect as collector
     monkeypatch.setattr(collector, 'collect_demonstrations', lambda *a, **kw: (dataset(), {'complete': True}))
     monkeypatch.setattr(backend, 'pretrain', lambda *a, **kw: {'passed': True})
     monkeypatch.setattr(backend, 'agreement',
@@ -206,7 +206,7 @@ def test_full_runner_reuses_27_model_and_records_both_stages(tmp_path, monkeypat
 
 
 def test_live_gate_uses_policy_not_teacher_and_stops_movement_only(tmp_path):
-    from train.primitive_pipeline import qualify, parser
+    from brawl.pipelines.primitive27.run import qualify, parser
     class MovementOnly:
         def predict(self, obs, deterministic=False):
             assert deterministic
@@ -220,8 +220,8 @@ def test_live_gate_uses_policy_not_teacher_and_stops_movement_only(tmp_path):
 
 
 def test_27_collector_records_drill_strata_and_requires_actual_hits(monkeypatch):
-    from train.semantic_collect import collect_attempt
-    from train.primitive_training import PrimitiveControls
+    from brawl.pipelines.semantic57.collect import collect_attempt
+    from brawl.pipelines.primitive27.training import PrimitiveControls
     env = FakeEnv()
     # Damage alone is not enough: this fake env never injects an attack.
     failed = collect_attempt(env, 'combat', controls=PrimitiveControls(), max_steps=4)
@@ -238,7 +238,7 @@ def test_27_collector_records_drill_strata_and_requires_actual_hits(monkeypatch)
 
 
 def test_primitive_smoke_and_non_overwrite(tmp_path):
-    from train.primitive_pipeline import main
+    from brawl.pipelines.primitive27.run import main
     main(['--stage', 'smoke', '--run-dir', str(tmp_path/'smoke')])
     assert json.loads((tmp_path/'smoke'/'status.json').read_text())['synthetic']
     with pytest.raises(FileExistsError):
@@ -247,13 +247,13 @@ def test_primitive_smoke_and_non_overwrite(tmp_path):
 
 @pytest.mark.parametrize('flags', [['--live-check-attempts', '0'], ['--batch-size', '3'], ['--hours', 'nan']])
 def test_primitive_cli_rejects_invalid_configuration(flags):
-    from train.primitive_pipeline import main
+    from brawl.pipelines.primitive27.run import main
     with pytest.raises(SystemExit):
         main(['--stage', 'smoke', *flags])
 
 
 def test_typed_model_rejects_changed_contract(tmp_path):
-    from train.primitive_training import build_model, save_model, load_model
+    from brawl.pipelines.primitive27.training import build_model, save_model, load_model
     path = tmp_path/'policy.zip'
     save_model(build_model(FakeEnv(), n_steps=8, batch_size=4), path)
     meta_path = path.with_name(path.name+'.metadata.json')
@@ -265,7 +265,7 @@ def test_typed_model_rejects_changed_contract(tmp_path):
 
 
 def test_bc_can_learn_distinct_actions_instead_of_movement_only(tmp_path):
-    from train.primitive_training import pretrain, build_model
+    from brawl.pipelines.primitive27.training import pretrain, build_model
     data = dataset()
     for drill_id, drill in enumerate(('weapon', 'recovery', 'combat')):
         selected = data.drills == drill
@@ -277,9 +277,9 @@ def test_bc_can_learn_distinct_actions_instead_of_movement_only(tmp_path):
 
 
 def test_ppo_stops_when_heldout_skill_gate_regresses(tmp_path, monkeypatch):
-    from train.primitive_pipeline import _wrap, parser
-    from train.semantic_pipeline import _train
-    import train.primitive_training as backend
+    from brawl.pipelines.primitive27.run import _wrap, parser
+    from brawl.pipelines.semantic57.run import _train
+    import brawl.pipelines.primitive27.training as backend
     calls = []
     def agreement(*a, **kw):
         calls.append(1)
@@ -298,9 +298,9 @@ def test_ppo_stops_when_heldout_skill_gate_regresses(tmp_path, monkeypatch):
 
 
 def test_ppo_can_continue_after_one_pickup_label_flips(tmp_path, monkeypatch):
-    from train.primitive_pipeline import _wrap, parser
-    from train.semantic_pipeline import _train
-    import train.primitive_training as backend
+    from brawl.pipelines.primitive27.run import _wrap, parser
+    from brawl.pipelines.semantic57.run import _train
+    import brawl.pipelines.primitive27.training as backend
     def agreement(model, *a, **kw):
         data = dataset()
         report = backend.gate_predictions(data, data.actions)
@@ -323,12 +323,12 @@ def test_ppo_can_continue_after_one_pickup_label_flips(tmp_path, monkeypatch):
 
 
 def test_primitive_cli_does_not_expose_semantic_opt_in():
-    from train.primitive_pipeline import parser
+    from brawl.pipelines.primitive27.run import parser
     assert '--experimental-controls' not in parser().format_help()
 
 
 def test_default_collection_can_supply_five_heldout_pickup_episodes():
-    from train.primitive_pipeline import parser
+    from brawl.pipelines.primitive27.run import parser
     assert np.ceil(.2 * parser().parse_args([]).episodes_per_drill) >= 5
 
 
@@ -340,13 +340,13 @@ def test_default_collection_can_supply_five_heldout_pickup_episodes():
     ({'opponent_is_offstage': 1, 'signed_dx_to_stage_center': -.2}, 'movement'),
 ])
 def test_teacher_priorities_remain_explicit(values, family):
-    from train.primitive_training import PrimitiveTeacher
+    from brawl.pipelines.primitive27.training import PrimitiveTeacher
     assert PrimitiveTeacher().action(observation(**values)).family == family
 
 
 def test_live_qualification_pass_records_all_drills(tmp_path, monkeypatch):
-    from train.primitive_pipeline import qualify, parser
-    import train.semantic_collect as collector
+    from brawl.pipelines.primitive27.run import qualify, parser
+    import brawl.pipelines.semantic57.collect as collector
     seen = []
     class Policy:
         def predict(self, obs, deterministic):
@@ -363,7 +363,7 @@ def test_live_qualification_pass_records_all_drills(tmp_path, monkeypatch):
 
 def test_identity_loss_releases_primitive_inputs_and_marks_unexecuted(monkeypatch):
     from types import SimpleNamespace
-    from train.primitive_env import PrimitiveBrawlEnv
+    from brawl.pipelines.primitive27.env import PrimitiveBrawlEnv
     env = PrimitiveBrawlEnv.__new__(PrimitiveBrawlEnv)
     env.memory = SimpleNamespace(identity_observed=False)
     calls = []

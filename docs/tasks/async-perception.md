@@ -1,7 +1,7 @@
 # Task brief: asynchronous perception pipeline
 
 Hand this to another agent verbatim. It is scoped to **new files only** so it cannot
-collide with concurrent work on `env.py`.
+collide with concurrent work on `brawl/env/live.py`.
 
 ---
 
@@ -30,8 +30,8 @@ control rate.
 
 ## Deliverable
 
-**One new module** — `perception/async_pipeline.py` — plus tests. Do **not** modify
-`env.py`; integration is a separate one-line change made afterwards.
+**One new module** — `brawl/perception/async_pipeline.py` — plus tests. Do **not** modify
+`brawl/env/live.py`; integration is a separate one-line change made afterwards.
 
 ```python
 class AsyncPerception:
@@ -61,8 +61,8 @@ class AsyncPerception:
 **1. Import order is load-bearing.** `capture_first` must be imported before anything that
 pulls in `torch`. On this hardware, importing torch loads the NVIDIA CUDA libraries, which
 moves the process to the discrete GPU, after which DXGI duplication of the integrated-GPU
-display output becomes impossible. Measured — see `capture_first.py` and
-`python -m tools.check_capture --diagnose-order`. If your module imports anything heavy,
+display output becomes impossible. Measured — see `brawl/capture_first.py` and
+`python -m scripts.ops.check_capture --diagnose-order`. If your module imports anything heavy,
 `import capture_first` goes first.
 
 **2. Staleness must be observable, never hidden.** The consumer has to be able to tell that
@@ -77,7 +77,7 @@ feature and is invisible in training. This is the single most important requirem
 **4. Clean shutdown.** No daemon threads left running, no hang on exit. `stop()` must be
 idempotent and safe to call from `__exit__` after an exception.
 
-**5. Do not modify** `env.py`, `capture/`, `control/`, `feature_extractor/`, `action_space.py`,
+**5. Do not modify** `brawl/env/live.py`, `capture/`, `control/`, `feature_extractor/`, `brawl/control/action_space.py`,
 or anything under `train/`. New files only, plus `tests/test_async_perception.py`.
 
 ## Tests required
@@ -114,7 +114,7 @@ has repeatedly been bitten by constraints that were invisible in the source.
 
 ## Explicitly out of scope
 
-- Wiring into `env.py`
+- Wiring into `brawl/env/live.py`
 - Any change to the action space, observation schema, or reward
 - Multiprocessing (threads only — the GIL is released during TensorRT inference and cv2
   resize, which is where the time goes)

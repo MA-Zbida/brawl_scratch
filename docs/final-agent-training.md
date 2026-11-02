@@ -14,7 +14,7 @@ later. One 146-dimensional, goal-free policy chooses among the existing 27 actio
 Run from the repository root in PowerShell:
 
 ~~~powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.final_agent --init-from train\models\easy_bot_v0\llc_combat_execution.zip --save-dir train\models\easy_bot_v0\final_agent --model-name mordex_transfer --mode training_room --timesteps 10240 --eval-episodes 3 --device cpu --world-replay world_model\data\final_agent --delay 5
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.final_agent.run --init-from train\models\easy_bot_v0\llc_combat_execution.zip --save-dir train\models\easy_bot_v0\final_agent --model-name mordex_transfer --mode training_room --timesteps 10240 --eval-episodes 3 --device cpu --world-replay world_model\data\final_agent --delay 5
 ~~~
 
 The run starts with three deterministic evaluation windows, trains stochastically,
@@ -35,7 +35,7 @@ policy loss and value loss.
 Use the exact run directory printed by the first run:
 
 ~~~powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.final_agent --resume train\models\easy_bot_v0\final_agent\YOUR_RUN_DIRECTORY\latest.zip --save-dir train\models\easy_bot_v0\final_agent --model-name mordex_transfer --timesteps 100000 --device cpu --world-replay world_model\data\final_agent --delay 5
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.final_agent.run --resume train\models\easy_bot_v0\final_agent\YOUR_RUN_DIRECTORY\latest.zip --save-dir train\models\easy_bot_v0\final_agent --model-name mordex_transfer --timesteps 100000 --device cpu --world-replay world_model\data\final_agent --delay 5
 ~~~
 
 Use --timesteps 500000 --forever for repeated long blocks. Ctrl+C saves the
@@ -83,7 +83,7 @@ noisy same-opponent selection measurements, not held-out match-win estimates.
 Periodic snapshots allow rollback if later training regresses.
 
 ~~~powershell
-C:\venvs\brawl312\Scripts\python.exe -m analysis.plot_final_training train\models\easy_bot_v0\final_agent\YOUR_RUN_DIRECTORY
+C:\venvs\brawl312\Scripts\python.exe -m brawl.analysis.plot_final_training train\models\easy_bot_v0\final_agent\YOUR_RUN_DIRECTORY
 ~~~
 
 Plots are also generated on a clean/interrupted training exit. Compare stock

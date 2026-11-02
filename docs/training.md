@@ -2,18 +2,18 @@
 
 All training runs against the live game. Brawlhalla must be focused, in Training Mode, at 1920×1080,
 with the same legend, map and bot difficulty used for calibration. Changing any of these invalidates
-the stage geometry and UI probes in [`config.py`](../config.py).
+the stage geometry and UI probes in [`brawl/calibration.py`](../config.py).
 
 ## 0. Preflight
 
 ```powershell
-python tools/llc_preflight.py --device cuda
+python scripts/llc/llc_preflight.py --device cuda
 ```
 
 Then verify perception. Nothing downstream is meaningful if the overlay disagrees with the screen:
 
 ```powershell
-python tools/debug_observation_overlay.py --phase movement_fluency --show --max-steps 1000
+python scripts/llc/debug_observation_overlay.py --phase movement_fluency --show --max-steps 1000
 ```
 
 Check boxes, stocks, damage, weapon state, platform position and relative geometry before continuing.
@@ -29,19 +29,19 @@ and retention, not by final match win rate.
 Scripted teacher, one phase:
 
 ```powershell
-python -m train.collect_bc_locomotion_demos --phase movement_fluency --teacher heuristic --episodes 30
+python -m brawl.pipelines.llc.collect_demos --phase movement_fluency --teacher heuristic --episodes 30
 ```
 
 Whole curriculum in one run:
 
 ```powershell
-python -m train.collect_heuristic_curriculum_demos --episodes-per-phase 50
+python -m brawl.pipelines.llc.collect_heuristic_demos --episodes-per-phase 50
 ```
 
 Human demonstrations (environment key injection disabled; your keyboard is recorded as labels):
 
 ```powershell
-python -m train.collect_bc_locomotion_demos --phase combat_execution --teacher manual --episodes 30
+python -m brawl.pipelines.llc.collect_demos --phase combat_execution --teacher manual --episodes 30
 ```
 
 Only episodes meeting the phase acceptance rule are saved. Output goes to
@@ -50,7 +50,7 @@ Only episodes meeting the phase acceptance rule are saved. Output goes to
 Validate before training on them:
 
 ```powershell
-python tools/validate_llc_demos.py --phase all --min-samples 100
+python scripts/llc/validate_llc_demos.py --phase all --min-samples 100
 ```
 
 Bad demonstrations become bad anchors — they are replayed as a BC loss for the entire PPO run.
@@ -59,7 +59,7 @@ Recollect any phase with high idle rate, low action entropy, missing goal masks,
 ### 2. Behaviour cloning
 
 ```powershell
-python -m train.pretrain_bc_locomotion --phase movement_fluency
+python -m brawl.pipelines.llc.pretrain_bc --phase movement_fluency
 ```
 
 Hindsight goal relabelling is on by default: for each recorded step, the state reached `h` steps later
@@ -72,7 +72,7 @@ Produces `train/models/llc_<phase>_bc_init.zip`.
 ### 3. PPO fine-tuning
 
 ```powershell
-python -m train.train_curriculum --phase movement_fluency --resume train/models/llc_movement_fluency_bc_init.zip
+python -m brawl.pipelines.llc.train_curriculum --phase movement_fluency --resume train/models/llc_movement_fluency_bc_init.zip
 ```
 
 Demonstration archives are auto-discovered for the BC auxiliary loss; `all_skills_llc` picks up every
@@ -100,7 +100,7 @@ prior phase archive. Relevant knobs:
 In a second terminal:
 
 ```powershell
-python tools/llc_live_monitor.py --phase movement_fluency
+python scripts/llc/llc_live_monitor.py --phase movement_fluency
 ```
 
 Treat reported stop signals as real: high idle rate, collapsing action entropy, high whiff rate,
@@ -109,22 +109,22 @@ negative damage trade, or a retention failure.
 ### 5. Evaluate and gate
 
 ```powershell
-python -m train.evaluate_retention --phase movement_fluency
-python tools/check_llc_phase_gate.py --eval-csv train/models/llc_movement_fluency_retention_eval.csv --phase movement_fluency
-python tools/plot_llc_diagnostics.py --phase movement_fluency
-python tools/summarize_llc_run.py --phase movement_fluency
+python -m brawl.pipelines.llc.evaluate_retention --phase movement_fluency
+python scripts/llc/check_llc_phase_gate.py --eval-csv train/models/llc_movement_fluency_retention_eval.csv --phase movement_fluency
+python scripts/llc/plot_llc_diagnostics.py --phase movement_fluency
+python scripts/llc/summarize_llc_run.py --phase movement_fluency
 ```
 
 Record your own visual judgement, which can veto the metrics:
 
 ```powershell
-python tools/record_llc_observation.py --phase movement_fluency --approved yes --notes "what you saw"
+python scripts/llc/record_llc_observation.py --phase movement_fluency --approved yes --notes "what you saw"
 ```
 
 ### 6. Advance
 
 ```powershell
-python tools/llc_next_action.py
+python scripts/llc/llc_next_action.py
 ```
 
 The advisor inspects demonstrations, checkpoints, eval CSVs, plots and manual approvals. If it reports
@@ -137,7 +137,7 @@ representation and policy weights into a model whose observation is the raw
 146-feature state/history vector:
 
 ```powershell
-python -m train.transfer_skill_checkpoint --skill-checkpoint train/models/llc_all_skills_llc.zip --output train/models/final_agent/final_agent_init.zip --device cpu
+python -m brawl.pipelines.final_agent.transfer_skill_checkpoint --skill-checkpoint train/models/llc_all_skills_llc.zip --output train/models/final_agent/final_agent_init.zip --device cpu
 ```
 
 The command writes a typed checkpoint sidecar and a tensor-by-tensor transfer
@@ -148,13 +148,13 @@ archives without metadata require the explicit
 Fine-tune one policy directly on match reward:
 
 ```powershell
-python -m train.final_agent --resume train/models/final_agent/final_agent_init.zip --save-dir train/models/final_agent --model-name final_agent --device cpu
+python -m brawl.pipelines.final_agent.run --resume train/models/final_agent/final_agent_init.zip --save-dir train/models/final_agent --model-name final_agent --device cpu
 ```
 
 Evaluate the same checkpoint with no goal scheduler:
 
 ```powershell
-python -m train.run_match --model train/models/final_agent/final_agent.zip --matches 30 --device cpu --csv outputs/final_agent_matches.csv
+python -m brawl.pipelines.final_agent.run_match --model train/models/final_agent/final_agent.zip --matches 30 --device cpu --csv outputs/final_agent_matches.csv
 ```
 
 Final evaluation reports wins, stock differential, damage dealt/received,

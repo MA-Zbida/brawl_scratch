@@ -12,7 +12,7 @@ unchanged for the entire run. Connect power. Do not run another collector/traine
 The prompt gives five seconds to focus the game. No menu keys are automated.
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m tools.profile_round_a `
+C:\venvs\brawl312\Scripts\python.exe -m scripts.round_a.profile_round_a `
   --bc train\models\round_a\pilot_bc_mlp_40ep_s42\bc_init.zip `
   --ppo train\models\round_a\deployment_v1_mlp_s42_run02\step_000050176.zip `
   --output outputs\round_a_profile_uncapped_v1 `

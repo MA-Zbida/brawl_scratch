@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from feature_extractor.memory.canonicalize import mirror_goal_target
-from train.train_curriculum import GoalMouseTrackerWrapper
+from brawl.state.canonicalize import mirror_goal_target
+from brawl.pipelines.llc.train_curriculum import GoalMouseTrackerWrapper
 
 
 def test_mouse_tracker_uses_world_coordinates_for_mirrored_goal() -> None:

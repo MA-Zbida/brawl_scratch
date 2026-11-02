@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tools.preflight_pipeline import (
+from scripts.llc.preflight_pipeline import (
     PreflightFailure,
     exercise_environment_matrix,
     exercise_sequential_lifecycle,
@@ -16,7 +16,7 @@ from tools.preflight_pipeline import (
     validate_checkpoint_references,
     validate_demo_references,
 )
-from train.llc_stage_common import default_env_config
+from brawl.pipelines.llc.stage_common import default_env_config
 
 
 class _ClosableEnv:

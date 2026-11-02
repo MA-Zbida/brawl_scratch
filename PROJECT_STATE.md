@@ -150,15 +150,15 @@ Combat heuristic rule:
 Heuristic collection is now available through the normal demo collector:
 
 ```powershell
-python -m train.collect_bc_locomotion_demos --phase movement_fluency --teacher heuristic --episodes 30
-python -m train.collect_bc_locomotion_demos --phase weapon_acquisition --teacher heuristic --episodes 30
-python -m train.collect_bc_locomotion_demos --phase recovery_mastery --teacher heuristic --episodes 30
+python -m brawl.pipelines.llc.collect_demos --phase movement_fluency --teacher heuristic --episodes 30
+python -m brawl.pipelines.llc.collect_demos --phase weapon_acquisition --teacher heuristic --episodes 30
+python -m brawl.pipelines.llc.collect_demos --phase recovery_mastery --teacher heuristic --episodes 30
 ```
 
 To collect the full heuristic curriculum in one run, use:
 
 ```powershell
-python -m train.collect_heuristic_curriculum_demos --episodes-per-phase 50
+python -m brawl.pipelines.llc.collect_heuristic_demos --episodes-per-phase 50
 ```
 
 This runs each phase sequentially with `--teacher heuristic` and saves:
@@ -175,9 +175,9 @@ train/models/all_skills_llc_demos.npz
 Useful variants:
 
 ```powershell
-python -m train.collect_heuristic_curriculum_demos --episodes-per-phase 50 --dry-run
-python -m train.collect_heuristic_curriculum_demos --phases core --episodes-per-phase 50
-python -m train.collect_heuristic_curriculum_demos --episodes-per-phase 50 --weapon-hold-steps 30
+python -m brawl.pipelines.llc.collect_heuristic_demos --episodes-per-phase 50 --dry-run
+python -m brawl.pipelines.llc.collect_heuristic_demos --phases core --episodes-per-phase 50
+python -m brawl.pipelines.llc.collect_heuristic_demos --episodes-per-phase 50 --weapon-hold-steps 30
 ```
 
 `--dry-run` prints the exact commands without collecting. `--phases core` runs only the five focused phases and skips `all_skills_llc`.

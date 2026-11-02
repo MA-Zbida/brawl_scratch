@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from tools.plot_llc_diagnostics import (
+from scripts.llc.plot_llc_diagnostics import (
     _active_error_matrix,
     _active_rows_for_features,
     _feature_matrix,

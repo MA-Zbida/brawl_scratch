@@ -81,7 +81,7 @@ what makes the self-indicator detectable -- it is ~15 px at `imgsz=960` and the 
 exists for it. Lowering `imgsz` to save time can destroy the feature that agent identity,
 and therefore every relational feature, depends on.
 
-**3. Async perception, with a caveat.** `perception/async_pipeline.py` decouples the
+**3. Async perception, with a caveat.** `brawl/perception/async_pipeline.py` decouples the
 control loop from the detector. At the measured split (33.7 ms detect, 2.6 ms everything
 else) that would let the policy step at roughly 380 Hz while perception refreshes at 29 Hz
 -- about 13 policy steps per new observation. That is not 13x more information; most steps

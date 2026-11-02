@@ -5,10 +5,10 @@ import csv
 import numpy as np
 import pytest
 
-from feature_extractor.memory.state_spec import StateSpec
-from reward.providers import MatchRewardProvider, NullRewardProvider
-from train.final_agent import FinalTrainingMetricsCallback
-from train.final_config import parse_args
+from brawl.state.state_spec import StateSpec
+from brawl.reward.providers import MatchRewardProvider, NullRewardProvider
+from brawl.pipelines.final_agent.run import FinalTrainingMetricsCallback
+from brawl.pipelines.final_agent.config import parse_args
 
 
 def test_final_agent_config_is_goal_free_cpu_match_training() -> None:
@@ -23,7 +23,7 @@ def test_final_agent_config_is_goal_free_cpu_match_training() -> None:
 
 @pytest.mark.parametrize('source', ['action', 'visual_fusion'])
 def test_weapon_state_source_reaches_final_env_without_changing_policy_device(source, monkeypatch, tmp_path):
-    from train import final_agent
+    from brawl.pipelines.final_agent import run as final_agent
     checkpoint = tmp_path / 'new classifier.pt'
     checkpoint.write_bytes(b'synthetic classifier')
     cfg = parse_args(['--resume', 'final.zip', '--weapon-state-source', source,
@@ -38,8 +38,8 @@ def test_weapon_state_source_reaches_final_env_without_changing_policy_device(so
 
 
 def test_default_classifier_checkpoint_preserves_existing_runs(monkeypatch):
-    from env import EnvConfig
-    from train import final_agent
+    from brawl.env.live import EnvConfig
+    from brawl.pipelines.final_agent import run as final_agent
     cfg = parse_args(['--resume', 'final.zip'])
     monkeypatch.setattr(final_agent, 'BrawlDeepEnv', lambda **kw: kw['config'])
     assert cfg.weapon_classifier_checkpoint == EnvConfig().weapon_classifier_checkpoint
@@ -47,7 +47,7 @@ def test_default_classifier_checkpoint_preserves_existing_runs(monkeypatch):
 
 
 def test_missing_visual_classifier_fails_before_env_creation(monkeypatch, tmp_path):
-    from train import final_agent
+    from brawl.pipelines.final_agent import run as final_agent
     cfg = parse_args(['--resume', 'final.zip', '--weapon-state-source', 'visual_fusion',
                       '--weapon-classifier-checkpoint', str(tmp_path / 'missing.pt')])
     def unexpected_env(**kwargs):

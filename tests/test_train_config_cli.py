@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from train.train_config import make_config, parse_args
+from brawl.pipelines.llc.train_config import make_config, parse_args
 
 
 def test_train_config_parses_anti_collapse_flags(monkeypatch) -> None:

@@ -22,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from env import BrawlDeepEnv, EnvConfig, NullInputController
+from brawl.env.live import BrawlDeepEnv, EnvConfig, NullInputController
 
 
 def test_frame_provider_is_constructed_before_the_extractor():
@@ -84,7 +84,7 @@ def test_capture_failure_message_names_the_real_cause():
         ),
     )
 
-    from env import DxcamFrameProvider
+    from brawl.env.live import DxcamFrameProvider
 
     provider = DxcamFrameProvider.__new__(DxcamFrameProvider)
     with pytest.raises(RuntimeError) as excinfo:

@@ -6,10 +6,10 @@ drawn by hand, so the paper can be regenerated from a run directory.
 ## Usage
 
 ```powershell
-python -m analysis.plot_learning_curves --metric success
-python -m analysis.plot_learning_curves --metric entropy
-python -m analysis.plot_retention_matrix
-python -m analysis.paper_evidence
+python -m brawl.analysis.plot_learning_curves --metric success
+python -m brawl.analysis.plot_learning_curves --metric entropy
+python -m brawl.analysis.plot_retention_matrix
+python -m brawl.analysis.paper_evidence
 ```
 
 Inputs come from `train/models/`, outputs go to `assets/figures/`.

@@ -4,18 +4,18 @@ import gymnasium as gym
 import numpy as np
 from stable_baselines3 import PPO
 
-from action_space import ACTION_DIM
-from feature_extractor.film_extractor import StageGoalFiLMExtractor
-from feature_extractor.final_extractor import FinalStateExtractor
-from feature_extractor.memory.state_spec import StateSpec
-from train.checkpoint_roles import (
+from brawl.control.action_space import ACTION_DIM
+from brawl.pipelines.llc.film_extractor import StageGoalFiLMExtractor
+from brawl.pipelines.final_agent.extractor import FinalStateExtractor
+from brawl.state.state_spec import StateSpec
+from brawl.training.checkpoints import (
     FINAL_AGENT,
     GOAL_CONDITIONED_SKILL,
     make_checkpoint_metadata,
     read_checkpoint_metadata,
     save_typed_checkpoint,
 )
-from train.final_policy import convert_skill_checkpoint, load_final_model
+from brawl.pipelines.final_agent.policy import convert_skill_checkpoint, load_final_model
 
 
 GOAL_FEATURES = [

@@ -94,13 +94,13 @@
     },
     {
       "role": "detector_engine",
-      "path": "feature_extractor/yolo/best.engine",
+      "path": "assets/yolo/best.engine",
       "sha256": "becdbec2eb857a8f718b22b9ebf15b7ac0ef303be495c18ac5b8b9bd6976827b",
       "size_bytes": 214916671
     },
     {
       "role": "detector_source_checkpoint",
-      "path": "feature_extractor/yolo/best.pt",
+      "path": "assets/yolo/best.pt",
       "sha256": "22832204858c8f017e9bfd1ce13964e67bd513534ca084c96a65c332f7f32e93",
       "size_bytes": 20276539
     }

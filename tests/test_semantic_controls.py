@@ -5,8 +5,8 @@ from dataclasses import replace
 
 import pytest
 
-from control.semantic_actions import ACTIONS, BY_NAME, ControlContext, action_mask, contract, require_contract
-from control.semantic_executor import ExecutionTiming, SemanticExecutor
+from brawl.control.semantic_actions import ACTIONS, BY_NAME, ControlContext, action_mask, contract, require_contract
+from brawl.control.semantic_executor import ExecutionTiming, SemanticExecutor
 
 
 class RecordingInput:
@@ -33,7 +33,7 @@ class RecordingInput:
 
 
 def test_registry_distinguishes_ground_heavy_recovery_and_gc():
-    from control.semantic_actions import _registry
+    from brawl.control.semantic_actions import _registry
     assert _registry() == ACTIONS
     assert len(ACTIONS) == 57
     assert len(ACTIONS) == len(BY_NAME)

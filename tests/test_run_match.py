@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from train.run_match import MatchResult
+from brawl.pipelines.final_agent.run_match import MatchResult
 
 
 def test_match_harness_has_one_policy_and_no_goal_scheduler() -> None:
-    source = Path("train/run_match.py").read_text(encoding="utf-8")
+    source = Path("brawl/pipelines/final_agent/run_match.py").read_text(encoding="utf-8")
     assert "select_skill" not in source
     assert "StageGoalEnv" not in source
     assert "goal_target" not in source

@@ -6,17 +6,17 @@ import gymnasium as gym
 import numpy as np
 import pytest
 
-from feature_extractor.memory.state_spec import StateSpec
-from train.semantic_contract import ACTION_DIM, OBSERVATION_DIM
-from train.semantic_demos import DemoBatch
-from train.semantic_collect import collect_attempt
-from train.semantic_bc import pretrain, agreement
-from train.semantic_policy import build_model, load_model, save_model
-from train.semantic_pipeline import main
+from brawl.state.state_spec import StateSpec
+from brawl.pipelines.semantic57.contract import ACTION_DIM, OBSERVATION_DIM
+from brawl.pipelines.semantic57.demos import DemoBatch
+from brawl.pipelines.semantic57.collect import collect_attempt
+from brawl.pipelines.semantic57.bc import pretrain, agreement
+from brawl.pipelines.semantic57.policy import build_model, load_model, save_model
+from brawl.pipelines.semantic57.run import main
 
 
 def test_default_classifier_matches_latest_validated_live_model():
-    from train.semantic_pipeline import parser
+    from brawl.pipelines.semantic57.run import parser
     assert parser().parse_args([]).weapon_classifier_checkpoint.name == 'weapon_classifier_r18_live_v1.pt'
 
 
@@ -254,7 +254,7 @@ def test_confirmed_pickup_followed_by_sustained_negative_evidence_is_rejected():
 
 
 def test_collection_event_log_preserves_failure_details_and_is_never_overwritten(tmp_path, monkeypatch):
-    import train.semantic_collect as collector
+    import brawl.pipelines.semantic57.collect as collector
     def attempt(env, drill, *, on_event, **kwargs):
         on_event(dict(event='execution_failed', execution_reason='sequence_deadline'))
         return collector.Attempt(reason='input_execution_rejected',
@@ -282,9 +282,9 @@ def test_cli_rejects_invalid_configuration(extra):
 
 
 def test_all_stages_with_fake_live_environment(tmp_path, monkeypatch):
-    from train.semantic_demos import save_demos
-    import train.semantic_collect as collector
-    import train.semantic_pipeline as pipeline
+    from brawl.pipelines.semantic57.demos import save_demos
+    import brawl.pipelines.semantic57.collect as collector
+    import brawl.pipelines.semantic57.run as pipeline
 
     data = DemoBatch(np.stack([observation()] * 32), np.ones(32, np.int64),
                      np.repeat(np.arange(4), 8), np.array(['movement']*32))
@@ -306,7 +306,7 @@ def test_all_stages_with_fake_live_environment(tmp_path, monkeypatch):
 
 
 def test_interrupted_collection_returns_previously_accepted_episodes(monkeypatch):
-    import train.semantic_collect as collector
+    import brawl.pipelines.semantic57.collect as collector
     calls = []
     def attempt(*args, **kwargs):
         calls.append(1)
@@ -321,8 +321,8 @@ def test_interrupted_collection_returns_previously_accepted_episodes(monkeypatch
 
 
 def test_separate_pretrain_train_and_evaluate_stages(tmp_path, monkeypatch):
-    from train.semantic_demos import save_demos
-    import train.semantic_pipeline as pipeline
+    from brawl.pipelines.semantic57.demos import save_demos
+    import brawl.pipelines.semantic57.run as pipeline
     data = DemoBatch(np.stack([observation()] * 32), np.ones(32, np.int64),
                      np.repeat(np.arange(4), 8), np.array(['movement']*32))
     demos = tmp_path / 'demos.npz'
@@ -350,8 +350,8 @@ def test_separate_pretrain_train_and_evaluate_stages(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('interrupted', [False, True])
 def test_partial_collection_saved_without_running_bc(tmp_path, monkeypatch, interrupted):
-    import train.semantic_collect as collector
-    import train.semantic_pipeline as pipeline
+    import brawl.pipelines.semantic57.collect as collector
+    import brawl.pipelines.semantic57.run as pipeline
     data = DemoBatch(np.stack([observation()] * 4), np.ones(4, np.int64),
                      np.zeros(4, np.int64), np.array(['weapon']*4))
     monkeypatch.setattr(collector, 'collect_demonstrations', lambda *a, **kw:
@@ -375,7 +375,7 @@ def test_partial_collection_saved_without_running_bc(tmp_path, monkeypatch, inte
 
 @pytest.mark.parametrize('failure', [RuntimeError('broken step'), KeyboardInterrupt()])
 def test_training_failure_saves_checkpoint_and_releases(tmp_path, monkeypatch, failure):
-    import train.semantic_pipeline as pipeline
+    import brawl.pipelines.semantic57.run as pipeline
     env = ScriptEnv([observation()])
     model = build_model(env, n_steps=8, batch_size=4, n_epochs=1)
     source = tmp_path / 'source.zip'

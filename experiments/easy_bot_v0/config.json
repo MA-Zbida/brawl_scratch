@@ -16,7 +16,7 @@
     "opponent_pool_size": 1
   },
   "perception": {
-    "detector": "feature_extractor/yolo/best.engine",
+    "detector": "assets/yolo/best.engine",
     "yolo_infer_every_n_steps": 1,
     "weapon_classifier_enabled": false,
     "weapon_classifier_checkpoint": "train/models/weapon_classifier_r18.pt",

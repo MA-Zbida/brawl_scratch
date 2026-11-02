@@ -15,15 +15,15 @@ from itertools import count
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from action_space import Action
-from env import EnvConfig
+from brawl.control.action_space import Action
+from brawl.env.live import EnvConfig
 
 
 @pytest.fixture(autouse=True)
 def poll_clock(monkeypatch):
     # Tests step the loop without inference; explicitly supply real poll time.
     ticks = count()
-    monkeypatch.setattr('env.time.perf_counter', lambda: next(ticks) * .025)
+    monkeypatch.setattr('brawl.env.live.time.perf_counter', lambda: next(ticks) * .025)
 
 
 class RecordingController:
@@ -54,13 +54,13 @@ class RecordingController:
 
 def _env(tap_latch_steps: int = 1):
     """Build a BrawlDeepEnv with every external dependency stubbed out."""
-    from env import BrawlDeepEnv
+    from brawl.env.live import BrawlDeepEnv
 
     env = BrawlDeepEnv.__new__(BrawlDeepEnv)
     env.config = EnvConfig(tap_latch_steps=tap_latch_steps)
     env.input_controller = RecordingController()
     env._mirrored = False
-    from control.taps import TapSequencer
+    from brawl.control.taps import TapSequencer
     env._tap_sequencer = TapSequencer(tap_latch_steps)
     return env
 
@@ -140,7 +140,7 @@ def test_action_maps_to_expected_key(action, expected):
 
 def test_null_controller_supports_key_down_up():
     """NullInputController must satisfy the same interface as the real one."""
-    from env import NullInputController
+    from brawl.env.live import NullInputController
 
     controller = NullInputController()
     controller.key_down("num5")
@@ -151,7 +151,7 @@ def test_null_controller_supports_key_down_up():
 
 def test_repeated_heavy_releases_instead_of_refreshing_forever(monkeypatch):
     now = [10.0]
-    monkeypatch.setattr('env.time.perf_counter', lambda: now[0])
+    monkeypatch.setattr('brawl.env.live.time.perf_counter', lambda: now[0])
     env = _env()
     env._apply_action(int(Action.HEAVY_TOWARD))
     now[0] += .025
@@ -168,7 +168,7 @@ def test_repeated_heavy_releases_instead_of_refreshing_forever(monkeypatch):
 def test_resource_inference_only_receives_new_presses(monkeypatch, action, channel):
     from test_observation_window import make_env
     now = [10.0]
-    monkeypatch.setattr('env.time.perf_counter', lambda: now[0])
+    monkeypatch.setattr('brawl.env.live.time.perf_counter', lambda: now[0])
     env, _ = make_env(action_repeat_min_steps=1, action_repeat_max_steps=1)
     seen = {'jump': [], 'dodge': [], 'pickup': []}
 
@@ -191,9 +191,9 @@ def test_resource_inference_only_receives_new_presses(monkeypatch, action, chann
 
 def test_match_optimizer_release_clears_sequencer(monkeypatch):
     from test_observation_window import make_env
-    from train.match_env import MatchTrainingEnv
+    from brawl.env.match import MatchTrainingEnv
     now = [10.0]
-    monkeypatch.setattr('env.time.perf_counter', lambda: now[0])
+    monkeypatch.setattr('brawl.env.live.time.perf_counter', lambda: now[0])
     base, _ = make_env(action_repeat_min_steps=1, action_repeat_max_steps=1)
     match = MatchTrainingEnv(base, mode='training_room')
     try:
@@ -211,7 +211,7 @@ def test_inputs_are_released_before_the_optimiser_runs():
     Without this, the last action's keys stay physically held for the whole
     optimiser pass -- seconds of holding a direction while the agent cannot react.
     """
-    from train.llc_stage_common import ReleaseInputsOnRolloutEnd
+    from brawl.pipelines.llc.stage_common import ReleaseInputsOnRolloutEnd
 
     calls = []
 
@@ -234,7 +234,7 @@ def test_inputs_are_released_before_the_optimiser_runs():
 
 def test_release_failure_does_not_break_training():
     """A stuck key is bad; a crashed multi-hour run is worse."""
-    from train.llc_stage_common import ReleaseInputsOnRolloutEnd
+    from brawl.pipelines.llc.stage_common import ReleaseInputsOnRolloutEnd
 
     class ExplodingVecEnv:
         def env_method(self, *args, **kwargs):

@@ -3,11 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from control.semantic_actions import BY_NAME
-from feature_extractor.memory.state_spec import StateSpec
-from train.semantic_contract import ACTION_DIM, OBSERVATION_DIM
-from train.semantic_demos import DemoBatch, load_demos, save_demos, split_episodes, validate_rows
-from train.semantic_teacher import IntegratedTeacher
+from brawl.control.semantic_actions import BY_NAME
+from brawl.state.state_spec import StateSpec
+from brawl.pipelines.semantic57.contract import ACTION_DIM, OBSERVATION_DIM
+from brawl.pipelines.semantic57.demos import DemoBatch, load_demos, save_demos, split_episodes, validate_rows
+from brawl.pipelines.semantic57.teacher import IntegratedTeacher
 
 
 def observation(**features):
@@ -43,7 +43,7 @@ def test_masked_labels_and_legacy_observations_are_rejected():
 
 
 def test_previous_executor_contract_is_rejected():
-    from train.semantic_contract import metadata, validate_metadata
+    from brawl.pipelines.semantic57.contract import metadata, validate_metadata
     previous = metadata()
     previous['executor_version'] = 'semantic_sequence_candidate_v1'
     with pytest.raises(ValueError, match='executor_version'):

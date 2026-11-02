@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from perception.weapon_evidence import WeaponEvidence, WeaponHoldGate
+from brawl.perception.weapon_evidence import WeaponEvidence, WeaponHoldGate
 
 
 def reading(armed=True, *, fresh=True, valid=True, confidence=.99):

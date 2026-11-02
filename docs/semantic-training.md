@@ -29,7 +29,7 @@ optimal-performance claim follows from completing the software pipeline.
 From the repository root, use a **new** output directory:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.semantic_pipeline `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.semantic57.run `
   --stage all --experimental-controls `
   --run-dir train\models\semantic57\pilot_01 `
   --episodes-per-drill 5 --bc-epochs 8 `
@@ -67,7 +67,7 @@ it is checked during rollout steps, so an ongoing evaluation/update can overshoo
 After reviewing the pilot, resume into a **new** directory:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.semantic_pipeline `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.semantic57.run `
   --stage train --experimental-controls `
   --resume train\models\semantic57\pilot_01\latest.zip `
   --demos train\models\semantic57\pilot_01\demos.npz `
@@ -90,7 +90,7 @@ its own new directory. A pretrain-stage `bc_init.zip` is a valid train input.
 ## Deterministic evaluation
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.semantic_pipeline `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.semantic57.run `
   --stage evaluate --experimental-controls `
   --resume train\models\semantic57\campaign_01\latest.zip `
   --run-dir outputs\semantic57_eval_01 `
@@ -175,7 +175,7 @@ do not reuse the first pilot's partial archive for BC. Its evidence is preserved
 Hardware-free artifact smoke test (synthetic data, never a game fallback):
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.semantic_pipeline --stage smoke
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.semantic57.run --stage smoke
 ```
 
 This exercises serialization, BC, PPO, reload, evaluation and plotting without

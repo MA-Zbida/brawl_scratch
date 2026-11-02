@@ -65,7 +65,7 @@ New behavior:
 Also fixed:
 
 - `BrawlDeepEnv._distance_player_to_weapon()` now computes distance from current `memory.weapon.x/y` and `memory.player.x/y`.
-- `tools/debug_observation_overlay.py` now displays weapon diagnostics:
+- `scripts/llc/debug_observation_overlay.py` now displays weapon diagnostics:
   - `state`
   - `vis`
   - `inf`
@@ -79,7 +79,7 @@ Also fixed:
 Run:
 
 ```powershell
-python tools/debug_observation_overlay.py --phase weapon_acquisition --show --max-steps 1000 --yolo-every 1
+python scripts/llc/debug_observation_overlay.py --phase weapon_acquisition --show --max-steps 1000 --yolo-every 1
 ```
 
 Expected result:

@@ -3,11 +3,11 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
-import env as env_module
-import train.curriculum_config as curriculum_config
-import train.llc_stage_common as llc_stage_common
-import train.train_curriculum as train_curriculum
-from train.evaluate_retention import make_env, parse_args
+import brawl.env.live as env_module
+import brawl.pipelines.llc.curriculum_config as curriculum_config
+import brawl.pipelines.llc.stage_common as llc_stage_common
+import brawl.pipelines.llc.train_curriculum as train_curriculum
+from brawl.pipelines.llc.evaluate_retention import make_env, parse_args
 
 
 def test_retention_evaluator_cli_parses_without_training_stack(monkeypatch) -> None:

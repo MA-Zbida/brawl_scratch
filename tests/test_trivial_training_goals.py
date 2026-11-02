@@ -11,11 +11,11 @@ pytest.importorskip("ultralytics")
 
 import gymnasium as gym
 
-from action_space import ACTION_DIM, Action
-from feature_extractor.memory.state_spec import StateSpec
-from train.curriculum_config import build_phase_spec
-from train.curriculum_goals import GOAL_INDEX, default_goal_target
-from train.llc_stage_common import StageGoalEnv
+from brawl.control.action_space import ACTION_DIM, Action
+from brawl.state.state_spec import StateSpec
+from brawl.pipelines.llc.curriculum_config import build_phase_spec
+from brawl.training.curriculum_goals import GOAL_INDEX, default_goal_target
+from brawl.pipelines.llc.stage_common import StageGoalEnv
 
 
 class _StaticStageEnv(gym.Env):

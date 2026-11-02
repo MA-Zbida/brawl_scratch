@@ -5,11 +5,11 @@ import numpy as np
 import torch
 from stable_baselines3 import PPO
 
-from action_space import ACTION_DIM
-from feature_extractor.film_extractor import StageGoalFiLMExtractor
-from feature_extractor.memory.state_spec import StateSpec
-from feature_extractor.final_extractor import FinalStateExtractor
-from train.policy_transfer import transfer_skill_policy
+from brawl.control.action_space import ACTION_DIM
+from brawl.pipelines.llc.film_extractor import StageGoalFiLMExtractor
+from brawl.state.state_spec import StateSpec
+from brawl.pipelines.final_agent.extractor import FinalStateExtractor
+from brawl.pipelines.final_agent.policy_transfer import transfer_skill_policy
 
 
 GOAL_FEATURES = [

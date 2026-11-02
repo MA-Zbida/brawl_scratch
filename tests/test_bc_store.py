@@ -13,9 +13,9 @@ import gymnasium as gym
 from gymnasium import spaces
 from stable_baselines3 import PPO
 
-from action_space import ACTION_DIM
-from algo.anchored_replay_ppo import AnchoredReplayPPO, _BehaviorCloneStore
-from train.llc_stage_common import _require_complete_bc_anchor
+from brawl.control.action_space import ACTION_DIM
+from brawl.algo.anchored_replay_ppo import AnchoredReplayPPO, _BehaviorCloneStore
+from brawl.pipelines.llc.stage_common import _require_complete_bc_anchor
 
 
 def _write_demo(path, phase: str, offset: float) -> None:

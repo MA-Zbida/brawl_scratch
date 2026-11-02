@@ -49,7 +49,7 @@ VS Code interpreter picker should point at, and it is the most reliable option f
 scripts and scheduled runs:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.train_curriculum --phase movement_fluency
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum --phase movement_fluency
 ```
 
 Confirm you are in the right environment:
@@ -69,7 +69,7 @@ python -c "import sys; print(sys.executable); print(sys.version)"
 python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
 # 2. everything else, from PyPI
-python -m pip install -r requirements-llc.txt
+python -m pip install -r requirements.txt
 ```
 
 Installing both at once lets the resolver satisfy `torch` from PyPI, which gives
@@ -107,7 +107,7 @@ and 108 passing tests.
 Then the project's own preflight:
 
 ```powershell
-python tools/llc_preflight.py --device cuda
+python scripts/llc/llc_preflight.py --device cuda
 ```
 
 ## Building the TensorRT engine
@@ -118,11 +118,11 @@ TensorRT version. An engine exported on Kaggle will not load here.
 Export `.pt` from wherever you trained, then build the engine **on this machine**:
 
 ```powershell
-python -c "from ultralytics import YOLO; YOLO('feature_extractor/yolo/best.pt').export(format='engine', half=True, imgsz=(384,640), device=0)"
+python -c "from ultralytics import YOLO; YOLO('assets/yolo/best.pt').export(format='engine', half=True, imgsz=(384,640), device=0)"
 ```
 
 `half=True` matters on 4 GB of VRAM. Keep `imgsz` consistent with the inference
-size in [`feature_extractor/yolo/extract.py`](../feature_extractor/yolo/extract.py);
+size in [`brawl/perception/yolo.py`](../feature_extractor/yolo/extract.py);
 training and inference resolution must agree.
 
 [`Extract`](../feature_extractor/yolo/extract.py) reads class names from the model's

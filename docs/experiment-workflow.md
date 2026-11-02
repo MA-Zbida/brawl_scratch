@@ -11,17 +11,17 @@ not switches in this legacy baseline configuration, and are not yet live-qualifi
 
 | Responsibility | Current location |
 | --- | --- |
-| Live capture, controls, state | `env.py`, `capture/`, `control/`, `feature_extractor/` |
-| Match objective and reporting windows | `reward/match_objective.py`, `train/match_env.py` |
-| Structured representation | `train/primitive_features.py` |
-| Model construction, BC and demo contract | `train/primitive_training.py` |
-| Shared PPO/evaluation lifecycle | `train/pipeline_runner.py` |
+| Live capture, controls, state | `brawl/env/live.py`, `capture/`, `control/`, `feature_extractor/` |
+| Match objective and reporting windows | `brawl/reward/match_objective.py`, `brawl/env/match.py` |
+| Structured representation | `brawl/pipelines/primitive27/features.py` |
+| Model construction, BC and demo contract | `brawl/pipelines/primitive27/training.py` |
+| Shared PPO/evaluation lifecycle | `brawl/training/runner.py` |
 | Backend-specific monitoring hooks | `TrainingHooks` in the shared runner |
-| Shared CLI validation | `train/pipeline_cli.py` |
-| Configuration and provenance | `train/experiment_config.py` |
-| Operator prompts and artifact utilities | `train/run_utils.py` |
-| Stable user entry point | `train/primitive_pipeline.py` |
-| Experimental semantic57 entry point | `train/semantic_pipeline.py` |
+| Shared CLI validation | `brawl/training/cli.py` |
+| Configuration and provenance | `brawl/training/experiment_config.py` |
+| Operator prompts and artifact utilities | `brawl/training/run_utils.py` |
+| Stable user entry point | `brawl/pipelines/primitive27/run.py` |
+| Experimental semantic57 entry point | `brawl/pipelines/semantic57/run.py` |
 
 The primitive entry point no longer imports the semantic entry point. Both use
 the same runner; the runner receives metadata, agreement, split and retention
@@ -38,7 +38,7 @@ all data/teacher code or migrating to `src/` is deliberately outside this change
 From the repository root in PowerShell:
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m train.primitive_pipeline `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.primitive27.run `
   --experiment experiments\baselines\structured27_bc_ppo_v1.json `
   --stage train `
   --resume train\models\primitive27\pickup_geometry_v1\bc_init.zip `

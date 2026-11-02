@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.calibrate_indicator_geometry import (
+from scripts.ops.calibrate_indicator_geometry import (
     CHARACTER_ID,
     INDICATOR_ID,
     calibrate,
@@ -177,7 +177,7 @@ def test_empty_input_raises_rather_than_emitting_a_bad_constant(tmp_path):
 
 
 def test_score_formula_matches_detection_schema():
-    from feature_extractor.memory.detection_schema import (
+    from brawl.state.detection_schema import (
         INDICATOR_HORIZONTAL_WEIGHT,
         INDICATOR_VERTICAL_WEIGHT,
     )
@@ -194,7 +194,7 @@ def test_cli_margin_default_matches_the_function_default():
     """
     import inspect
 
-    from tools.calibrate_indicator_geometry import parse_args
+    from scripts.ops.calibrate_indicator_geometry import parse_args
 
     fn_default = inspect.signature(derive_constants).parameters["margin"].default
     cli_default = parse_args(["--labels", "."]).margin

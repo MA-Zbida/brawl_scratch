@@ -45,7 +45,7 @@ warning is deliberately allowed; there is no other bypass.
 ```powershell
 $Candidate = 'mlp'  # Next runs: 'recurrent', then 'multi'
 $PolicyDevice = if ($Candidate -eq 'multi') { 'cuda' } else { 'cpu' }
-C:\venvs\brawl312\Scripts\python.exe -m train.round_a `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.round_a.run `
   --stage train --candidate $Candidate `
   --protocol experiments\round_a\deployment_v1.json `
   --init-bc "train\models\round_a\pilot_bc_${Candidate}_40ep_s42\bc_init.zip" `
@@ -85,7 +85,7 @@ After the runs, produce a new comparison directory (also include any failed or
 resumed segments in the explicit list):
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m analysis.plot_round_a `
+C:\venvs\brawl312\Scripts\python.exe -m brawl.analysis.plot_round_a `
   train\models\round_a\deployment_v1_mlp_s42 `
   train\models\round_a\deployment_v1_recurrent_s42 `
   train\models\round_a\deployment_v1_multi_s42 `
@@ -119,6 +119,6 @@ checks passed. Stop optimization here and collect the declared deployment result
 Reproduce with the offline tool (new output filename):
 
 ```powershell
-C:\venvs\brawl312\Scripts\python.exe -m tools.benchmark_round_a_overhead `
+C:\venvs\brawl312\Scripts\python.exe -m scripts.round_a.benchmark_round_a_overhead `
   --output work\deployment_overhead_repeat.json
 ```

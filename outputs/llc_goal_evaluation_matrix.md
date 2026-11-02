@@ -24,9 +24,9 @@ Advance only when the current phase reaches its minimum skill score and all prev
 
 Retention evidence comes from `train/models/llc_<phase>_retention_eval.csv`, `train/models/llc_retention_best.json`, and `train/models/llc_<phase>_retention_amnesia.png`.
 
-During training, `python tools/llc_live_monitor.py --phase <phase>` reads the same step, episode, and eval CSVs and prints live `STOP SIGNALS` for idle collapse, low action entropy, whiff spam, negative combat trade, and retention/amnesia failure.
+During training, `python scripts/llc/llc_live_monitor.py --phase <phase>` reads the same step, episode, and eval CSVs and prints live `STOP SIGNALS` for idle collapse, low action entropy, whiff spam, negative combat trade, and retention/amnesia failure.
 
-After plots and the phase report, record your visual judgment with `python tools/record_llc_observation.py --phase <phase> --approved yes|no --notes "..."`. The next-action advisor treats this as a required approval gate.
+After plots and the phase report, record your visual judgment with `python scripts/llc/record_llc_observation.py --phase <phase> --approved yes|no --notes "..."`. The next-action advisor treats this as a required approval gate.
 
 ## Feature Space
 

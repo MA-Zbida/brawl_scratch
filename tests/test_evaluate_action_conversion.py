@@ -1,8 +1,8 @@
-"""Regression guard for `evaluate.py`'s policy-output conversion.
+"""Regression guard for `brawl/pipelines/llc/evaluate.py`'s policy-output conversion.
 
 The `Discrete(27)` migration left `_to_env_action` demanding four components.
 Nothing caught it because no test exercised the top-level evaluator, so every
-`python evaluate.py` run would have raised on its first step -- after loading a
+`python brawl/pipelines/llc/evaluate.py` run would have raised on its first step -- after loading a
 checkpoint and opening the game.
 """
 
@@ -11,8 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from action_space import ACTION_DIM, Action
-from evaluate import _to_env_action
+from brawl.control.action_space import ACTION_DIM, Action
+from brawl.pipelines.llc.evaluate import _to_env_action
 
 
 @pytest.mark.parametrize(

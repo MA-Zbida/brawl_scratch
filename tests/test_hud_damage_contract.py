@@ -4,9 +4,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from feature_extractor.memory.structured_memory import Memory
-from reward.match_objective import MatchObjective
-from reward.ui_probe import PixelStocksHealthProvider
+from brawl.state.structured_memory import Memory
+from brawl.reward.match_objective import MatchObjective
+from brawl.reward.ui_probe import PixelStocksHealthProvider
 
 
 def frame(op=(255, 126, 0), agent=(255, 255, 255), stock=(120, 120, 120)):
@@ -49,7 +49,7 @@ def test_stable_respawn_zero_is_allowed_without_blue_credit():
 
 def test_blue_credit_and_red_loss_are_debounced_without_damage_requirement(monkeypatch):
     now = [10.0]
-    monkeypatch.setattr('reward.ui_probe.time.perf_counter', lambda: now[0])
+    monkeypatch.setattr('brawl.reward.ui_probe.time.perf_counter', lambda: now[0])
     for colour, expected in [((0, 255, 255), (3, 2)), ((255, 0, 0), (2, 3))]:
         probe = provider()
         for _ in range(8):
@@ -60,7 +60,7 @@ def test_blue_credit_and_red_loss_are_debounced_without_damage_requirement(monke
 
 
 def test_damage_colour_curve_is_unchanged():
-    from reward.rgb_to_dmg import get_dmg
+    from brawl.reward.rgb_to_dmg import get_dmg
     for rgb, damage in [((255, 255, 255), 0), ((255, 255, 0), 50),
                         ((255, 153, 0), 100), ((255, 0, 0), 150),
                         ((191, 0, 0), 200), ((140, 0, 0), 250), ((74, 0, 0), 300)]:
@@ -97,7 +97,7 @@ def test_unavailable_pixels_abstain():
 
 @pytest.mark.parametrize('rgb', [[1, 2], [float('nan'), 0, 0], [-1, 0, 0], [256, 0, 0]])
 def test_malformed_rgb_abstains(rgb):
-    from reward.rgb_to_dmg import decode_damage
+    from brawl.reward.rgb_to_dmg import decode_damage
     assert decode_damage(rgb) is None
 
 

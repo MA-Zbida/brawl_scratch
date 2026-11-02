@@ -13,16 +13,16 @@ def test_hsp_runtime_modules_are_removed() -> None:
 
 def test_core_training_and_evaluation_import_without_hsp_modules() -> None:
     for module in (
-        "train.train_curriculum",
-        "train.final_agent",
-        "train.run_match",
-        "train.evaluate_retention",
+        "brawl.pipelines.llc.train_curriculum",
+        "brawl.pipelines.final_agent.run",
+        "brawl.pipelines.final_agent.run_match",
+        "brawl.pipelines.llc.evaluate_retention",
     ):
         assert importlib.import_module(module) is not None
 
 
 def test_runtime_code_has_no_hsp_import_or_goal_scheduler() -> None:
-    roots = (Path("env.py"), Path("train"), Path("feature_extractor"), Path("algo"))
+    roots = (Path("brawl"), Path("scripts"))
     forbidden = (
         "hierarchical.hsp_env",
         "train.hsp_guard",

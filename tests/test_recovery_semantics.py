@@ -6,11 +6,11 @@ import gymnasium as gym
 import numpy as np
 import pytest
 
-from action_space import ACTION_DIM, Action
-from feature_extractor.memory.state_spec import StateSpec
-from feature_extractor.memory.structured_memory import FighterState, Memory
-from train.curriculum_config import build_phase_spec
-from train.llc_stage_common import StageGoalEnv
+from brawl.control.action_space import ACTION_DIM, Action
+from brawl.state.state_spec import StateSpec
+from brawl.state.structured_memory import FighterState, Memory
+from brawl.pipelines.llc.curriculum_config import build_phase_spec
+from brawl.pipelines.llc.stage_common import StageGoalEnv
 
 
 def _fighter(
@@ -241,9 +241,9 @@ def test_recovery_never_emits_noop_while_offstage() -> None:
     """
     import numpy as np
 
-    from action_space import components
-    from feature_extractor.memory.state_spec import StateSpec
-    from train.heuristic_teachers import HeuristicConfig, HeuristicState, _recovery_action
+    from brawl.control.action_space import components
+    from brawl.state.state_spec import StateSpec
+    from brawl.training.teachers import HeuristicConfig, HeuristicState, _recovery_action
 
     cfg = HeuristicConfig()
     offenders = 0

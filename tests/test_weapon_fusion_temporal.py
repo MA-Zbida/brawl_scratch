@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from perception.weapon_classifier import WeaponPrediction, WeaponStateFusion
-from perception.weapon_evidence import WeaponHoldGate
+from brawl.perception.weapon_classifier import WeaponPrediction, WeaponStateFusion
+from brawl.perception.weapon_evidence import WeaponHoldGate
 
 
 def visual(armed, **kwargs):
@@ -138,8 +138,8 @@ def test_reset_clears_votes_and_action_guards():
 
 def test_collector_calls_an_isolated_positive_unconfirmed_not_dropped():
     from test_semantic_pipeline import ScriptEnv, observation
-    from feature_extractor.memory.state_spec import StateSpec
-    from train.semantic_collect import collect_attempt
+    from brawl.state.state_spec import StateSpec
+    from brawl.pipelines.semantic57.collect import collect_attempt
 
     class BlipEnv(ScriptEnv):
         def step(self, action):
@@ -165,8 +165,8 @@ def test_collector_calls_an_isolated_positive_unconfirmed_not_dropped():
 
 def test_env_pickup_grace_is_wired_after_input_not_before_capture():
     from types import SimpleNamespace
-    from action_space import Action
-    from feature_extractor.memory.state_spec import StateSpec
+    from brawl.control.action_space import Action
+    from brawl.state.state_spec import StateSpec
     from test_observation_window import make_env, det
     env, extractor = make_env(action_repeat_steps=1)
     env.weapon_classifier = SimpleNamespace(update=lambda frame, boxes: {'player': visual(False)})

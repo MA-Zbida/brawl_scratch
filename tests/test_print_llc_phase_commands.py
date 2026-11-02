@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from tools.print_llc_phase_commands import commands_for_phase, main
+from scripts.llc.print_llc_phase_commands import commands_for_phase, main
 
 
 def _args(**overrides) -> argparse.Namespace:
@@ -38,8 +38,8 @@ def test_middle_phase_commands_include_previous_resume_and_demo_chain() -> None:
     commands = commands_for_phase(_args(), "weapon_acquisition")
     joined = "\n".join(commands)
 
-    assert commands[0] == "python tools/validate_llc_demos.py --phase weapon_acquisition --min-samples 100"
-    assert commands[1].startswith("python -m train.pretrain_bc_locomotion --phase weapon_acquisition")
+    assert commands[0] == "python scripts/llc/validate_llc_demos.py --phase weapon_acquisition --min-samples 100"
+    assert commands[1].startswith("python -m brawl.pipelines.llc.pretrain_bc --phase weapon_acquisition")
     assert "--resume train/models/llc_movement_fluency.zip" in commands[1]
     assert "--demos train/models/weapon_acquisition_demos.npz" in commands[1]
     assert "--resume train/models/llc_weapon_acquisition_bc_init.zip" in commands[2]
@@ -48,11 +48,11 @@ def test_middle_phase_commands_include_previous_resume_and_demo_chain() -> None:
         'train/models/weapon_acquisition_demos.npz"'
     ) in commands[2]
     assert "--phases movement_fluency,weapon_acquisition" in commands[3]
-    assert "tools/check_llc_phase_gate.py" in joined
-    assert "tools/plot_llc_diagnostics.py" in joined
-    assert "tools/summarize_llc_run.py" in joined
+    assert "scripts/llc/check_llc_phase_gate.py" in joined
+    assert "scripts/llc/plot_llc_diagnostics.py" in joined
+    assert "scripts/llc/summarize_llc_run.py" in joined
     assert "--out outputs/llc_weapon_acquisition_run_report.md" in joined
-    assert "tools/record_llc_observation.py --phase weapon_acquisition --approved yes" in joined
+    assert "scripts/llc/record_llc_observation.py --phase weapon_acquisition --approved yes" in joined
 
 
 def test_first_phase_starts_without_a_recovery_checkpoint() -> None:
@@ -84,17 +84,17 @@ def test_all_skills_commands_skip_bc_pretrain_and_use_all_demos() -> None:
     commands = commands_for_phase(_args(), "all_skills_llc")
     joined = "\n".join(commands)
 
-    assert not any("pretrain_bc_locomotion" in command for command in commands)
-    assert commands[0] == "python tools/validate_llc_demos.py --phase all --min-samples 100"
-    assert commands[1].startswith("python -m train.train_curriculum --phase all_skills_llc")
+    assert not any("brawl.pipelines.llc.pretrain_bc" in command for command in commands)
+    assert commands[0] == "python scripts/llc/validate_llc_demos.py --phase all --min-samples 100"
+    assert commands[1].startswith("python -m brawl.pipelines.llc.train_curriculum --phase all_skills_llc")
     assert "--resume train/models/llc_recovery_mastery.zip" in commands[1]
     assert "--eval-phases all" in commands[1]
     assert "--phases all" in commands[2]
     assert "--phases all" in commands[3]
     assert "--phases all" in joined
-    assert "tools/summarize_llc_run.py" in joined
+    assert "scripts/llc/summarize_llc_run.py" in joined
     assert "--out outputs/llc_all_skills_llc_run_report.md" in joined
-    assert "tools/record_llc_observation.py --phase all_skills_llc --approved yes" in joined
+    assert "scripts/llc/record_llc_observation.py --phase all_skills_llc --approved yes" in joined
     for phase in (
         "recovery_mastery",
         "movement_fluency",

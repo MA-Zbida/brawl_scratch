@@ -31,7 +31,7 @@ class PixelEnv(gym.Env):
 
 
 def test_protocol_rejects_unknown_and_nonfinite_fields(tmp_path):
-    from train.round_a_config import Protocol
+    from brawl.pipelines.round_a.config import Protocol
     path = tmp_path / 'protocol.json'
     for values in ({'typo': 1}, {'control_hz': float('nan')}, {'image_width': 0}, {'timesteps': True}):
         path.write_text(json.dumps(values))
@@ -40,7 +40,7 @@ def test_protocol_rejects_unknown_and_nonfinite_fields(tmp_path):
 
 
 def test_pixel_history_is_owned_aligned_and_currently_mirrored():
-    from train.round_a_data import ObservationAdapter
+    from brawl.pipelines.round_a.data import ObservationAdapter
     raw = PixelEnv()
     env = ObservationAdapter(raw, 'multi', width=64, height=36, hz=0)
     obs, _ = env.reset()
@@ -60,8 +60,8 @@ def test_pixel_history_is_owned_aligned_and_currently_mirrored():
 def test_candidates_learn_reload_and_predict(candidate, tmp_path):
     import torch
     torch.set_num_threads(1)
-    from train.round_a_models import build_model, save_model, load_model, Predictor
-    from train.round_a_data import ObservationAdapter
+    from brawl.pipelines.round_a.models import build_model, save_model, load_model, Predictor
+    from brawl.pipelines.round_a.data import ObservationAdapter
     env = ObservationAdapter(PixelEnv(), candidate, width=64, height=36, hz=0)
     model = build_model(candidate, env, n_steps=8, batch_size=4, n_epochs=1)
     model.learn(16)
@@ -76,7 +76,7 @@ def test_candidates_learn_reload_and_predict(candidate, tmp_path):
 
 
 def test_predictor_preserves_memory_and_resets_on_boundary():
-    from train.round_a_models import Predictor
+    from brawl.pipelines.round_a.models import Predictor
     class Model:
         def predict(self, obs, state=None, episode_start=None, deterministic=None):
             assert deterministic
@@ -89,7 +89,7 @@ def test_predictor_preserves_memory_and_resets_on_boundary():
 
 
 def test_dataset_contract_rejects_missing_frames_and_keeps_episode_split(tmp_path):
-    from train.round_a_data import EpisodeWriter, Dataset
+    from brawl.pipelines.round_a.data import EpisodeWriter, Dataset
     writer = EpisodeWriter(tmp_path, width=64, height=36)
     for ep in range(10):
         frames = np.zeros((9, 36, 64, 3), np.uint8)
@@ -109,7 +109,7 @@ def test_dataset_contract_rejects_missing_frames_and_keeps_episode_split(tmp_pat
 
 
 def test_timed_evaluation_counts_seconds_not_steps_and_releases():
-    from train.round_a_runtime import evaluate_block
+    from brawl.pipelines.round_a.runtime import evaluate_block
     class Clock:
         t = 0.
         def __call__(self): return self.t
@@ -132,12 +132,12 @@ def test_timed_evaluation_counts_seconds_not_steps_and_releases():
 
 
 def test_collector_labels_have_source_step_indices():
-    from train.semantic_collect import Attempt
+    from brawl.pipelines.semantic57.collect import Attempt
     assert Attempt().observation_steps == []
 
 
 def make_dataset(path):
-    from train.round_a_data import EpisodeWriter, Dataset
+    from brawl.pipelines.round_a.data import EpisodeWriter, Dataset
     writer = EpisodeWriter(path, width=64, height=36, extra={'control_hz': 30., 'complete': True})
     for drill, action in [('weapon', 26), ('recovery', 7), ('combat', 19)]:
         for _ in range(5):
@@ -154,13 +154,13 @@ def make_dataset(path):
 def test_ordered_bc_then_complete_live_runner_without_hardware(candidate, tmp_path):
     import torch
     from dataclasses import replace
-    from train.round_a_config import Protocol
-    from train.round_a import space_env
-    from train.round_a_data import ObservationAdapter
-    from train.round_a_models import build_model, load_model
-    from train.round_a_bc import pretrain, evaluate_imitation
-    from train.round_a_runtime import run_training
-    from train.match_env import MatchTrainingEnv
+    from brawl.pipelines.round_a.config import Protocol
+    from brawl.pipelines.round_a.run import space_env
+    from brawl.pipelines.round_a.data import ObservationAdapter
+    from brawl.pipelines.round_a.models import build_model, load_model
+    from brawl.pipelines.round_a.bc import pretrain, evaluate_imitation
+    from brawl.pipelines.round_a.runtime import run_training
+    from brawl.env.match import MatchTrainingEnv
     torch.set_num_threads(1)
     data = make_dataset(tmp_path / 'data')
     protocol = Protocol(image_width=64, image_height=36, n_steps=8, batch_size=4,
@@ -190,11 +190,11 @@ def test_ordered_bc_then_complete_live_runner_without_hardware(candidate, tmp_pa
 
 
 def test_collection_context_and_label_alignment(monkeypatch, tmp_path):
-    from train.round_a_collection import collect
-    from train.round_a_config import Protocol
-    from train.round_a_data import ObservationAdapter, Dataset
-    from train.semantic_collect import Attempt
-    from train.match_env import MatchTrainingEnv
+    from brawl.pipelines.round_a.collection import collect
+    from brawl.pipelines.round_a.config import Protocol
+    from brawl.pipelines.round_a.data import ObservationAdapter, Dataset
+    from brawl.pipelines.semantic57.collect import Attempt
+    from brawl.env.match import MatchTrainingEnv
     def attempt(env, drill, **kwargs):
         env.reset()
         env.step(0)  # refresh, not a label
@@ -205,7 +205,7 @@ def test_collection_context_and_label_alignment(monkeypatch, tmp_path):
         env.step(2)
         return Attempt(accepted=True, reason='accepted', observations=[first, third],
                        actions=[1, 2], families=[drill, drill], observation_steps=[1, 3], steps=3)
-    monkeypatch.setattr('train.round_a_collection.collect_attempt', attempt)
+    monkeypatch.setattr('brawl.pipelines.round_a.collection.collect_attempt', attempt)
     adapter = ObservationAdapter(MatchTrainingEnv(PixelEnv(), mode='training_room'), 'mlp', width=64, height=36, hz=0)
     collect(adapter, Protocol(image_width=64, image_height=36), tmp_path, episodes=5)
     data = Dataset(tmp_path / 'demos')
@@ -220,12 +220,12 @@ def test_collection_context_and_label_alignment(monkeypatch, tmp_path):
 def test_round_a_cli_import_does_not_import_torch():
     import subprocess, sys
     result = subprocess.run([sys.executable, '-c',
-        "import sys; import train.round_a; assert 'torch' not in sys.modules"], capture_output=True, text=True)
+        "import sys; import brawl.pipelines.round_a.run; assert 'torch' not in sys.modules"], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
 
 def test_clock_paces_without_catchup_bursts():
-    from train.round_a_data import ObservationAdapter
+    from brawl.pipelines.round_a.data import ObservationAdapter
     class Clock:
         t = 0.
         def __call__(self): return self.t
@@ -246,7 +246,7 @@ def test_clock_paces_without_catchup_bursts():
 
 
 def test_round_a_cli_pretrain_and_preflight(tmp_path):
-    from train.round_a import main
+    from brawl.pipelines.round_a.run import main
     make_dataset(tmp_path / 'data')
     shared = ['--demos', str(tmp_path/'data'), '--set', 'image_width=64', '--set', 'image_height=36']
     main(['--stage', 'preflight', '--run-dir', str(tmp_path/'preflight'), *shared])
@@ -256,8 +256,8 @@ def test_round_a_cli_pretrain_and_preflight(tmp_path):
 
 
 def test_bad_dataset_alignment_rejected(tmp_path):
-    from train.round_a_data import Dataset
-    from train.run_utils import sha256
+    from brawl.pipelines.round_a.data import Dataset
+    from brawl.training.run_utils import sha256
     data = make_dataset(tmp_path / 'data')
     folder = tmp_path/'data'/'episode_000000'
     refs = np.full((6, 4), 900, dtype=np.int64)
@@ -271,11 +271,11 @@ def test_bad_dataset_alignment_rejected(tmp_path):
 
 def test_resumed_training_uses_remaining_budget_only(tmp_path):
     import torch
-    from train.round_a_config import Protocol
-    from train.round_a_data import ObservationAdapter
-    from train.round_a_models import build_model
-    from train.round_a_runtime import run_training
-    from train.match_env import MatchTrainingEnv
+    from brawl.pipelines.round_a.config import Protocol
+    from brawl.pipelines.round_a.data import ObservationAdapter
+    from brawl.pipelines.round_a.models import build_model
+    from brawl.pipelines.round_a.runtime import run_training
+    from brawl.env.match import MatchTrainingEnv
     torch.set_num_threads(1)
     protocol = Protocol(n_steps=8, batch_size=4, n_epochs=1, timesteps=16,
         image_width=64, image_height=36, baseline_seconds=.01, final_seconds=.01)
@@ -289,8 +289,8 @@ def test_resumed_training_uses_remaining_budget_only(tmp_path):
 
 
 def test_visual_metrics_distinguish_recovery_from_death():
-    from train.round_a_runtime import SkillMetrics
-    from feature_extractor.memory.state_spec import StateSpec
+    from brawl.pipelines.round_a.runtime import SkillMetrics
+    from brawl.state.state_spec import StateSpec
     def obs(**kwargs):
         value = np.zeros(146, np.float32)
         for key, v in dict(identity_observed=1, **kwargs).items():
@@ -307,8 +307,8 @@ def test_visual_metrics_distinguish_recovery_from_death():
 
 
 def test_dataset_rejects_fractional_actions(tmp_path):
-    from train.round_a_data import Dataset
-    from train.run_utils import sha256
+    from brawl.pipelines.round_a.data import Dataset
+    from brawl.training.run_utils import sha256
     data = make_dataset(tmp_path/'data')
     folder = tmp_path/'data'/'episode_000000'
     np.save(folder/'actions.npy', np.full(6, 1.5))
@@ -323,12 +323,12 @@ def test_dataset_rejects_fractional_actions(tmp_path):
 def test_live_entrypoint_train_and_evaluate_with_fake_game(candidate, initialize_bc, monkeypatch, tmp_path):
     from dataclasses import replace
     import torch
-    from train import round_a
-    from train.round_a_config import Protocol
-    from train.round_a_models import build_model, save_model
-    from train.round_a_data import ObservationAdapter
-    from train.run_utils import sha256
-    from train.match_env import MatchTrainingEnv
+    from brawl.pipelines.round_a import run as round_a
+    from brawl.pipelines.round_a.config import Protocol
+    from brawl.pipelines.round_a.models import build_model, save_model
+    from brawl.pipelines.round_a.data import ObservationAdapter
+    from brawl.training.run_utils import sha256
+    from brawl.env.match import MatchTrainingEnv
     torch.set_num_threads(1)
     data = make_dataset(tmp_path/'data')
     protocol = Protocol(image_width=64, image_height=36, timesteps=8, n_steps=8,
@@ -350,7 +350,7 @@ def test_live_entrypoint_train_and_evaluate_with_fake_game(candidate, initialize
     monkeypatch.setattr(round_a, 'make_live', live)
     monkeypatch.setattr(round_a, 'prompt', lambda *args: None)
     monkeypatch.setattr('builtins.input', lambda *args: 'YES')
-    monkeypatch.setattr('train.round_a_collection.qualify', lambda *args: {'passed': True})
+    monkeypatch.setattr('brawl.pipelines.round_a.collection.qualify', lambda *args: {'passed': True})
     shared = ['--candidate', candidate, '--protocol', str(cfg), '--demos', str(tmp_path/'data')]
     round_a.main(['--stage', 'train', '--profile-timing', '--run-dir', str(tmp_path/'train'),
                  '--init-bc' if initialize_bc else '--resume', str(checkpoint), *shared])
@@ -366,12 +366,12 @@ def test_live_entrypoint_train_and_evaluate_with_fake_game(candidate, initialize
 
 
 def test_qualification_uses_real_predictor_and_reports_deadlines(monkeypatch, tmp_path):
-    from train.round_a_collection import qualify
-    from train.round_a_config import Protocol
-    from train.round_a_data import ObservationAdapter
-    from train.round_a_models import build_model
-    from train.semantic_collect import Attempt
-    from train.match_env import MatchTrainingEnv
+    from brawl.pipelines.round_a.collection import qualify
+    from brawl.pipelines.round_a.config import Protocol
+    from brawl.pipelines.round_a.data import ObservationAdapter
+    from brawl.pipelines.round_a.models import build_model
+    from brawl.pipelines.semantic57.collect import Attempt
+    from brawl.env.match import MatchTrainingEnv
     env = ObservationAdapter(MatchTrainingEnv(PixelEnv(), mode='training_room'), 'recurrent', width=64, height=36, hz=0)
     model = build_model('recurrent', env, n_steps=8, batch_size=4, n_epochs=1)
     def attempt(view, drill, teacher_factory, **kwargs):
@@ -381,13 +381,13 @@ def test_qualification_uses_real_predictor_and_reports_deadlines(monkeypatch, tm
             decision = controller.action(obs)
             obs, *_ = view.step(decision.action)
         return Attempt(accepted=True, reason='accepted')
-    monkeypatch.setattr('train.round_a_collection.collect_attempt', attempt)
+    monkeypatch.setattr('brawl.pipelines.round_a.collection.collect_attempt', attempt)
     assert qualify(model, env, Protocol(), tmp_path)['passed']
     env.close()
 
 
 def test_evaluation_exception_releases_keys():
-    from train.round_a_runtime import evaluate_block
+    from brawl.pipelines.round_a.runtime import evaluate_block
     class Env:
         released = False
         def step(self, action): raise RuntimeError('sensor failed')
@@ -401,7 +401,7 @@ def test_evaluation_exception_releases_keys():
 
 
 def test_round_a_summary_plots_and_metrics(tmp_path):
-    from analysis.plot_round_a import summarize
+    from brawl.analysis.plot_round_a import summarize
     run = tmp_path/'run'
     run.mkdir()
     (run/'manifest.json').write_text(json.dumps({'arguments': {'candidate': 'mlp', 'seed': 42}}))
@@ -417,7 +417,7 @@ def test_round_a_summary_plots_and_metrics(tmp_path):
 
 
 def test_eval_video_is_opt_in_bounded_and_timestamped(tmp_path):
-    from train.round_a_video import EvaluationClip
+    from brawl.pipelines.round_a.video import EvaluationClip
     clip = EvaluationClip(tmp_path, 'test', seconds=.5, fps=30)
     frame = np.zeros((36, 64, 3), np.uint8)
     clip.write(frame, elapsed=.1, action=19, info={'effective_action': 19})
@@ -430,8 +430,8 @@ def test_eval_video_is_opt_in_bounded_and_timestamped(tmp_path):
 
 
 def test_visual_checkpoint_cannot_lie_about_resolution(tmp_path):
-    from train.round_a_data import ObservationAdapter
-    from train.round_a_models import build_model, save_model
+    from brawl.pipelines.round_a.data import ObservationAdapter
+    from brawl.pipelines.round_a.models import build_model, save_model
     env = ObservationAdapter(PixelEnv(), 'multi', width=64, height=36, hz=0)
     model = build_model('multi', env, n_steps=8, batch_size=4)
     with pytest.raises(ValueError, match='space'):
@@ -439,10 +439,10 @@ def test_visual_checkpoint_cannot_lie_about_resolution(tmp_path):
 
 
 def test_live_factory_wraps_world_replay_below_pixels(monkeypatch, tmp_path):
-    from train.round_a import parser, make_live
-    from train.round_a_config import Protocol
-    from train.primitive_pipeline import _make_live
-    monkeypatch.setattr('train.primitive_pipeline._make_live', lambda args: PixelEnv())
+    from brawl.pipelines.round_a.run import parser, make_live
+    from brawl.pipelines.round_a.config import Protocol
+    from brawl.pipelines.primitive27.run import _make_live
+    monkeypatch.setattr('brawl.pipelines.primitive27.run._make_live', lambda args: PixelEnv())
     args = parser().parse_args(['--stage', 'collect', '--world-replay', str(tmp_path/'world')])
     env, match = make_live(args, Protocol(image_width=64, image_height=36), tmp_path, 'collect')
     env.reset()
@@ -452,7 +452,7 @@ def test_live_factory_wraps_world_replay_below_pixels(monkeypatch, tmp_path):
 
 
 def test_invalid_observation_never_reaches_policy():
-    from train.round_a_data import ObservationAdapter
+    from brawl.pipelines.round_a.data import ObservationAdapter
     env = ObservationAdapter(PixelEnv(), 'mlp', width=64, height=36, hz=0)
     with pytest.raises(RuntimeError, match='Nonfinite'):
         env.capture(np.full(146, np.nan, np.float32))

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from train.checkpoint_roles import (
+from brawl.training.checkpoints import (
     FINAL_AGENT,
     GOAL_CONDITIONED_SKILL,
     CheckpointRoleError,

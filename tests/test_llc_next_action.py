@@ -6,10 +6,10 @@ import json
 
 import numpy as np
 
-from action_space import ACTION_DIM, Action
-from feature_extractor.memory.state_spec import StateSpec
+from brawl.control.action_space import ACTION_DIM, Action
+from brawl.state.state_spec import StateSpec
 
-from tools.llc_next_action import build_advice
+from scripts.llc.llc_next_action import build_advice
 
 
 def _args(tmp_path, **overrides) -> argparse.Namespace:
@@ -118,9 +118,9 @@ def test_advisor_starts_with_perception_when_no_demos_exist(tmp_path) -> None:
 
     assert advice.next_kind == "perception"
     assert "debug_observation_overlay.py" in advice.command
-    assert "pip install -r requirements-llc.txt" in "\n".join(advice.details)
+    assert "pip install -r requirements.txt" in "\n".join(advice.details)
     assert "llc_preflight.py --device cuda" in "\n".join(advice.details)
-    assert "collect_bc_locomotion_demos --phase movement_fluency" in "\n".join(advice.details)
+    assert "brawl.pipelines.llc.collect_demos --phase movement_fluency" in "\n".join(advice.details)
 
 
 def test_advisor_sends_valid_demo_to_bc_pretrain(tmp_path) -> None:
@@ -130,7 +130,7 @@ def test_advisor_sends_valid_demo_to_bc_pretrain(tmp_path) -> None:
     advice = build_advice(_args(tmp_path, phase="movement_fluency"))
 
     assert advice.next_kind == "bc_pretrain"
-    assert "train.pretrain_bc_locomotion" in advice.command
+    assert "brawl.pipelines.llc.pretrain_bc" in advice.command
     assert "--phase movement_fluency" in advice.command
 
 
@@ -182,7 +182,7 @@ def test_advisor_includes_monitor_hint_for_ppo_training(tmp_path) -> None:
     advice = build_advice(_args(tmp_path, phase="movement_fluency"))
 
     assert advice.next_kind == "ppo_train"
-    assert "train.train_curriculum" in advice.command
+    assert "brawl.pipelines.llc.train_curriculum" in advice.command
     assert any("llc_live_monitor.py --phase movement_fluency" in item for item in advice.details)
 
 

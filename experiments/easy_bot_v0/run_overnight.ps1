@@ -50,13 +50,13 @@ function Run($name, [scriptblock]$block) {
 
 # Validation is a gate, not a report. BC will imitate whatever it is given.
 function Validate($path) {
-    & $PY tools\validate_llc_demos.py $path --min-samples 100 2>&1 |
+    & $PY scripts\llc\validate_llc_demos.py $path --min-samples 100 2>&1 |
         Tee-Object -Append "$LOG\validate.log"
     if ($LASTEXITCODE -ne 0) { throw "demo validation FAILED for $path" }
 }
 
 function Collect($phase, $out, $maxEpisodeSteps) {
-    & $PY train\collect_bc_locomotion_demos.py --phase $phase `
+    & $PY brawl\pipelines\llc\collect_demos.py --phase $phase `
         --episodes 50 --output $out `
         --max-collection-attempts 200 --min-episode-steps 4 `
         --max-episode-steps $maxEpisodeSteps `
@@ -65,14 +65,14 @@ function Collect($phase, $out, $maxEpisodeSteps) {
 }
 
 function BC($phase, $demos, $resume, $out) {
-    & $PY -m train.pretrain_bc_locomotion --phase $phase --demos $demos `
+    & $PY -m brawl.pipelines.llc.pretrain_bc --phase $phase --demos $demos `
         --resume $resume --epochs 8 --batch-size 512 --learning-rate 0.0002 `
         --entropy-coef 0.001 --goal-relabel --output $out --device cpu 2>&1 |
         Tee-Object -Append "$LOG\${phase}_bc.log"
 }
 
 function PPO($phase, $resume, $anchors, $maxEpisodeSteps) {
-    & $PY -m train.train_curriculum --phase $phase --resume $resume `
+    & $PY -m brawl.pipelines.llc.train_curriculum --phase $phase --resume $resume `
         --timesteps $STEPS --n-steps 512 --batch-size 256 `
         --max-episode-steps $maxEpisodeSteps --bc-demos-path $anchors `
         --save-dir $M --model-name "llc_$phase" `
@@ -81,7 +81,7 @@ function PPO($phase, $resume, $anchors, $maxEpisodeSteps) {
 }
 
 function Retention($phase, $model, $phases, $maxEpisodeSteps) {
-    & $PY -m train.evaluate_retention --model $model --phase $phase `
+    & $PY -m brawl.pipelines.llc.evaluate_retention --model $model --phase $phase `
         --phases $phases --episodes 3 --max-episode-steps $maxEpisodeSteps `
         --best-scores $M\retention_best.json `
         --csv "$M\llc_${phase}_retention_eval.csv" --device cpu 2>&1 |

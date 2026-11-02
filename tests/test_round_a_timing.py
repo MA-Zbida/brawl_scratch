@@ -10,7 +10,7 @@ import pytest
 
 @pytest.mark.parametrize('mirrored', [False, True])
 def test_stack_reads_only_requested_frames_and_owns_result(mirrored):
-    from train.round_a_data import stack_frames
+    from brawl.pipelines.round_a.data import stack_frames
     frames = np.random.default_rng(42).integers(0, 256, (9, 12, 20, 3), dtype=np.uint8)
     refs = [8, 6, 4, 0]
     class History:
@@ -29,7 +29,7 @@ def test_stack_reads_only_requested_frames_and_owns_result(mirrored):
 
 
 def test_timing_restores_methods_and_saves_on_exception(tmp_path):
-    from train.round_a_timing import TimingProbe
+    from brawl.pipelines.round_a.timing import TimingProbe
     ticks = iter([0., .002, .01, .014])
     class Target:
         def call(self, x):
@@ -53,7 +53,7 @@ def test_timing_restores_methods_and_saves_on_exception(tmp_path):
 
 
 def test_timing_preserves_instance_override_and_ignores_missing(tmp_path):
-    from train.round_a_timing import TimingProbe
+    from brawl.pipelines.round_a.timing import TimingProbe
     original = lambda: 7
     target = SimpleNamespace(call=original)
     with TimingProbe(tmp_path / 'timing.json') as probe:
@@ -67,17 +67,17 @@ def test_timing_preserves_instance_override_and_ignores_missing(tmp_path):
 
 
 def test_timing_cli_is_opt_in():
-    from train.round_a import parser
+    from brawl.pipelines.round_a.run import parser
     assert not parser().parse_args(['--stage', 'train']).profile_timing
     assert parser().parse_args(['--stage', 'train', '--profile-timing']).profile_timing
 
 
 def test_live_profile_includes_wrappers_and_replay(tmp_path):
     import gymnasium as gym
-    from train.round_a_timing import qualification_timing
-    from train.round_a_data import ObservationAdapter
-    from train.match_env import MatchTrainingEnv, ReplayGymWrapper
-    from world_model.replay_log import WorldReplayWriter
+    from brawl.pipelines.round_a.timing import qualification_timing
+    from brawl.pipelines.round_a.data import ObservationAdapter
+    from brawl.env.match import MatchTrainingEnv, ReplayGymWrapper
+    from brawl.world_model.replay_log import WorldReplayWriter
     class Base(gym.Env):
         observation_space = gym.spaces.Box(-np.inf, np.inf, (146,), np.float32)
         action_space = gym.spaces.Discrete(27)
@@ -100,7 +100,7 @@ def test_live_profile_includes_wrappers_and_replay(tmp_path):
 
 
 def test_offline_benchmark_checks_exact_history_and_budgets():
-    from tools.benchmark_round_a_overhead import benchmark
+    from scripts.round_a.benchmark_round_a_overhead import benchmark
     report = benchmark(iterations=2, repeats=1)
     assert report['pixel_equivalence'] is True
     assert len(report['measurements']) == 7
@@ -111,7 +111,7 @@ def test_offline_benchmark_checks_exact_history_and_budgets():
 
 
 def test_benchmark_cli_saves_new_result_only(tmp_path):
-    from tools.benchmark_round_a_overhead import main
+    from scripts.round_a.benchmark_round_a_overhead import main
     path = tmp_path / 'benchmark.json'
     args = ['--iterations', '1', '--repeats', '1', '--output', str(path)]
     main(args)

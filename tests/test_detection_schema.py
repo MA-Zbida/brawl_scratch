@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from feature_extractor.memory.detection_schema import (
+from brawl.state.detection_schema import (
     CURRENT_CLASS_NAMES,
     LEGACY_CLASS_NAMES,
     detect_schema,
@@ -209,7 +209,7 @@ def test_missing_indicator_with_tied_position_candidates_abstains():
 
 
 def test_memory_expires_unobserved_identity_and_reacquires_without_velocity_spike():
-    from feature_extractor.memory.structured_memory import Memory
+    from brawl.state.structured_memory import Memory
     memory = Memory()
     a = det('character', .3, .6)
     memory.update_from_detections([a, det('indicator_self', .3, .53, .02, .02)])

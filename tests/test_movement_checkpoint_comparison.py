@@ -9,8 +9,8 @@ pytest.importorskip("gymnasium")
 
 import gymnasium as gym
 
-from action_space import ACTION_DIM, Action
-from train.compare_movement_checkpoints import (
+from brawl.control.action_space import ACTION_DIM, Action
+from brawl.pipelines.llc.compare_checkpoints import (
     MovementChallenge,
     evaluate_variant,
     movement_challenges,

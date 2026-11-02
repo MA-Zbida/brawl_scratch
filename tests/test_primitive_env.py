@@ -3,11 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from action_space import Action
-from control.input import NullInputController
-from env import EnvConfig
-from train.primitive_env import PrimitiveBrawlEnv
-from train.primitive_training import OBSERVATION_DIM, PrimitiveControls
+from brawl.control.action_space import Action
+from brawl.control.input import NullInputController
+from brawl.env.live import EnvConfig
+from brawl.pipelines.primitive27.env import PrimitiveBrawlEnv
+from brawl.pipelines.primitive27.training import OBSERVATION_DIM, PrimitiveControls
 
 
 class Frames:

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from feature_extractor.memory.state_spec import StateSpec
-from feature_extractor.memory.structured_memory import Memory
+from brawl.state.state_spec import StateSpec
+from brawl.state.structured_memory import Memory
 
 
 def _weapon(x: float, y: float) -> dict:

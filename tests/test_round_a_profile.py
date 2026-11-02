@@ -9,8 +9,8 @@ import pytest
 
 
 def test_uncapped_only_allowed_for_deployment():
-    from train.round_a_config import Protocol
-    from train.round_a_collection import cadence_assessment
+    from brawl.pipelines.round_a.config import Protocol
+    from brawl.pipelines.round_a.collection import cadence_assessment
     protocol = Protocol(control_hz=0, execution_mode='deployment')
     report = cadence_assessment([.02, .04], protocol)
     assert report['cadence_acceptable']
@@ -22,7 +22,7 @@ def test_uncapped_only_allowed_for_deployment():
 
 
 def test_profile_order_balances_policy_and_logging():
-    from tools.profile_round_a import block_schedule
+    from scripts.round_a.profile_round_a import block_schedule
     schedule = block_schedule(2)
     assert len(schedule) == 8
     assert schedule[4:] == list(reversed(schedule[:4]))
@@ -33,7 +33,7 @@ def test_profile_order_balances_policy_and_logging():
 
 
 def test_trace_keeps_early_spikes_and_exclusive_time(tmp_path):
-    from train.diagnostic_timing import TraceProbe
+    from brawl.pipelines.round_a.diagnostic_timing import TraceProbe
     now = [0.]
     class Target:
         def inner(self): now[0] += .01
@@ -58,7 +58,7 @@ def test_trace_keeps_early_spikes_and_exclusive_time(tmp_path):
 
 
 def test_trace_restores_on_exception():
-    from train.diagnostic_timing import TraceProbe
+    from brawl.pipelines.round_a.diagnostic_timing import TraceProbe
     def original(): raise RuntimeError('failure')
     target = SimpleNamespace(call=original)
     probe = TraceProbe()
@@ -71,7 +71,7 @@ def test_trace_restores_on_exception():
 
 
 def test_trace_reports_truncation_without_losing_totals():
-    from train.diagnostic_timing import TraceProbe
+    from brawl.pipelines.round_a.diagnostic_timing import TraceProbe
     probe = TraceProbe(max_events=1)
     for _ in range(3):
         with probe.measure('step'): pass
@@ -82,8 +82,8 @@ def test_trace_reports_truncation_without_losing_totals():
 
 def make_match(tmp_path):
     import gymnasium as gym
-    from train.match_env import MatchTrainingEnv
-    from feature_extractor.memory.state_spec import StateSpec
+    from brawl.env.match import MatchTrainingEnv
+    from brawl.state.state_spec import StateSpec
     class Base(gym.Env):
         observation_space = gym.spaces.Box(-np.inf, np.inf, (146,), np.float32)
         action_space = gym.spaces.Discrete(27)
@@ -104,8 +104,8 @@ def make_match(tmp_path):
 
 @pytest.mark.parametrize('mode', ['normal', 'minimal'])
 def test_block_evaluates_and_flushes_without_training(tmp_path, mode):
-    from tools.profile_round_a import run_block
-    from train.round_a_config import Protocol
+    from scripts.round_a.profile_round_a import run_block
+    from brawl.pipelines.round_a.config import Protocol
     match = make_match(tmp_path)
     model = SimpleNamespace(num_timesteps=50176,
                             predict=lambda obs, **kwargs: (np.array(1), None))
@@ -136,8 +136,8 @@ def test_block_evaluates_and_flushes_without_training(tmp_path, mode):
 
 
 def test_failed_block_keeps_evidence_and_releases_inputs(tmp_path):
-    from tools.profile_round_a import run_block
-    from train.round_a_config import Protocol
+    from scripts.round_a.profile_round_a import run_block
+    from brawl.pipelines.round_a.config import Protocol
     match = make_match(tmp_path)
     def predict(*args, **kwargs): raise RuntimeError('predict broke')
     with pytest.raises(RuntimeError, match='predict broke'):
@@ -151,8 +151,8 @@ def test_failed_block_keeps_evidence_and_releases_inputs(tmp_path):
 
 
 def test_profile_contract_ignores_only_schedule_not_observations():
-    from tools.profile_round_a import validate_pair
-    from train.round_a_config import Protocol
+    from scripts.round_a.profile_round_a import validate_pair
+    from brawl.pipelines.round_a.config import Protocol
     bc = dict(round_a=Protocol().as_dict() | {'candidate': 'mlp'},
               training_stage='bc_final_epoch', environment_steps=0)
     ppo = dict(round_a=bc['round_a'] | {'timesteps': 100000}, environment_steps=50176)
@@ -164,7 +164,7 @@ def test_profile_contract_ignores_only_schedule_not_observations():
 
 
 def test_summary_keeps_logging_conditions_separate():
-    from tools.profile_round_a import summarize
+    from scripts.round_a.profile_round_a import summarize
     rows = [dict(policy='bc', logging='normal', status='completed', seconds=10,
                  interactions=100, stocks_taken=2, stocks_lost=1,
                  damage_dealt=30, damage_received=10),
@@ -179,7 +179,7 @@ def test_summary_keeps_logging_conditions_separate():
 
 
 def test_bc_can_enter_explicit_uncapped_deployment_but_resume_cannot():
-    from train.round_a_config import Protocol, checkpoint_contract, validate_dataset_contract
+    from brawl.pipelines.round_a.config import Protocol, checkpoint_contract, validate_dataset_contract
     bc = dict(algorithm='round_a_v1', training_stage='bc_final_epoch', environment_steps=0,
               round_a=Protocol().as_dict() | {'candidate': 'mlp'})
     uncapped = Protocol(control_hz=0, execution_mode='deployment')
@@ -194,8 +194,8 @@ def test_bc_can_enter_explicit_uncapped_deployment_but_resume_cannot():
 
 
 def test_partial_block_retains_completed_interactions(tmp_path):
-    from tools.profile_round_a import run_block
-    from train.round_a_config import Protocol
+    from scripts.round_a.profile_round_a import run_block
+    from brawl.pipelines.round_a.config import Protocol
     match = make_match(tmp_path)
     calls = [0]
     def predict(*args, **kwargs):
@@ -215,11 +215,11 @@ def test_partial_block_retains_completed_interactions(tmp_path):
 
 
 def test_main_orchestrates_read_only_policies_and_preserves_contracts(tmp_path, monkeypatch):
-    from tools import profile_round_a as module
-    from train.round_a_config import Protocol
-    import train.round_a_models as models
-    import train.checkpoint_roles as roles
-    import train.primitive_pipeline as pipeline
+    from scripts.round_a import profile_round_a as module
+    from brawl.pipelines.round_a.config import Protocol
+    import brawl.pipelines.round_a.models as models
+    import brawl.training.checkpoints as roles
+    import brawl.pipelines.primitive27.run as pipeline
     bc, ppo, classifier = [tmp_path / name for name in ('bc.zip', 'ppo.zip', 'classifier.pt')]
     for path in (bc, ppo, classifier):
         path.write_bytes(b'fixture')

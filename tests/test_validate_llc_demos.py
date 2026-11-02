@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from action_space import ACTION_DIM, Action
-from feature_extractor.memory.state_spec import StateSpec
+from brawl.control.action_space import ACTION_DIM, Action
+from brawl.state.state_spec import StateSpec
 
-from tools.validate_llc_demos import split_paths, validate_demo_archive
+from scripts.llc.validate_llc_demos import split_paths, validate_demo_archive
 
 
 #: StageGoalEnv observation = stacked env observation + goal target + goal mask.

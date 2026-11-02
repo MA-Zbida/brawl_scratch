@@ -8,9 +8,9 @@ import numpy as np
 import torch as th
 from stable_baselines3 import PPO
 
-from action_space import ACTION_DIM, Action
-from train.curriculum_config import build_phase_spec
-from train.phase_action_policy import (
+from brawl.control.action_space import ACTION_DIM, Action
+from brawl.pipelines.llc.curriculum_config import build_phase_spec
+from brawl.pipelines.llc.phase_action_policy import (
     PhaseMaskedActorCriticPolicy,
     masked_policy_custom_objects,
     phase_allowed_action_ids,

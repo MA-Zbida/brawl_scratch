@@ -59,7 +59,7 @@ space it has to cover.
   easy to forget and is covered by tests.
 - `canon_mirrored` records whether the flip was applied.
 
-Details in [`feature_extractor/memory/canonicalize.py`](../feature_extractor/memory/canonicalize.py).
+Details in [`brawl/state/canonicalize.py`](../feature_extractor/memory/canonicalize.py).
 
 ## Provenance
 
@@ -92,7 +92,7 @@ threw it away by keeping only the centre.
 `player_on_edge`, `player_is_offstage`, `signed_dx_to_stage_center`,
 `dist_to_blastzone_x`, `dist_to_blastzone_y`, `opponent_grounded`,
 `opponent_is_offstage` — all **derived** from measured position plus the fixed
-calibration in [`config.py`](../config.py).
+calibration in [`brawl/calibration.py`](../config.py).
 
 Blast-zone margins are measured about the stage centre so they stay symmetric
 under the mirror.

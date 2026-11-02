@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from analysis.paper_evidence import (
+from brawl.analysis.paper_evidence import (
     PRIMARY_PHASES,
     build_evidence,
     build_retention_matrices,

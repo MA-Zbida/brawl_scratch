@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from feature_extractor.memory.canonicalize import (
+from brawl.state.canonicalize import (
     DEFAULT_DEADBAND,
     STAGE_CENTER_X,
     GOAL_MIRROR_FEATURES,
@@ -25,8 +25,8 @@ from feature_extractor.memory.canonicalize import (
     mirror_state_vector,
     should_mirror,
 )
-from action_space import ACTION_DIM, KEY_LEFT, KEY_RIGHT, Action, describe, to_keys
-from feature_extractor.memory.state_spec import StateSpec
+from brawl.control.action_space import ACTION_DIM, KEY_LEFT, KEY_RIGHT, Action, describe, to_keys
+from brawl.state.state_spec import StateSpec
 
 
 def _state(**values: float) -> np.ndarray:

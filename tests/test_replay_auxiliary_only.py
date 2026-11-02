@@ -12,8 +12,8 @@ pytest.importorskip("torch")
 import gymnasium as gym
 import torch as th
 
-from action_space import ACTION_DIM
-from algo.anchored_replay_ppo import AnchoredReplayPPO
+from brawl.control.action_space import ACTION_DIM
+from brawl.algo.anchored_replay_ppo import AnchoredReplayPPO
 
 
 class _TinyEnv(gym.Env):

@@ -13,7 +13,7 @@ import numpy as np
 import json
 import pytest
 
-from tools.label_weapon_crops import (
+from scripts.ops.label_weapon_crops import (
     CHARACTER_CLASS, Crop, crop_pixels, iter_crops, select_originals, source_key,
 )
 
@@ -157,7 +157,7 @@ def _live_crops(tmp_path, count=3):
 
 def test_live_labeling_uses_fixed_preview_explicit_output_and_resumes(tmp_path, monkeypatch):
     import cv2
-    from tools.label_weapon_crops import main
+    from scripts.ops.label_weapon_crops import main
     source = _live_crops(tmp_path)
     out = tmp_path / 'labels'
     preview = tmp_path / 'preview' / 'current.png'
@@ -181,7 +181,7 @@ def test_live_labeling_uses_fixed_preview_explicit_output_and_resumes(tmp_path, 
 
 
 def test_skip_undo_does_not_decrement_label_limit(tmp_path, monkeypatch):
-    from tools.label_weapon_crops import main
+    from scripts.ops.label_weapon_crops import main
     source = _live_crops(tmp_path, 4)
     out = tmp_path / 'labels'
     args = ['--crops-dir', str(source), '--dataset', str(tmp_path / 'absent'),
@@ -195,7 +195,7 @@ def test_skip_undo_does_not_decrement_label_limit(tmp_path, monkeypatch):
 
 
 def test_label_undo_and_quit_only_keep_confirmed_decisions(tmp_path, monkeypatch):
-    from tools.label_weapon_crops import main
+    from scripts.ops.label_weapon_crops import main
     source = _live_crops(tmp_path)
     out = tmp_path / 'labels'
     answers = iter(['bad', '0', 'u', '1', 'q'])
@@ -210,7 +210,7 @@ def test_label_undo_and_quit_only_keep_confirmed_decisions(tmp_path, monkeypatch
 
 def test_yolo_labeling_keeps_existing_dataset_mode(tmp_path, monkeypatch):
     import cv2
-    from tools.label_weapon_crops import main
+    from scripts.ops.label_weapon_crops import main
     root = _dataset(tmp_path, '0 0.5 0.5 0.2 0.4')
     assert cv2.imwrite(str(root / 'train/images/frame_0001.png'), np.zeros((100, 100, 3), np.uint8))
     monkeypatch.setattr('builtins.input', lambda _: '0')

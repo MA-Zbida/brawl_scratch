@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from feature_extractor.memory.state_spec import StateSpec
-from train.curriculum_goals import GOAL_DIM, GOAL_INDEX, default_goal_target
-from action_space import Action, components, describe
-from train import heuristic_teachers as teachers
-from train.heuristic_teachers import HeuristicConfig, HeuristicTeacher, heuristic_action
+from brawl.state.state_spec import StateSpec
+from brawl.training.curriculum_goals import GOAL_DIM, GOAL_INDEX, default_goal_target
+from brawl.control.action_space import Action, components, describe
+from brawl.training import teachers
+from brawl.training.teachers import HeuristicConfig, HeuristicTeacher, heuristic_action
 
 
 def _obs() -> np.ndarray:

@@ -9,7 +9,7 @@ been evaluated.
 
 from __future__ import annotations
 
-import capture_first
+import brawl.capture_first as capture_first
 
 
 def test_take_then_release_allows_a_second_take() -> None:

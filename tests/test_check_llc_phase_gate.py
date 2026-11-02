@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 
-from tools.check_llc_phase_gate import evaluate_gate, recommend_actions
+from scripts.llc.check_llc_phase_gate import evaluate_gate, recommend_actions
 
 
 def _write_eval_csv(path, rows) -> None:

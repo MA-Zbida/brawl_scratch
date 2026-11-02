@@ -9,7 +9,7 @@ def test_demo_collection_cli_accepts_current_phase_names(monkeypatch) -> None:
     pytest.importorskip("gymnasium")
     pytest.importorskip("ultralytics")
 
-    from train.collect_bc_locomotion_demos import parse_args
+    from brawl.pipelines.llc.collect_demos import parse_args
 
     monkeypatch.setattr(
         sys,
@@ -38,7 +38,7 @@ def test_recovery_collection_sequence_gate_defaults_on(monkeypatch) -> None:
     pytest.importorskip("gymnasium")
     pytest.importorskip("ultralytics")
 
-    from train.collect_bc_locomotion_demos import parse_args
+    from brawl.pipelines.llc.collect_demos import parse_args
 
     monkeypatch.setattr(
         sys,
@@ -58,7 +58,7 @@ def test_bc_pretrain_cli_accepts_current_phase_names(monkeypatch) -> None:
     pytest.importorskip("stable_baselines3")
     pytest.importorskip("ultralytics")
 
-    from train.pretrain_bc_locomotion import parse_args
+    from brawl.pipelines.llc.pretrain_bc import parse_args
 
     monkeypatch.setattr(
         sys,

@@ -16,10 +16,10 @@ C:\venvs\brawl312\Scripts\python.exe -m pytest tests\ -q
 
 This is a vision-only RL agent for Brawlhalla. Phase-specific heuristic teachers
 generate behaviour-cloning demos; those demos initialise PPO. The action space is
-`Discrete(27)` defined in `action_space.py`, with **canonical** directions
+`Discrete(27)` defined in `brawl/control/action_space.py`, with **canonical** directions
 (`TOWARD` = toward the opponent, or toward stage centre when no opponent is visible).
 
-**Do not change the action space, the observation space, or `tools/validate_llc_demos.py`'s
+**Do not change the action space, the observation space, or `scripts/llc/validate_llc_demos.py`'s
 thresholds.** The validator is the instrument; the collectors are what is broken.
 
 ## Evidence
@@ -44,13 +44,13 @@ Additional measurements:
 - Across **all 5768 frames of all five phases**, the nine dodge actions
   (`DODGE_SPOT`, `DODGE_TOWARD`, `DODGE_AWAY`, `DODGE_UP`, `DODGE_DOWN`,
   `DODGE_UP_TOWARD`, `DODGE_UP_AWAY`, `DODGE_DOWN_TOWARD`, `DODGE_DOWN_AWAY`)
-  appear **zero times**. `grep -n DODGE train/heuristic_teachers.py` returns nothing.
+  appear **zero times**. `grep -n DODGE brawl/training/teachers.py` returns nothing.
 - `weapon_acquisition` action mix: `PICKUP` 43.4%, `NOOP` 34.1% — 77.5% of the archive.
 - `combat_execution` never emits `MOVE_AWAY` or `NOOP`.
 
 ## Defect 1 — recovery episodes succeed at spawn (highest priority)
 
-`_sampler_recovery` in `train/curriculum_config.py` sets the goal to
+`_sampler_recovery` in `brawl/pipelines/llc/curriculum_config.py` sets the goal to
 `signed_dx_to_ledge = 0, dy_to_ledge = 0` ("be at the ledge"), and the recovery spec uses
 `success_threshold=0.08` with `use_l2_error=True`.
 
@@ -60,7 +60,7 @@ Measured at spawn: `signed_dx_to_ledge` mean `-0.023` (range `-0.174..+0.183`),
 terminates successfully on step 1, the collector accepts it, and 48 of 50 recovery
 "demonstrations" are a single frame of a grounded agent.
 
-A guard already exists at `train/collect_bc_locomotion_demos.py` around line 582:
+A guard already exists at `brawl/pipelines/llc/collect_demos.py` around line 582:
 
 ```python
 accept_episode = bool(accept_episode and ep_step1_transition_seen and ep_terminal_success_seen)
@@ -93,7 +93,7 @@ for the same underlying reason: the sampled goal is already satisfied at reset.
    goal is already satisfied at step 0, **resample the goal target** (bounded retries, e.g.
    8) until it is not. If no unsatisfied target can be found, reject the episode.
 2. Add a `--min-episode-steps` CLI option (default `4`) to
-   `train/collect_bc_locomotion_demos.py`. Episodes shorter than this are rejected.
+   `brawl/pipelines/llc/collect_demos.py`. Episodes shorter than this are rejected.
 3. Track rejections in a new metadata key `episodes_rejected_trivial`, saved into the npz
    alongside the existing `episodes_rejected*` keys, and print it in the run summary.
 4. Keep `episodes_attempted`/`episodes_collected` semantics unchanged.
@@ -106,7 +106,7 @@ their probability to ~0, and PPO starting from that policy will effectively neve
 third of its own action space. Dodge/dash is a core Brawlhalla mechanic — it is the primary
 recovery tool and the primary defensive tool.
 
-**Required changes in `train/heuristic_teachers.py`.** Add these rules, matching the file's
+**Required changes in `brawl/training/teachers.py`.** Add these rules, matching the file's
 existing style (small helpers, `StateSpec.get`, canonical directions, no new dependencies):
 
 - **Recovery** (`_recovery_action`): when `player_jumps_norm <= cfg.min_jumps_norm` (out of
@@ -157,7 +157,7 @@ In `tests/`, using the existing conftest stubs (there is no game and no GPU in C
 
 ## Constraints
 
-- Do not change `action_space.py`, `feature_extractor/memory/state_spec.py`, or the
+- Do not change `brawl/control/action_space.py`, `brawl/state/state_spec.py`, or the
   validator's thresholds.
 - Do not add new observation features; use what `StateSpec` already exposes.
 - Do not lower any success threshold to make episodes last longer.
@@ -165,8 +165,8 @@ In `tests/`, using the existing conftest stubs (there is no game and no GPU in C
   recollected by the user after your changes land.
 - Every entry point must still run: verify with
   `C:\venvs\brawl312\Scripts\python.exe <script> --help` for each of
-  `train\collect_bc_locomotion_demos.py`, `train\collect_heuristic_curriculum_demos.py`,
-  `tools\validate_llc_demos.py`, `train\pretrain_bc_locomotion.py`, `train\train_curriculum.py`.
+  `brawl\pipelines\llc\collect_demos.py`, `brawl\pipelines\llc\collect_heuristic_demos.py`,
+  `scripts\llc\validate_llc_demos.py`, `brawl\pipelines\llc\pretrain_bc.py`, `brawl\pipelines\llc\train_curriculum.py`.
 
 ## Report back
 

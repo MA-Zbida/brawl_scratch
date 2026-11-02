@@ -22,7 +22,7 @@ step. Next action is the detector benchmark, not more profiling.
 **Game open, character idle on the platform.** ~500 steps is enough.
 
 ```powershell
-python tools/debug_observation_overlay.py --phase movement_fluency --show --max-steps 500
+python scripts/llc/debug_observation_overlay.py --phase movement_fluency --show --max-steps 500
 ```
 
 The env prints a per-stage average every 500 inner frames:
@@ -53,13 +53,13 @@ Same overlay run. While standing on the platform, check:
 - `rel_dx` stays **positive** on both sides of the opponent
 
 If `player_grounded` still flickers while standing still, the platform calibration in
-`config.py` needs revisiting rather than the foot offset — send a screenshot with the
+`brawl/calibration.py` needs revisiting rather than the foot offset — send a screenshot with the
 overlay numbers visible.
 
 ## 3. Integrate async perception
 
-Codex delivered `perception/async_pipeline.py` with 9 tests; it is deliberately **not**
-wired into `env.py` yet. That integration is one change, gated on step 1 telling us it is
+Codex delivered `brawl/perception/async_pipeline.py` with 9 tests; it is deliberately **not**
+wired into `brawl/env/live.py` yet. That integration is one change, gated on step 1 telling us it is
 worth making.
 
 ## 4. Recollect demos
@@ -68,7 +68,7 @@ Every existing NPZ is invalid: the observation schema changed (62-dim core, 146 
 history) and the action space changed (`Discrete(27)`).
 
 ```powershell
-python -m train.collect_heuristic_curriculum_demos --episodes-per-phase 50
+python -m brawl.pipelines.llc.collect_heuristic_demos --episodes-per-phase 50
 ```
 
 Watch the accepted/attempted ratio in the output. A low acceptance rate means the teacher
@@ -78,7 +78,7 @@ those goals — that is worth stopping for, not pushing through.
 ## 5. Validate the demos before training on them
 
 ```powershell
-python tools/validate_llc_demos.py --phase all --min-samples 100
+python scripts/llc/validate_llc_demos.py --phase all --min-samples 100
 ```
 
 Bad demos become bad anchors: they are replayed as a behaviour-cloning loss for the whole
@@ -87,11 +87,11 @@ PPO run, so a freeze reflex or a missing goal family persists long after collect
 ## 6. First real training run
 
 ```powershell
-python -m train.pretrain_bc_locomotion --phase movement_fluency
-python -m train.train_curriculum --phase movement_fluency `
+python -m brawl.pipelines.llc.pretrain_bc --phase movement_fluency
+python -m brawl.pipelines.llc.train_curriculum --phase movement_fluency `
     --resume train/models/llc_movement_fluency_bc_init.zip `
     --log-csv --eval-every-steps 20000
-python -m analysis.plot_learning_curves --metric success
+python -m brawl.analysis.plot_learning_curves --metric success
 ```
 
 `movement_fluency` first, not recovery: it is the simplest goal, it exercises
@@ -116,7 +116,7 @@ there fastest.
 ## State of the repo
 
 - 206 tests passing
-- `env.py` 1273 -> 758 lines; `capture/`, `control/`, `reward/ui_probe.py`,
-  `reward/providers.py` split out
+- `brawl/env/live.py` 1273 -> 758 lines; `capture/`, `control/`, `brawl/reward/ui_probe.py`,
+  `brawl/reward/providers.py` split out
 - CI runs the suite plus an entry-point launch check on every push
 - MIT licensed, `CITATION.cff` present

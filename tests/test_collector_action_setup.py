@@ -17,9 +17,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from action_space import ACTION_DIM, Action, components
-from train.collect_bc_locomotion_demos import resolve_allowed_actions
-from train.curriculum_config import PHASES, build_phase_spec
+from brawl.control.action_space import ACTION_DIM, Action, components
+from brawl.pipelines.llc.collect_demos import resolve_allowed_actions
+from brawl.pipelines.llc.curriculum_config import PHASES, build_phase_spec
 
 
 @pytest.mark.parametrize("phase", PHASES)
@@ -107,7 +107,7 @@ def test_visual_confirmation_gate_is_conditional_on_the_classifier() -> None:
     dropped correctly while every episode was rejected and the run saved nothing.
     A zero-yield collection looks identical to a broken teacher from the outside.
     """
-    source = Path("train/collect_bc_locomotion_demos.py").read_text(encoding="utf-8")
+    source = Path("brawl/pipelines/llc/collect_demos.py").read_text(encoding="utf-8")
 
     assert "visual_confirmation_required = bool(" in source, (
         "the run-level flag that mirrors --no-weapon-classifier is missing"

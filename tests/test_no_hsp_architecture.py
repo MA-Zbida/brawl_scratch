@@ -6,9 +6,9 @@ from pathlib import Path
 
 
 def test_hsp_runtime_modules_are_removed() -> None:
-    assert importlib.util.find_spec("hierarchical.hsp_env") is None
-    assert importlib.util.find_spec("train.train_phase3_hsp") is None
-    assert importlib.util.find_spec("train.hsp_guard") is None
+    assert importlib.util.find_spec("brawl.pipelines.llc.hsp_env") is None
+    assert importlib.util.find_spec("brawl.pipelines.llc.train_phase3_hsp") is None
+    assert importlib.util.find_spec("brawl.training.hsp_guard") is None
 
 
 def test_core_training_and_evaluation_import_without_hsp_modules() -> None:

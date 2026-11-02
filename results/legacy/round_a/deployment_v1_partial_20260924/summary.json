@@ -1,0 +1,38 @@
+[
+  {
+    "run": "train\\models\\round_a\\deployment_v1_mlp_s42",
+    "candidate": "mlp",
+    "seed": 42,
+    "training_step": 0,
+    "label": "baseline",
+    "execution_mode": "deployment",
+    "protocol_id": "5c281a8443306801e80e0d7d50a20df502680ba5bf560344229b457d123dc743",
+    "cadence": {
+      "evaluation": {
+        "intervals": 24345,
+        "overruns": 6856,
+        "seconds": 899.3878121995513,
+        "measured_hz": 27.06841216856346,
+        "overrun_fraction": 0.28161840213596223
+      }
+    },
+    "seconds": 900.0207790999993,
+    "blocks": 2,
+    "stocks_taken": 8.0,
+    "stocks_lost": 7.0,
+    "damage_dealt": 2033.0102495543683,
+    "damage_received": 989.3280228758168,
+    "recoveries": 159,
+    "offstage_events": 235,
+    "offstage_deaths": 1,
+    "pickup_opportunities": 123,
+    "armed_after_opportunity": 35,
+    "eligible_unarmed_seconds": 80.92545339996286,
+    "uncertain_seconds": 126.36233960009122,
+    "censored_recoveries": 75,
+    "censored_pickup_opportunities": 88,
+    "net_stocks_per_minute": 0.06666512750961001,
+    "damage_trade_per_minute": 69.57720872103934,
+    "elapsed_run_hours": 0.2501010840833341
+  }
+]

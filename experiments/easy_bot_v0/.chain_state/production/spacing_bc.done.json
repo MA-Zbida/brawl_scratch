@@ -1,9 +1,0 @@
-{
-    "stage":  "spacing_bc",
-    "source":  "recovered_after_postcondition_failure",
-    "completed_at":  "2026-08-25T19:28:19.7670740Z",
-    "artifacts":  [
-                      "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\train\\models\\easy_bot_v0\\llc_spacing_neutral_bc_init.zip",
-                      "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\train\\models\\easy_bot_v0\\llc_spacing_neutral_bc_init.zip.metadata.json"
-                  ]
-}

@@ -1,0 +1,190 @@
+[
+  {
+    "run": "train\\models\\round_a\\deployment_v1_mlp_s42",
+    "candidate": "mlp",
+    "seed": 42,
+    "protocol": {
+      "schema_version": 1,
+      "timesteps": 2000000,
+      "control_hz": 30.0,
+      "image_width": 256,
+      "image_height": 144,
+      "n_steps": 512,
+      "batch_size": 256,
+      "n_epochs": 4,
+      "learning_rate": 0.0001,
+      "ent_coef": 0.01,
+      "bc_epochs": 40,
+      "bc_learning_rate": 0.0003,
+      "sequence_length": 32,
+      "split_seed": 42,
+      "eval_every": 250000,
+      "baseline_seconds": 900.0,
+      "interim_seconds": 300.0,
+      "final_seconds": 3600.0,
+      "eval_block_seconds": 600.0,
+      "window_steps": 1200,
+      "checkpoint_every": 50000,
+      "execution_mode": "deployment"
+    },
+    "protocol_id": "5c281a8443306801e80e0d7d50a20df502680ba5bf560344229b457d123dc743",
+    "artifacts": {
+      "initializer": {
+        "path": "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\train\\models\\round_a\\pilot_bc_mlp_40ep_s42\\bc_init.zip",
+        "sha256": "eb279598aa0a505cc2e74e1711e511cb6f2222a804496c52b0f3e0f67da6704d"
+      },
+      "demos": {
+        "path": "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\train\\models\\round_a\\collection_pilot_v1\\demos\\dataset.json",
+        "sha256": "d510b6f635ff25671a22f4778962263f7e6c15af0b062de90615c43d0ba8888a"
+      },
+      "classifier": {
+        "path": "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\train\\models\\weapon_classifier_r18_live_v1.pt",
+        "sha256": "7a672ff8876b6236e3c93f4a2c14b12d16dbae6615e65a21404f15207c71c146"
+      },
+      "detector": {
+        "path": "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\feature_extractor\\yolo\\best.engine",
+        "sha256": "becdbec2eb857a8f718b22b9ebf15b7ac0ef303be495c18ac5b8b9bd6976827b"
+      }
+    },
+    "status": {
+      "status": "stopped",
+      "error": "",
+      "stage": "train"
+    },
+    "qualification": {
+      "passed": true,
+      "drills": {
+        "weapon": [
+          {
+            "accepted": false,
+            "reason": "weapon_dropped_after_pickup",
+            "labels": 47,
+            "pickup_requests": 1,
+            "peak_hold_steps": 8,
+            "negative_refreshes": 4
+          },
+          {
+            "accepted": true,
+            "reason": "accepted",
+            "labels": 160,
+            "pickup_requests": 6,
+            "peak_hold_steps": 41,
+            "negative_refreshes": 0
+          }
+        ],
+        "recovery": [
+          {
+            "accepted": true,
+            "reason": "accepted",
+            "labels": 41,
+            "pickup_requests": 0,
+            "peak_hold_steps": 0,
+            "negative_refreshes": 0
+          }
+        ],
+        "combat": [
+          {
+            "accepted": true,
+            "reason": "accepted",
+            "labels": 386,
+            "pickup_requests": 0,
+            "peak_hold_steps": 0,
+            "negative_refreshes": 0
+          }
+        ]
+      },
+      "skills_passed": true,
+      "execution_mode": "deployment",
+      "timing_valid": true,
+      "decision_interval_p95_s": 0.04970505000346748,
+      "measured_hz": 26.599854171383637,
+      "overrun_fraction": 0.32429718875502006,
+      "cadence_passed": false,
+      "cadence_acceptable": true
+    },
+    "initialization": {
+      "source": "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\train\\models\\round_a\\pilot_bc_mlp_40ep_s42\\bc_init.zip",
+      "sha256": "eb279598aa0a505cc2e74e1711e511cb6f2222a804496c52b0f3e0f67da6704d",
+      "source_contract": {
+        "candidate": "mlp",
+        "schema_version": 1,
+        "timesteps": 4096,
+        "control_hz": 30.0,
+        "image_width": 256,
+        "image_height": 144,
+        "n_steps": 512,
+        "batch_size": 256,
+        "n_epochs": 4,
+        "learning_rate": 0.0001,
+        "ent_coef": 0.01,
+        "bc_epochs": 40,
+        "bc_learning_rate": 0.0003,
+        "sequence_length": 32,
+        "split_seed": 42,
+        "eval_every": 4096,
+        "baseline_seconds": 60.0,
+        "interim_seconds": 60.0,
+        "final_seconds": 120.0,
+        "eval_block_seconds": 60.0,
+        "window_steps": 1200,
+        "checkpoint_every": 2048,
+        "dataset_sha256": "d510b6f635ff25671a22f4778962263f7e6c15af0b062de90615c43d0ba8888a"
+      },
+      "destination_contract": {
+        "execution_mode": "deployment",
+        "candidate": "mlp",
+        "schema_version": 1,
+        "timesteps": 2000000,
+        "control_hz": 30.0,
+        "image_width": 256,
+        "image_height": 144,
+        "n_steps": 512,
+        "batch_size": 256,
+        "n_epochs": 4,
+        "learning_rate": 0.0001,
+        "ent_coef": 0.01,
+        "bc_epochs": 40,
+        "bc_learning_rate": 0.0003,
+        "sequence_length": 32,
+        "split_seed": 42,
+        "eval_every": 250000,
+        "baseline_seconds": 900.0,
+        "interim_seconds": 300.0,
+        "final_seconds": 3600.0,
+        "eval_block_seconds": 600.0,
+        "window_steps": 1200,
+        "checkpoint_every": 50000,
+        "dataset_sha256": "d510b6f635ff25671a22f4778962263f7e6c15af0b062de90615c43d0ba8888a"
+      },
+      "source_training_stage": "bc_final_epoch",
+      "source_environment_steps": 0,
+      "interpretation": "Reuse fixed BC weights; no PPO interactions reset or discarded."
+    },
+    "training_summary": {
+      "status": "failed",
+      "requested_interactions": 2000000,
+      "rollout_budget": 2000384,
+      "actual_training_interactions": 6286,
+      "cumulative_training_interactions": 6286,
+      "total_environment_interactions": 30646,
+      "cadence": {
+        "evaluation": {
+          "intervals": 24345,
+          "overruns": 6856,
+          "seconds": 899.3878121995513,
+          "measured_hz": 27.06841216856346,
+          "overrun_fraction": 0.28161840213596223
+        },
+        "train": {
+          "intervals": 6287,
+          "overruns": 1952,
+          "seconds": 231.9916483000634,
+          "measured_hz": 27.10011350006983,
+          "overrun_fraction": 0.3104819468745029
+        }
+      },
+      "elapsed_seconds": 1134.7579006000014,
+      "optimizer_gap_seconds": 1.5801230000070063
+    }
+  }
+]

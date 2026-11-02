@@ -122,10 +122,10 @@ python -c "from ultralytics import YOLO; YOLO('assets/yolo/best.pt').export(form
 ```
 
 `half=True` matters on 4 GB of VRAM. Keep `imgsz` consistent with the inference
-size in [`brawl/perception/yolo.py`](../feature_extractor/yolo/extract.py);
+size in [`brawl/perception/yolo.py`](../brawl/perception/yolo.py);
 training and inference resolution must agree.
 
-[`Extract`](../feature_extractor/yolo/extract.py) reads class names from the model's
+[`Extract`](../brawl/perception/yolo.py) reads class names from the model's
 own metadata, so `['character', 'indicator_self', 'weapon']` from `data.yaml` is
 carried through automatically — there is no hardcoded list to keep in sync.
 

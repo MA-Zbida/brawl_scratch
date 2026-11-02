@@ -13,7 +13,7 @@ two failures need opposite fixes:
 * **wrong crop** (off-centre, wrong fighter, clipped) -- fix `_weapon_classifier_boxes`
 * **right crop, wrong label** -- retrain on crops cut the way inference cuts them
 
-Writes `weapon_probe/<n>_<name>_<pred>_<conf>.png` plus a side-by-side sheet.
+Writes `runs/legacy/weapon_classifier/probe/<n>_<name>_<pred>_<conf>.png` plus a side-by-side sheet.
 """
 
 from __future__ import annotations

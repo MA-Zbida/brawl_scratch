@@ -6,7 +6,7 @@ emulator — on a single consumer laptop (RTX 3050 Ti, 4 GB VRAM).
 > **Status: active research.** The perception → state → control stack runs end to end against the
 > live game. Goal-conditioned skill pretraining is under active development and has not yet
 > cleared its retention gates; the goal-free final agent is implemented but not yet trained to
-> mastery. Numbers in `outputs/` are development logs, not published results.
+> mastery. Numbers in `runs/legacy/` are development logs, not published results.
 > Known open problems are listed in [Known Issues](#known-issues) — they are documented on purpose.
 
 ![Brawlhalla training-mode reference frame](assets/screenshots/stage-reference-1080p.png)
@@ -122,15 +122,15 @@ Collect teacher demonstrations, pretrain, and fine-tune the skill policy:
 ```powershell
 python -m brawl.pipelines.llc.collect_heuristic_demos --episodes-per-phase 50
 python -m brawl.pipelines.llc.pretrain_bc --phase movement_fluency
-python -m brawl.pipelines.llc.train_curriculum --phase movement_fluency --resume train/models/llc_movement_fluency_bc_init.zip
+python -m brawl.pipelines.llc.train_curriculum --phase movement_fluency --resume runs/legacy/llc/llc_movement_fluency_bc_init.zip
 ```
 
 Once all five families pass retention, initialize and train the final agent:
 
 ```powershell
-python -m brawl.pipelines.final_agent.transfer_skill_checkpoint --skill-checkpoint train/models/llc_all_skills_llc.zip --output train/models/final_agent/final_agent_init.zip --device cpu
-python -m brawl.pipelines.final_agent.run --resume train/models/final_agent/final_agent_init.zip --device cpu
-python -m brawl.pipelines.final_agent.run_match --model train/models/final_agent/final_agent.zip --device cpu
+python -m brawl.pipelines.final_agent.transfer_skill_checkpoint --skill-checkpoint runs/legacy/llc/llc_all_skills_llc.zip --output runs/legacy/final_agent/final_agent_init.zip --device cpu
+python -m brawl.pipelines.final_agent.run --resume runs/legacy/final_agent/final_agent_init.zip --device cpu
+python -m brawl.pipelines.final_agent.run_match --model runs/legacy/final_agent/final_agent.zip --device cpu
 ```
 
 The advisor tool reports what the project state says should happen next:
@@ -196,10 +196,10 @@ Documented rather than hidden. These are the current blockers, in priority order
 - [`docs/setup.md`](docs/setup.md) — environment, CUDA, TensorRT engine build
 - [`docs/architecture.md`](docs/architecture.md) — pipeline internals
 - [`docs/observation-space.md`](docs/observation-space.md) — every state dimension and its provenance
-- [`docs/curriculum.md`](docs/curriculum.md) — goal spaces, rewards, gates
-- [`docs/training.md`](docs/training.md) — collection, BC, PPO, evaluation
-- [`LLC_MASTERY_HANDOFF.md`](LLC_MASTERY_HANDOFF.md) — operational run protocol
-- [`PROJECT_STATE.md`](PROJECT_STATE.md) — current development state
+- [`docs/pipelines/llc/curriculum.md`](docs/pipelines/llc/curriculum.md) — goal spaces, rewards, gates
+- [`docs/pipelines/llc/training.md`](docs/pipelines/llc/training.md) — collection, BC, PPO, evaluation
+- [`research/archive/LLC_MASTERY_HANDOFF.md`](research/archive/LLC_MASTERY_HANDOFF.md) — operational run protocol
+- [`research/archive/PROJECT_STATE.md`](research/archive/PROJECT_STATE.md) — current development state
 
 ## License
 

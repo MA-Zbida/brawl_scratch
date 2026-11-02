@@ -1,9 +1,0 @@
-{
-    "stage":  "combat_ppo",
-    "source":  "executed",
-    "completed_at":  "2026-08-25T20:26:06.4308276Z",
-    "artifacts":  [
-                      "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\train\\models\\easy_bot_v0\\llc_combat_execution.zip",
-                      "C:\\Users\\mazbi\\OneDrive\\Bureau\\brawl_scratch\\train\\models\\easy_bot_v0\\llc_combat_execution.zip.metadata.json"
-                  ]
-}

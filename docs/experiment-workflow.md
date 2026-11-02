@@ -3,7 +3,7 @@
 The baseline is `structured27_bc_ppo_v1`: structured observations plus fixed
 weapon geometry, a feedforward 128x128 actor/critic, heuristic BC, then plain CPU
 PPO. This is not a goal-conditioned, recurrent, anchored-replay or CNN policy.
-The separate [Round A benchmark](round-a-benchmark.md) now supplies recurrent and
+The separate [Round A benchmark](pipelines/round_a/benchmark.md) now supplies recurrent and
 visual-plus-structured adapters with aligned data and timed evaluation. They are
 not switches in this legacy baseline configuration, and are not yet live-qualified.
 
@@ -11,7 +11,7 @@ not switches in this legacy baseline configuration, and are not yet live-qualifi
 
 | Responsibility | Current location |
 | --- | --- |
-| Live capture, controls, state | `brawl/env/live.py`, `capture/`, `control/`, `feature_extractor/` |
+| Live capture, controls, state | `brawl/env/live.py`, `brawl/capture/`, `brawl/control/`, `brawl/state/` |
 | Match objective and reporting windows | `brawl/reward/match_objective.py`, `brawl/env/match.py` |
 | Structured representation | `brawl/pipelines/primitive27/features.py` |
 | Model construction, BC and demo contract | `brawl/pipelines/primitive27/training.py` |
@@ -39,11 +39,11 @@ From the repository root in PowerShell:
 
 ```powershell
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.primitive27.run `
-  --experiment experiments\baselines\structured27_bc_ppo_v1.json `
+  --experiment configs\legacy\primitive27\structured27_bc_ppo_v1.json `
   --stage train `
-  --resume train\models\primitive27\pickup_geometry_v1\bc_init.zip `
-  --demos train\models\primitive27\20260922-204156_198297\demos.npz `
-  --world-replay outputs\world_replay\primitive27
+  --resume runs\legacy\primitive27\pickup_geometry_v1\bc_init.zip `
+  --demos runs\legacy\primitive27\20260922-204156_198297\demos.npz `
+  --world-replay data\world_replay\primitive27
 ```
 
 The baseline file specifies the completed pilot's 4096-step budget, 512-step
@@ -82,7 +82,7 @@ CLI/config cannot bypass live qualification or the retention guard.
 - Existing run directories are never reused automatically.
 
 The historical pilot is identified in
-`experiments/baselines/structured27_bc_ppo_v1.artifacts.json`. It references files
+`results/legacy/primitive27/structured27_bc_ppo_v1.artifacts.json`. It references files
 in place with hashes; it is not a backup. Perception hashes were observed when
 freezing the baseline, not recorded retroactively as historical certainty.
 No demos, checkpoints or videos were moved or deleted.

@@ -250,6 +250,24 @@ def test_weapon_success_and_pickup_bonus_wait_for_visual_confirmation() -> None:
     assert confirmed_truncated
 
 
+def test_low_confidence_unarmed_does_not_clear_visual_confirmation(monkeypatch):
+    base = _VisualWeaponEnv()
+    spec = replace(build_phase_spec("weapon_acquisition"), reset_drop_weapon_when_armed=False)
+    env = StageGoalEnv(base, spec)
+    env.reset(seed=7)
+    env.step(int(Action.PICKUP))
+    env.step(int(Action.NOOP))
+    original = base.step
+
+    def uncertain(action):
+        obs, reward, terminated, truncated, info = original(action)
+        info.update(player_weapon_visual_armed=0., player_weapon_visual_confidence=.6)
+        return obs, reward, terminated, truncated, info
+
+    monkeypatch.setattr(base, "step", uncertain)
+    assert env.step(int(Action.NOOP))[-1]["weapon_visual_confirmed"] == 1.
+
+
 class _SpacingSafetyEnv(DummyStageEnv):
     def __init__(self, *, offstage: bool) -> None:
         super().__init__()

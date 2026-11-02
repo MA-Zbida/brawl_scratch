@@ -21,6 +21,42 @@ def test_final_agent_config_is_goal_free_cpu_match_training() -> None:
     assert cfg.timesteps == 0
 
 
+@pytest.mark.parametrize('source', ['action', 'visual_fusion'])
+def test_weapon_state_source_reaches_final_env_without_changing_policy_device(source, monkeypatch, tmp_path):
+    from train import final_agent
+    checkpoint = tmp_path / 'new classifier.pt'
+    checkpoint.write_bytes(b'synthetic classifier')
+    cfg = parse_args(['--resume', 'final.zip', '--weapon-state-source', source,
+                      '--weapon-classifier-checkpoint', str(checkpoint)])
+    monkeypatch.setattr(final_agent, 'BrawlDeepEnv', lambda **kw: kw['config'])
+    env_cfg = final_agent._make_env(cfg)
+    assert cfg.device == 'cpu'
+    assert env_cfg.weapon_classifier_enabled is (source == 'visual_fusion')
+    assert env_cfg.weapon_classifier_interval == 4
+    assert env_cfg.weapon_classifier_checkpoint == str(checkpoint)
+    assert parse_args(['--resume', 'final.zip']).weapon_state_source == 'action'
+
+
+def test_default_classifier_checkpoint_preserves_existing_runs(monkeypatch):
+    from env import EnvConfig
+    from train import final_agent
+    cfg = parse_args(['--resume', 'final.zip'])
+    monkeypatch.setattr(final_agent, 'BrawlDeepEnv', lambda **kw: kw['config'])
+    assert cfg.weapon_classifier_checkpoint == EnvConfig().weapon_classifier_checkpoint
+    assert final_agent._make_env(cfg).weapon_classifier_enabled is False
+
+
+def test_missing_visual_classifier_fails_before_env_creation(monkeypatch, tmp_path):
+    from train import final_agent
+    cfg = parse_args(['--resume', 'final.zip', '--weapon-state-source', 'visual_fusion',
+                      '--weapon-classifier-checkpoint', str(tmp_path / 'missing.pt')])
+    def unexpected_env(**kwargs):
+        pytest.fail('Environment must not be created with a missing classifier checkpoint')
+    monkeypatch.setattr(final_agent, 'BrawlDeepEnv', unexpected_env)
+    with pytest.raises(FileNotFoundError, match='missing.pt'):
+        final_agent._make_env(cfg)
+
+
 @pytest.mark.parametrize(
     "obsolete",
     ["--macro-steps", "--goal-period", "--hsp-checkpoint", "--high-level-policy"],

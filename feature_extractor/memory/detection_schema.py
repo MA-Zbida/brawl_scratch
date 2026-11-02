@@ -26,7 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable, Optional, Sequence
 
-from feature_extractor.memory.utils import bbox_center, euclidian
+from feature_extractor.memory.utils import bbox_center, bbox_size, euclidian
 
 # ── Class names ─────────────────────────────────────────────────────────────
 CHARACTER_CLASS = "character"
@@ -38,6 +38,7 @@ LEGACY_OPPONENT_CLASSES = ("op", "op1", "op2")
 LEGACY_WEAPON_CLASSES = ("weapons",)
 
 CURRENT_CLASS_NAMES: tuple[str, ...] = (CHARACTER_CLASS, INDICATOR_CLASS, WEAPON_CLASS)
+IDENTITY_CONTRACT_VERSION = "bounded_triangle_v2"
 LEGACY_CLASS_NAMES: tuple[str, ...] = ("agent", "op", "op1", "op2", "weapons")
 
 # Opponent weapon state is a legacy-only signal: it came from the op1/op2 class
@@ -68,7 +69,16 @@ OPPONENT_WEAPON_STATE_FROM_CLASS = {"op": 0.0, "op1": 1.0, "op2": 2.0}
 INDICATOR_HORIZONTAL_WEIGHT = 2.0
 INDICATOR_VERTICAL_WEIGHT = 1.0
 INDICATOR_MAX_MATCH_SCORE = 0.0988
-INDICATOR_ABOVE_TOLERANCE = 0.01
+# The historical score remains an outer plausibility envelope. Ranking inside
+# it now uses body-height offset error, then requires a runner-up margin; old
+# calibration acceptance figures do not measure this complete resolver.
+
+# Conservative association gates, not detector-confidence thresholds. A short
+# abstention costs fewer bad state updates than silently adopting the opponent.
+INDICATOR_MIN_MARGIN = 0.012
+FALLBACK_MAX_DISTANCE = 0.06
+FALLBACK_MIN_MARGIN = 0.012
+IDENTITY_HOLD_SECONDS = 0.15
 
 
 @dataclass
@@ -125,26 +135,31 @@ def match_indicator_to_character(
     indicator = max(indicators, key=lambda d: float(d.get("confidence", 0.0)))
     ix, iy = bbox_center(indicator)
 
-    best: Optional[dict] = None
-    best_score = float("inf")
+    candidates: list[tuple[float, dict]] = []
 
     for character in characters:
         cx, cy = bbox_center(character)
         vertical = cy - iy
-        # The indicator sits above the head; a character above it is not the one.
-        if vertical < -INDICATOR_ABOVE_TOLERANCE:
+        _, height = bbox_size(character)
+        # A box at triangle height is often the OTHER fighter during an aerial
+        # overlap. The former max(0, vertical) score rewarded that wrong match.
+        if height <= 0.0 or vertical < 0.2 * height:
             continue
+        if 2.0 * abs(cx - ix) + vertical > max_score:
+            continue
+        expected_vertical = height / 2.0 + 0.01
         score = (
             INDICATOR_HORIZONTAL_WEIGHT * abs(cx - ix)
-            + INDICATOR_VERTICAL_WEIGHT * max(0.0, vertical)
+            + INDICATOR_VERTICAL_WEIGHT * abs(vertical - expected_vertical)
         )
-        if score < best_score:
-            best_score = score
-            best = character
+        candidates.append((score, character))
 
-    if best is None or best_score > max_score:
+    candidates.sort(key=lambda item: item[0])
+    if not candidates:
         return None, float("inf")
-    return best, best_score
+    if len(candidates) > 1 and candidates[1][0] - candidates[0][0] < INDICATOR_MIN_MARGIN:
+        return None, float("inf")
+    return candidates[0][1], candidates[0][0]
 
 
 def _nearest(detections: Sequence[dict], xy: Optional[tuple[float, float]]) -> Optional[dict]:
@@ -156,6 +171,29 @@ def _nearest(detections: Sequence[dict], xy: Optional[tuple[float, float]]) -> O
         detections,
         key=lambda d: (euclidian(bbox_center(d), xy), -float(d.get("confidence", 0.0))),
     )
+
+
+def _bounded_nearest(
+    detections: Sequence[dict],
+    xy: Optional[tuple[float, float]],
+    other_xy: Optional[tuple[float, float]],
+) -> Optional[dict]:
+    if xy is None:
+        return None
+    ranked = sorted(
+        ((euclidian(bbox_center(d), xy), d) for d in detections),
+        key=lambda item: item[0],
+    )
+    if not ranked or ranked[0][0] > FALLBACK_MAX_DISTANCE:
+        return None
+    distance, best = ranked[0]
+    if len(ranked) > 1 and ranked[1][0] - distance < FALLBACK_MIN_MARGIN:
+        return None
+    if other_xy is not None:
+        other_distance = euclidian(bbox_center(best), other_xy)
+        if other_distance - distance < FALLBACK_MIN_MARGIN:
+            return None
+    return best
 
 
 def resolve(
@@ -194,13 +232,20 @@ def resolve(
     if agent is None:
         # Indicator missing or unmatched: carry the previous identity forward and
         # mark the answer as unobserved.
-        agent = _nearest(characters, last_agent_xy) if last_agent_xy is not None else None
+        # An ambiguous visible indicator must not be overruled by proximity.
+        # When absent, require a bounded, uncontested continuation of identity.
+        agent = _bounded_nearest(characters, last_agent_xy, last_opponent_xy) if not indicators else None
         identity_source = "carry_forward" if agent is not None else "none"
         score = float("inf")
 
     remaining = [c for c in characters if c is not agent]
-    primary = _nearest(remaining, last_opponent_xy)
-    ordered = ([primary] + [o for o in remaining if o is not primary]) if primary else []
+    if identity_source == "indicator":
+        primary = _nearest(remaining, last_opponent_xy)
+        ordered = ([primary] + [o for o in remaining if o is not primary]) if primary else []
+    else:
+        # Unassigned does not mean opponent: it could be our missing player.
+        primary = _bounded_nearest(remaining, last_opponent_xy, last_agent_xy) if not indicators else None
+        ordered = [primary] if primary is not None else []
 
     return FighterResolution(
         agent=agent,

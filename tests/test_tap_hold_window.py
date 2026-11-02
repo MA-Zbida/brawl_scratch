@@ -11,11 +11,19 @@ import sys
 from pathlib import Path
 
 import pytest
+from itertools import count
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from action_space import Action
 from env import EnvConfig
+
+
+@pytest.fixture(autouse=True)
+def poll_clock(monkeypatch):
+    # Tests step the loop without inference; explicitly supply real poll time.
+    ticks = count()
+    monkeypatch.setattr('env.time.perf_counter', lambda: next(ticks) * .025)
 
 
 class RecordingController:
@@ -52,8 +60,8 @@ def _env(tap_latch_steps: int = 1):
     env.config = EnvConfig(tap_latch_steps=tap_latch_steps)
     env.input_controller = RecordingController()
     env._mirrored = False
-    from action_space import TAP_KEYS
-    env._tap_latch_remaining = {key: 0 for key in sorted(TAP_KEYS)}
+    from control.taps import TapSequencer
+    env._tap_sequencer = TapSequencer(tap_latch_steps)
     return env
 
 
@@ -111,7 +119,7 @@ def test_release_all_inputs_clears_latched_taps():
 
     env._release_all_inputs()
     assert "num6" not in ctl.held
-    assert all(v == 0 for v in env._tap_latch_remaining.values())
+    assert not env._tap_sequencer.held
 
 
 @pytest.mark.parametrize(
@@ -139,6 +147,62 @@ def test_null_controller_supports_key_down_up():
     controller.key_up("num5")
     controller.set_pressed({"a"})
     controller.reset()
+
+
+def test_repeated_heavy_releases_instead_of_refreshing_forever(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr('env.time.perf_counter', lambda: now[0])
+    env = _env()
+    env._apply_action(int(Action.HEAVY_TOWARD))
+    now[0] += .025
+    env._apply_action(int(Action.HEAVY_TOWARD))
+    assert 'num6' not in env.input_controller.held
+    now[0] += .025
+    env._apply_action(int(Action.HEAVY_TOWARD))
+    assert 'num6' in env.input_controller.held
+
+
+@pytest.mark.parametrize('action,channel', [(Action.JUMP, 'jump'),
+                                           (Action.DODGE_SPOT, 'dodge'),
+                                           (Action.PICKUP, 'pickup')])
+def test_resource_inference_only_receives_new_presses(monkeypatch, action, channel):
+    from test_observation_window import make_env
+    now = [10.0]
+    monkeypatch.setattr('env.time.perf_counter', lambda: now[0])
+    env, _ = make_env(action_repeat_min_steps=1, action_repeat_max_steps=1)
+    seen = {'jump': [], 'dodge': [], 'pickup': []}
+
+    def logic(_detections, action_jump, action_dodge):
+        seen['jump'].append(action_jump)
+        seen['dodge'].append(action_dodge)
+        env.memory.player.exists = True
+
+    monkeypatch.setattr(env, '_update_game_logic', logic)
+    monkeypatch.setattr(env.memory, 'update_player_weapon_from_action',
+                        lambda action_pick_throw, dist_to_weapon: seen['pickup'].append(action_pick_throw))
+    try:
+        for _ in range(3):
+            env.step(int(action))
+            now[0] += .025
+        assert seen[channel] == [True, False, True]
+    finally:
+        env.close()
+
+
+def test_match_optimizer_release_clears_sequencer(monkeypatch):
+    from test_observation_window import make_env
+    from train.match_env import MatchTrainingEnv
+    now = [10.0]
+    monkeypatch.setattr('env.time.perf_counter', lambda: now[0])
+    base, _ = make_env(action_repeat_min_steps=1, action_repeat_max_steps=1)
+    match = MatchTrainingEnv(base, mode='training_room')
+    try:
+        base._apply_action(int(Action.JUMP))
+        match.release_inputs()
+        now[0] += .025
+        assert base._apply_action(int(Action.JUMP)) == {'space'}
+    finally:
+        match.close()
 
 
 def test_inputs_are_released_before_the_optimiser_runs():

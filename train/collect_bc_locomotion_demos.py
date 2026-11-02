@@ -36,6 +36,7 @@ from train.curriculum_config import PHASES, build_phase_spec
 from action_space import ACTION_DIM, Action, components, describe
 from train.heuristic_teachers import HeuristicTeacher, RecoverySetupController
 from train.llc_stage_common import StageGoalEnv
+from perception.weapon_evidence import EVIDENCE_VERSION, WeaponEvidence, WeaponHoldGate
 from world_model import WorldReplayRecorder, WorldReplayWriter
 
 
@@ -110,7 +111,7 @@ def parse_args() -> argparse.Namespace:
         "--weapon-drop-grace-steps",
         type=int,
         default=3,
-        help="After pickup, reject the weapon episode only after this many consecutive unarmed observations.",
+        help="Tolerate this many fresh, confident unarmed classifier refreshes after pickup (cached reads do not count).",
     )
     p.add_argument(
         "--weapon-classifier-checkpoint",
@@ -464,6 +465,7 @@ def main() -> None:
     # attached. Demanding it with --no-weapon-classifier rejects every episode
     # while the teacher picks up and drops perfectly -- a silent zero-yield run.
     visual_confirmation_required = bool(getattr(args, 'weapon_classifier', True))
+    weapon_drop_grace_unit = "fresh_confident_refreshes" if visual_confirmation_required else "control_steps"
     enforce_recovery_sequence = bool(args.enforce_recovery_sequence and phase_lower == "recovery_mastery")
     min_episode_steps = max(1, int(args.min_episode_steps))
     weapon_hold_steps_required = max(1, int(args.weapon_hold_steps))
@@ -535,7 +537,7 @@ def main() -> None:
         print(
             "Weapon quality gate: start unarmed -> pickup transition -> "
             f"hold for {weapon_hold_steps_required} consecutive steps "
-            f"(drop grace={weapon_drop_grace_steps})"
+            f"(drop grace={weapon_drop_grace_steps} {weapon_drop_grace_unit})"
         )
         if args.teacher == "heuristic":
             print("Weapon reset warmup: if an episode starts armed, tap NUM5 before recording the next episode")
@@ -654,10 +656,15 @@ def main() -> None:
             recovery_arming = RecoveryArming(required=enforce_recovery_sequence)
             recovery_arm_transition_pending = False
             ep_weapon_started_unarmed = bool(not _obs_has_weapon(obs))
-            ep_weapon_prev_has_weapon = bool(_obs_has_weapon(obs))
             ep_weapon_pickup_seen = False
             ep_weapon_hold_steps = 0
-            ep_weapon_lost_steps_after_pickup = 0
+            evidence_config = getattr(env, "_weapon_evidence", WeaponEvidence())
+            weapon_gate = WeaponHoldGate(
+                required_steps=weapon_hold_steps_required,
+                drop_grace=weapon_drop_grace_steps,
+                require_visual=visual_confirmation_required,
+                evidence=WeaponEvidence(min_confidence=evidence_config.min_confidence),
+            )
             ep_weapon_hold_success = False
             ep_weapon_dropped_after_pickup = False
 
@@ -743,29 +750,11 @@ def main() -> None:
 
                 if is_weapon_acquisition:
                     curr_has_weapon = _obs_has_weapon(next_obs)
-                    visual_confirmed = bool(
-                        not visual_confirmation_required
-                        or float(info.get("weapon_visual_confirmed", 0.0)) > 0.5
-                    )
-                    pickup_now = bool(
-                        ep_weapon_started_unarmed
-                        and curr_has_weapon
-                        and visual_confirmed
-                        and not ep_weapon_pickup_seen
-                    )
-                    if pickup_now:
-                        ep_weapon_pickup_seen = True
-                    if ep_weapon_pickup_seen:
-                        if curr_has_weapon and visual_confirmed:
-                            ep_weapon_hold_steps += 1
-                            ep_weapon_lost_steps_after_pickup = 0
-                        else:
-                            ep_weapon_hold_steps = 0
-                            ep_weapon_lost_steps_after_pickup += 1
-                            if ep_weapon_lost_steps_after_pickup > weapon_drop_grace_steps:
-                                ep_weapon_dropped_after_pickup = True
-                    ep_weapon_hold_success = bool(ep_weapon_pickup_seen and ep_weapon_hold_steps >= weapon_hold_steps_required)
-                    ep_weapon_prev_has_weapon = curr_has_weapon
+                    weapon_gate.update(curr_has_weapon, info)
+                    ep_weapon_pickup_seen = weapon_gate.pickup_seen
+                    ep_weapon_hold_steps = weapon_gate.hold_steps
+                    ep_weapon_dropped_after_pickup = weapon_gate.dropped
+                    ep_weapon_hold_success = weapon_gate.success
 
                 seq_phase = int(info.get("sequential_phase", 0))
                 seq_step1_transition = bool(float(info.get("sequential_step1_transition", 0.0)) > 0.5)
@@ -908,7 +897,9 @@ def main() -> None:
                     f" weapon(start_unarmed={int(ep_weapon_started_unarmed)}, "
                     f"pickup={int(ep_weapon_pickup_seen)}, "
                     f"hold={ep_weapon_hold_steps}/{weapon_hold_steps_required}, "
-                    f"dropped={int(ep_weapon_dropped_after_pickup)})"
+                    f"dropped={int(ep_weapon_dropped_after_pickup)}, "
+                    f"negative_refreshes={weapon_gate.negative_refreshes}, "
+                    f"evidence_age={weapon_gate.evidence.age_steps})"
                     if is_weapon_acquisition
                     else ""
                 )
@@ -1039,6 +1030,8 @@ def main() -> None:
         weapon_reset_failures=np.asarray([weapon_reset_failures], dtype=np.int64),
         weapon_hold_steps_required=np.asarray([weapon_hold_steps_required], dtype=np.int64),
         weapon_drop_grace_steps=np.asarray([weapon_drop_grace_steps], dtype=np.int64),
+        weapon_evidence_version=np.asarray([EVIDENCE_VERSION]),
+        weapon_drop_grace_unit=np.asarray([weapon_drop_grace_unit]),
         teacher=np.asarray([args.teacher]),
         phase=np.asarray([args.phase]),
     )

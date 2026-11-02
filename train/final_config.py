@@ -40,6 +40,8 @@ class FinalAgentConfig:
     max_grad_norm: float = 0.5
     yolo_every: int = 1
     log_csv: bool = True
+    weapon_state_source: str = "action"
+    weapon_classifier_checkpoint: str = "train/models/weapon_classifier_r18.pt"
 
     @property
     def goal_conditioning(self) -> bool:
@@ -100,7 +102,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--yolo-every", type=int, default=1)
     parser.add_argument("--log-csv", dest="log_csv", action="store_true", default=True)
     parser.add_argument("--no-log-csv", dest="log_csv", action="store_false")
+    add_weapon_state_argument(parser)
     return parser
+
+
+def add_weapon_state_argument(parser: argparse.ArgumentParser) -> None:
+    """Keep frozen diagnostics and training on the same opt-in sensing contract."""
+    parser.add_argument(
+        "--weapon-state-source", choices=("action", "visual_fusion"), default="action",
+        help="action: existing intent inference; visual_fusion: add the crop classifier every 4 captures",
+    )
+    parser.add_argument(
+        "--weapon-classifier-checkpoint", default=FinalAgentConfig.weapon_classifier_checkpoint,
+        help="Weapon classifier .pt used with --weapon-state-source visual_fusion; does not change policy device",
+    )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> FinalAgentConfig:

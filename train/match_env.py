@@ -58,7 +58,11 @@ class MatchTrainingEnv(gym.Wrapper):
             handle.flush()
 
     def release_inputs(self):
-        self.unwrapped.input_controller.reset()
+        release = getattr(self.unwrapped, '_release_all_inputs', None)
+        if release is not None:
+            release()  # Clear the scheduler as well as physical keys at PPO gaps.
+        else:
+            self.unwrapped.input_controller.reset()
 
     def _rearm_stocks(self):
         # The training arena has unlimited lives, but the pixel provider counts

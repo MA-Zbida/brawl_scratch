@@ -14,11 +14,12 @@ from typing import Optional, Tuple
 import numpy as np
 
 from reward.extract_rgb import get_rgb
-from reward.rgb_to_dmg import get_dmg
+from reward.rgb_to_dmg import decode_damage
 from reward.stock import get_stock
 
 
 class PixelStocksHealthProvider:
+    VERSION = "validated_hud_v2"
     def __init__(
         self,
         ui_regions: dict,
@@ -46,11 +47,19 @@ class PixelStocksHealthProvider:
         self._armed_for_event = True
         self._self_event_lock_until = 0.0
         self._op_event_lock_until = 0.0
+        self._damage_quiet_until = 0.0
+        self._damage_baseline: dict[str, float] = {}
+        self._damage_candidates: dict[str, tuple[float, int]] = {}
+        self.damage_info: dict = {}
 
     def reset(self, preserve_match_state: bool = True) -> None:
         if not bool(preserve_match_state):
             self.self_stocks_left = float(self._initial_self_stocks)
             self.op_stocks_left = float(self._initial_op_stocks)
+            self._damage_baseline.clear()
+            self._damage_candidates.clear()
+            self._damage_quiet_until = 0.0
+            self._self_event_lock_until = self._op_event_lock_until = 0.0
         self._last_stock_signal = 0
         self._stable_stock_signal = 0
         self._stable_stock_frames = 0
@@ -69,6 +78,8 @@ class PixelStocksHealthProvider:
         return frame[y, x]
 
     def __call__(self, frame, detections):
+        now = time.perf_counter()
+        stock_signal = 0
         stock_coord = self.ui_regions.get("stock")
         op_coord = self.ui_regions.get("op")
         agent_coord = self.ui_regions.get("agent")
@@ -92,7 +103,10 @@ class PixelStocksHealthProvider:
                 if self._neutral_frames >= max(1, int(self._stock_confirm_frames)):
                     self._armed_for_event = True
 
-                now = time.perf_counter()
+                # Use the game's credited-stock colour, not a guessed hit timer.
+                # Either flash can obscure both arcs before stock debounce fires.
+                if stock_signal:
+                    self._damage_quiet_until = now + .25
                 stable_confirmed = self._stable_stock_frames >= max(1, int(self._stock_confirm_frames))
                 cooldown_ready = (now - self._last_stock_event_time) >= float(self._stock_event_cooldown_sec)
 
@@ -120,21 +134,35 @@ class PixelStocksHealthProvider:
                 self._stable_stock_frames = 0
                 self._neutral_frames = 0
 
-        self_health = None
-        op_health = None
-
-        if agent_coord is not None:
-            agent_pixel = self._read_pixel(frame, agent_coord)
-            if agent_pixel is not None:
-                agent_rgb = np.asarray(get_rgb(agent_pixel), dtype=np.float32)
-                dmg = float(get_dmg(agent_rgb))
-                self_health = max(0.0, self.max_health - dmg)
-
-        if op_coord is not None:
-            op_pixel = self._read_pixel(frame, op_coord)
-            if op_pixel is not None:
-                op_rgb = np.asarray(get_rgb(op_pixel), dtype=np.float32)
-                dmg = float(get_dmg(op_rgb))
-                op_health = max(0.0, self.max_health - dmg)
-
+        self.damage_info = {"stock_signal": stock_signal, "hud_version": self.VERSION}
+        self_health = self._health_sample(frame, agent_coord, 'self', now)
+        op_health = self._health_sample(frame, op_coord, 'op', now)
         return self.self_stocks_left, self.op_stocks_left, self_health, op_health
+
+    def _health_sample(self, frame, coord, side: str, now: float) -> float | None:
+        pixel = self._read_pixel(frame, coord) if coord is not None else None
+        rgb = get_rgb(pixel) if pixel is not None else None
+        damage = decode_damage(rgb) if rgb is not None else None
+        self.damage_info[f'{side}_damage_rgb'] = rgb
+        self.damage_info[f'{side}_damage_raw'] = damage
+        self.damage_info[f'{side}_damage_valid'] = False
+        self.damage_info[f'{side}_damage_initialized'] = False
+        if damage is None or now < self._damage_quiet_until:
+            self._damage_candidates.pop(side, None)
+            return None
+
+        baseline = self._damage_baseline.get(side)
+        if baseline is not None and damage != baseline:
+            candidate, count = self._damage_candidates.get(side, (damage, 0))
+            count = count + 1 if abs(candidate - damage) <= 2.0 else 1
+            self._damage_candidates[side] = (damage, count)
+            # A true respawn/heal is allowed without credited KO (e.g. suicide),
+            # but a one-frame white flash must never reset the damage baseline.
+            # Confirm increases too: a red animation pixel can match the curve.
+            if count < 3:
+                return None
+        self._damage_candidates.pop(side, None)
+        self._damage_baseline[side] = damage
+        self.damage_info[f'{side}_damage_valid'] = True
+        self.damage_info[f'{side}_damage_initialized'] = baseline is None
+        return max(0.0, self.max_health - damage)

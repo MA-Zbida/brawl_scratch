@@ -58,7 +58,8 @@ TERMINAL_ACTION: int = -1
 #: 3 -- weapon-detector, pickup-inference, and independent visual-possession
 #:      provenance are stored per transition.
 #: 4 -- final-agent reward components, evaluation flags and optimizer gaps.
-SCHEMA_VERSION: int = 4
+#: 5 -- distinguish provisional pickup intent from confirmed possession.
+SCHEMA_VERSION: int = 5
 
 #: Per-transition scalar fields pulled from `info`, with their dtype and the
 #: default used when a wrapper in the stack does not provide them.
@@ -99,6 +100,8 @@ _INFO_SCALARS: tuple[tuple[str, str, str, float], ...] = (
     ("player_weapon_visual_confidence", "player_weapon_visual_confidence", "float32", 0.0),
     ("player_weapon_visual_fresh", "player_weapon_visual_fresh", "float32", 0.0),
     ("player_weapon_visual_disarm_event", "player_weapon_visual_disarm_event", "float32", 0.0),
+    ("player_weapon_possession_confirmed", "player_weapon_possession_confirmed", "float32", 0.0),
+    ("player_weapon_pickup_pending", "player_weapon_pickup_pending", "float32", 0.0),
     ("weapon_visual_confirmed", "weapon_visual_confirmed", "float32", 0.0),
     ("weapon_success_blocked_visual", "weapon_success_blocked_visual", "float32", 0.0),
 )

@@ -26,6 +26,7 @@ from feature_extractor.memory.canonicalize import mirror_goal_target
 from feature_extractor.memory.state_spec import StateSpec
 from hierarchical.goals import GOAL_FEATURE_NAMES, GOAL_STATE_SPEC_NAMES, GOAL_TARGET_DIM, extract_goal_features
 from train.curriculum_goals import GOAL_TYPE_INDEX, goal_type_onehot, normalize_goal_type
+from perception.weapon_evidence import WeaponEvidence, DEFAULT_MIN_CONFIDENCE
 from train.checkpoint_roles import (
     GOAL_CONDITIONED_SKILL,
     metadata_for_skill_model,
@@ -254,6 +255,10 @@ class StageGoalEnv(gym.Wrapper):
         self._prev_has_weapon: Optional[bool] = None
         self._weapon_pickup_awarded: bool = False
         self._weapon_visual_confirmed: bool = False
+        base_config = getattr(env.unwrapped, "config", None)
+        self._weapon_evidence = WeaponEvidence(
+            min_confidence=getattr(base_config, "weapon_classifier_min_confidence", DEFAULT_MIN_CONFIDENCE),
+        )
         self._prev_in_range: float = 0.0
         self._combo_chain_hits: int = 0
         self._pending_attack_deadlines: list[int] = []
@@ -735,6 +740,7 @@ class StageGoalEnv(gym.Wrapper):
         self._combo_chain_hits = 0
         self._weapon_pickup_awarded = False
         self._weapon_visual_confirmed = False
+        self._weapon_evidence.reset()
         self._prev_error = (
             self._goal_error_from_feats(
                 init_feats,
@@ -834,13 +840,11 @@ class StageGoalEnv(gym.Wrapper):
         # When player is not controllable (YOLO miss / respawning), keep the
         # existing goal active.  The goal is NEVER resampled mid-episode.
         curr_has_weapon = self._feature_value(curr_feats, "player_has_weapon", 0.0) > 0.5
-        visual_valid = bool(float(info.get("player_weapon_visual_valid", 0.0)) > 0.5)
-        visual_armed = bool(float(info.get("player_weapon_visual_armed", 0.0)) > 0.5)
-        visual_fresh = bool(float(info.get("player_weapon_visual_fresh", 0.0)) > 0.5)
-        visual_confirmation_new = False
-        if visual_fresh and visual_valid:
-            visual_confirmation_new = bool(visual_armed and not self._weapon_visual_confirmed)
-            self._weapon_visual_confirmed = visual_armed
+        visual = self._weapon_evidence.update(info)
+        visual_confirmation_new = bool(
+            self._weapon_evidence.fresh_value is True and not self._weapon_visual_confirmed
+        )
+        self._weapon_visual_confirmed = visual is True
         weapon_confirmation_required = bool(
             self.stage_spec.require_visual_weapon_confirmation
         )
@@ -1184,6 +1188,7 @@ class StageGoalEnv(gym.Wrapper):
         info["attack_whiff_events"] = int(attack_whiff_events)
         info["goal_success_blocked_offstage"] = float(success_blocked_offstage)
         info["weapon_visual_confirmed"] = float(self._weapon_visual_confirmed)
+        info["weapon_visual_evidence_age_steps"] = self._weapon_evidence.age_steps
         info["weapon_success_blocked_visual"] = float(success_blocked_visual)
         info["weapon_pickup_bonus_applied"] = float(weapon_pickup_bonus_applied)
         info["player_is_offstage"] = float(offstage)

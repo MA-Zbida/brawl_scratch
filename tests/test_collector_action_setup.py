@@ -112,10 +112,4 @@ def test_visual_confirmation_gate_is_conditional_on_the_classifier() -> None:
     assert "visual_confirmation_required = bool(" in source, (
         "the run-level flag that mirrors --no-weapon-classifier is missing"
     )
-    assert "not visual_confirmation_required" in source, (
-        "the acceptance gate still demands visual confirmation unconditionally"
-    )
-
-    # The relaxation must guard the gate itself, not merely exist somewhere.
-    gate = source.split("visual_confirmed = bool(", 1)[1].split(")", 1)[0]
-    assert "not visual_confirmation_required" in gate
+    assert "require_visual=visual_confirmation_required" in source

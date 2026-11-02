@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import json
+import pytest
 
 from tools.label_weapon_crops import (
     CHARACTER_CLASS, Crop, crop_pixels, iter_crops, select_originals, source_key,
@@ -138,3 +140,81 @@ def test_iter_crops_honours_the_keep_filter(tmp_path) -> None:
     keep = {root / "train" / "images" / "frame_a.png"}
     keys = [c.key for c in iter_crops(root, ["train"], keep=keep)]
     assert keys == ["frame_a__0"]
+
+
+def _live_crops(tmp_path, count=3):
+    import cv2
+    source = tmp_path / 'recording' / 'weapon_crops'
+    (source / 'unlabelled').mkdir(parents=True)
+    records = []
+    for i in range(count):
+        path = f'unlabelled/capture_{i:06d}_player.png'
+        assert cv2.imwrite(str(source / path), np.full((12, 8, 3), 30 + i, np.uint8))
+        records.append({'path': path, 'observed_capture_id': i, 'fighter': 'player'})
+    (source / 'crops.jsonl').write_text('\n'.join(json.dumps(r) for r in records))
+    return source
+
+
+def test_live_labeling_uses_fixed_preview_explicit_output_and_resumes(tmp_path, monkeypatch):
+    import cv2
+    from tools.label_weapon_crops import main
+    source = _live_crops(tmp_path)
+    out = tmp_path / 'labels'
+    preview = tmp_path / 'preview' / 'current.png'
+    args = ['--crops-dir', str(source), '--dataset', str(tmp_path / 'absent'),
+            '--out', str(out), '--preview', str(preview), '--scale', '2']
+    answers = iter(['0', '1', '2'])
+    def label(prompt):
+        assert preview.is_file()
+        assert cv2.imread(str(preview)).shape == (24, 16, 3)
+        return next(answers)
+    monkeypatch.setattr('builtins.input', label)
+    assert main(args) == 0
+    records = [json.loads(s) for s in (out / 'labels.jsonl').read_text().splitlines()]
+    assert [r['label'] for r in records] == [0, 1, None]
+    assert len(list((out / 'unarmed').glob('*.png'))) == 1
+    assert len(list((out / 'armed').glob('*.png'))) == 1
+    assert not (source / 'labels.jsonl').exists()
+    assert all('source_capture_id' in r for r in records)
+    monkeypatch.setattr('builtins.input', lambda _: pytest.fail('resume repeated a completed crop'))
+    assert main(args) == 0
+
+
+def test_skip_undo_does_not_decrement_label_limit(tmp_path, monkeypatch):
+    from tools.label_weapon_crops import main
+    source = _live_crops(tmp_path, 4)
+    out = tmp_path / 'labels'
+    args = ['--crops-dir', str(source), '--dataset', str(tmp_path / 'absent'),
+            '--out', str(out), '--preview', str(tmp_path / 'current.png'), '--limit', '2']
+    # First crop labelled, second skipped, undo that skip, label it. Stop at TWO labels.
+    answers = iter(['0', '2', 'u', '1'])
+    monkeypatch.setattr('builtins.input', lambda _: next(answers))
+    assert main(args) == 0
+    records = [json.loads(s) for s in (out / 'labels.jsonl').read_text().splitlines()]
+    assert [r['label'] for r in records] == [0, 1]
+
+
+def test_label_undo_and_quit_only_keep_confirmed_decisions(tmp_path, monkeypatch):
+    from tools.label_weapon_crops import main
+    source = _live_crops(tmp_path)
+    out = tmp_path / 'labels'
+    answers = iter(['bad', '0', 'u', '1', 'q'])
+    monkeypatch.setattr('builtins.input', lambda _: next(answers))
+    assert main(['--crops-dir', str(source), '--out', str(out),
+                 '--preview', str(tmp_path / 'current.png')]) == 0
+    records = [json.loads(s) for s in (out / 'labels.jsonl').read_text().splitlines()]
+    assert len(records) == 1 and records[0]['label'] == 1
+    assert not list((out / 'unarmed').glob('*.png'))
+    assert len(list((out / 'armed').glob('*.png'))) == 1
+
+
+def test_yolo_labeling_keeps_existing_dataset_mode(tmp_path, monkeypatch):
+    import cv2
+    from tools.label_weapon_crops import main
+    root = _dataset(tmp_path, '0 0.5 0.5 0.2 0.4')
+    assert cv2.imwrite(str(root / 'train/images/frame_0001.png'), np.zeros((100, 100, 3), np.uint8))
+    monkeypatch.setattr('builtins.input', lambda _: '0')
+    out = tmp_path / 'labels'
+    assert main(['--dataset', str(root), '--out', str(out),
+                 '--preview', str(tmp_path / 'current.png')]) == 0
+    assert len(list((out / 'unarmed').glob('*.png'))) == 1

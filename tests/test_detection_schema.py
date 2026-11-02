@@ -159,3 +159,66 @@ def test_indicator_selects_correct_character_across_positions(indicator_x):
     result = resolve(characters + [indicator])
     assert result.agent is not None
     assert result.agent["bbox"][0] == pytest.approx(indicator_x)
+
+
+def test_recorded_overlap_does_not_assign_mordex_above_triangle():
+    # Diagnostic latest_20260913-111000_62f446, interaction 1499.
+    mordex = det('character', .590625, .492361, .030208, .081019)
+    wu = det('character', .544531, .544676, .063021, .066204)
+    triangle = det('indicator_self', .563542, .497222, .0125, .022222)
+    result = resolve([mordex, triangle, wu])
+    assert result.agent is wu
+
+
+@pytest.mark.parametrize('x,y,previous', [
+    (.313542, .309722, (.405078, .081713)),  # interaction 1255
+    (.433333, .921296, (.335286, .924074)),  # interaction 1995
+])
+def test_lone_opponent_cannot_teleport_into_player_identity(x, y, previous):
+    opponent = det('character', x, y)
+    result = resolve([opponent], last_agent_xy=previous, last_opponent_xy=(x, y))
+    assert result.agent is None
+    assert result.opponent is opponent
+
+
+def test_ambiguous_triangle_does_not_force_either_identity():
+    a, b = det('character', .498, .60), det('character', .502, .60)
+    result = resolve([a, b, det('indicator_self', .5, .53, .02, .02)],
+                     last_agent_xy=(.498, .60), last_opponent_xy=(.502, .60))
+    assert result.agent is None
+    assert result.opponent is None
+
+
+def test_unknown_character_is_not_automatically_opponent():
+    result = resolve([det('character', .5, .6)])
+    assert result.agent is None
+    assert result.opponent is None
+
+
+def test_fallback_respects_opponent_identity_even_near_player():
+    opponent = det('character', .52, .6)
+    result = resolve([opponent], last_agent_xy=(.50, .6), last_opponent_xy=(.52, .6))
+    assert result.agent is None
+    assert result.opponent is opponent
+
+
+def test_missing_indicator_with_tied_position_candidates_abstains():
+    result = resolve([det('character', .498, .6), det('character', .502, .6)],
+                     last_agent_xy=(.5, .6))
+    assert result.agent is None
+
+
+def test_memory_expires_unobserved_identity_and_reacquires_without_velocity_spike():
+    from feature_extractor.memory.structured_memory import Memory
+    memory = Memory()
+    a = det('character', .3, .6)
+    memory.update_from_detections([a, det('indicator_self', .3, .53, .02, .02)])
+    # A detection persisting forever without the indicator must not refresh identity age.
+    for _ in range(20):
+        memory.update_from_detections([a], dt=.025)
+    assert memory.player.missing_frames > 0
+    memory.update_from_detections([det('character', .7, .6),
+                                   det('indicator_self', .7, .53, .02, .02)])
+    assert memory.identity_observed
+    assert memory.player.vx == 0.
+    assert memory.player.vy == 0.

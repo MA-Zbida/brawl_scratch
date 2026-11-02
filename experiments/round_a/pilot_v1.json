@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "timesteps": 4096,
+  "bc_epochs": 8,
+  "baseline_seconds": 60.0,
+  "interim_seconds": 60.0,
+  "final_seconds": 120.0,
+  "eval_block_seconds": 60.0,
+  "eval_every": 4096,
+  "checkpoint_every": 2048
+}

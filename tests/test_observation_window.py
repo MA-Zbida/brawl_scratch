@@ -72,6 +72,7 @@ def test_weapon_classifier_fuses_visual_state_and_exposes_provenance() -> None:
     classifier = StubWeaponClassifier([
         WeaponPrediction(False, 0.99, valid=True, fresh=True),
         WeaponPrediction(True, 0.98, valid=True, fresh=True),
+        WeaponPrediction(True, 0.98, valid=True, fresh=True),
     ])
     env = BrawlDeepEnv(
         extractor=extractor,
@@ -83,6 +84,10 @@ def test_weapon_classifier_fuses_visual_state_and_exposes_provenance() -> None:
     )
 
     reset_obs, reset_info = env.reset()
+    provisional_obs, _, _, _, provisional_info = env.step(0)
+    assert StateSpec.get(provisional_obs, "player_has_weapon") == 0.0
+    assert provisional_info["player_weapon_visual_armed"] == 1.0
+    assert provisional_info["player_weapon_possession_confirmed"] == 0.0
     step_obs, _, _, _, step_info = env.step(0)
 
     assert StateSpec.get(reset_obs, "player_has_weapon") == 0.0
@@ -92,6 +97,8 @@ def test_weapon_classifier_fuses_visual_state_and_exposes_provenance() -> None:
     assert step_info["player_weapon_visual_confidence"] == pytest.approx(0.98)
     assert step_info["player_weapon_visual_valid"] == 1.0
     assert step_info["player_weapon_visual_fresh"] == 1.0
+    assert step_info["player_weapon_possession_confirmed"] == 1.0
+    env.close()
 
 
 # ── layout ──────────────────────────────────────────────────────────────────

@@ -15,7 +15,7 @@ Workflow: the script writes the current crop to a fixed path (default `cropped.p
 and waits for a keypress. Keep that file open in the editor -- it refreshes in place
 as you label, so you never touch the file picker.
 
-    0  unarmed        s  skip this crop
+    0  unarmed        2  skip / uncertain (s also works)
     1  armed          u  undo the previous label
                       q  save and quit
 
@@ -183,8 +183,10 @@ def write_preview(cv2, patch, path: Path, scale: int) -> None:
     """Write the preview atomically so the editor never reads a half-written file."""
     height, width = patch.shape[:2]
     big = cv2.resize(patch, (width * scale, height * scale), interpolation=cv2.INTER_NEAREST)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp.png")
-    cv2.imwrite(str(tmp), big)
+    if not cv2.imwrite(str(tmp), big):
+        raise OSError(f"Could not write preview: {tmp}")
     os.replace(tmp, path)
 
 
@@ -196,7 +198,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         "dataset. Use for live captures, whose distribution matches "
                         "inference; the dataset export does not.")
     p.add_argument("--splits", nargs="+", default=["train", "valid", "test"])
-    p.add_argument("--out", type=Path, default=Path("data/weapon_crops"))
+    p.add_argument("--out", type=Path, default=None,
+                   help="Label destination. Default: crops-dir for pre-cut inputs, otherwise data/weapon_crops.")
     p.add_argument("--preview", type=Path, default=Path("cropped.png"),
                    help="Fixed path rewritten for each crop. Keep it open in the editor.")
     p.add_argument("--pad", type=float, default=0.45,
@@ -215,11 +218,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     import cv2
 
-    if not args.dataset.is_dir():
+    if args.crops_dir is None and not args.dataset.is_dir():
         print(f"Dataset not found: {args.dataset}", file=sys.stderr)
         return 1
 
-    out: Path = args.out
+    # Resolve the destination BEFORE reading progress. Pre-cut mode previously
+    # loaded the YOLO ledger, then silently changed its output directory.
+    out: Path = args.out or args.crops_dir or Path("data/weapon_crops")
     for name in LABEL_NAMES.values():
         (out / name).mkdir(parents=True, exist_ok=True)
     ledger = out / "labels.jsonl"
@@ -236,18 +241,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 done[rec["key"]] = int(rec["label"])
 
+    crop_metadata: dict[str, dict] = {}
     if args.crops_dir is not None:
         source = Path(args.crops_dir) / 'unlabelled'
         pre_cut = sorted(p for p in source.glob('*.png'))
         if not pre_cut:
             print(f'No crops in {source}', file=sys.stderr)
             return 1
-        out = Path(args.crops_dir)
-        for name in LABEL_NAMES.values():
-            (out / name).mkdir(parents=True, exist_ok=True)
-        ledger = out / 'labels.jsonl'
+        metadata_path = args.crops_dir / 'crops.jsonl'
+        if metadata_path.exists():
+            for line in metadata_path.read_text(encoding='utf-8').splitlines():
+                rec = json.loads(line)
+                crop_metadata[Path(rec['path']).name] = rec
         crops = [Crop(p, 0, 0.0, 0.0, 0.0, 0.0) for p in pre_cut]
-        random.Random(int(args.seed)).shuffle(crops)
         print(f'{len(crops)} pre-cut crops from {source}')
     else:
         crops = None
@@ -268,12 +274,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     counts = {0: sum(1 for v in done.values() if v == 0), 1: sum(1 for v in done.values() if v == 1)}
 
     print("=" * 68)
-    print(f"{len(crops)} character crops in {args.dataset}")
+    print(f"{len(crops)} character crops in {args.crops_dir or args.dataset}")
     print(f"already labelled: {labelled}  (unarmed {counts[0]}, armed {counts[1]})"
           f"   skipped: {sum(1 for v in done.values() if v < 0)}")
     print(f"remaining: {len(todo)}")
     print(f"\nOpen {args.preview} in your editor -- it refreshes in place.")
-    print("  0 = unarmed   1 = armed   s = skip   u = undo   q = save and quit")
+    print("  0 = unarmed   1 = armed   2 = skip/uncertain   u = undo   q = save and quit")
+    print("Type the number, then Enter. Model predictions are deliberately hidden.")
     print("=" * 68)
 
     if not todo:
@@ -287,14 +294,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     def record(crop: Crop, label: Optional[int], patch) -> None:
         if label is not None:
             dest = out / LABEL_NAMES[label] / f"{crop.key}.png"
-            cv2.imwrite(str(dest), patch)
+            if not cv2.imwrite(str(dest), patch):
+                raise OSError(f"Could not save labelled crop: {dest}")
+        source = crop_metadata.get(crop.image_path.name, {})
         with ledger.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({
                 "key": crop.key,
                 "label": label,
                 "image": str(crop.image_path),
-                "box": [crop.cx, crop.cy, crop.w, crop.h],
+                "box": source.get('box', [crop.cx, crop.cy, crop.w, crop.h]),
+                "source_recording": str(args.crops_dir.resolve().parent) if args.crops_dir else None,
+                "source_capture_id": source.get('observed_capture_id'),
+                "source_fighter": source.get('fighter'),
+                "source_image_group": source_key(crop.image_path),
             }) + "\n")
+        done[crop.key] = -1 if label is None else label
 
     while i < len(todo):
         crop = todo[i]
@@ -309,7 +323,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         write_preview(cv2, patch, args.preview, max(1, int(args.scale)))
         prompt = (f"[{session + 1}{'/' + str(args.limit) if args.limit else ''}] "
-                  f"{crop.key}  (u {counts[0]} / a {counts[1]})  0/1/s/u/q > ")
+                  f"{crop.key}  (unarmed {counts[0]} / armed {counts[1]})  0/1/2/u/q > ")
         try:
             answer = input(prompt).strip().lower()
         except (EOFError, KeyboardInterrupt):
@@ -321,6 +335,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if answer == "u":
             if history:
                 undone = history.pop()
+                previous_label = done.pop(undone.key)
                 # Rewrite the ledger without the undone record, and drop its file.
                 kept = [ln for ln in ledger.read_text(encoding="utf-8").splitlines()
                         if json.loads(ln)["key"] != undone.key]
@@ -331,18 +346,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         stale.unlink()
                         counts[0 if name == "unarmed" else 1] -= 1
                 i -= 1
-                session = max(0, session - 1)
+                session = max(0, session - int(previous_label >= 0))
                 print(f"  undid {undone.key}")
             else:
                 print("  nothing to undo")
             continue
-        if answer == "s":
+        if answer in ("2", "s"):
             record(crop, None, patch)
             history.append(crop)
             i += 1
             continue
         if answer not in ("0", "1"):
-            print("  expected 0, 1, s, u or q")
+            print("  expected 0, 1, 2 (skip/uncertain), u or q")
             continue
 
         label = int(answer)

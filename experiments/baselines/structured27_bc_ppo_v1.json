@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "name": "structured27_bc_ppo_v1",
+  "components": {
+    "representation": "structured_geometry_v1",
+    "policy": "mlp_128x128",
+    "algorithm": "ppo",
+    "action_space": "discrete27",
+    "objective": "stock_damage_v1"
+  },
+  "parameters": {
+    "episodes_per_drill": 30,
+    "bc_epochs": 40,
+    "bc_learning_rate": 0.0003,
+    "timesteps": 4096,
+    "n_steps": 512,
+    "batch_size": 256,
+    "learning_rate": 0.0001,
+    "ent_coef": 0.01,
+    "seed": 42,
+    "eval_every": 4096,
+    "eval_episodes": 2,
+    "window_steps": 1200
+  }
+}

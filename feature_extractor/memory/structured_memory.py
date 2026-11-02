@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from feature_extractor.memory.detection_schema import (
+    IDENTITY_HOLD_SECONDS,
     OPPONENT_WEAPON_STATE_FROM_CLASS,
     resolve as resolve_detections,
 )
@@ -172,7 +173,8 @@ class Memory:
 
     def _last_xy(self, state: FighterState) -> Optional[Tuple[float, float]]:
         """Last known position, or None when the fighter is not currently tracked."""
-        return (state.x, state.y) if state.exists else None
+        # Association compares detector CENTRES, while state.y stores feet.
+        return (state.x, state.y - state.bbox_h / 2.0) if state.exists else None
 
     def _closest_weapon_center(self, centers: List[Tuple[float, float]]) -> Optional[Tuple[float, float]]:
         if not centers:
@@ -226,8 +228,9 @@ class Memory:
         half_height = (bbox_h if bbox_h > 0.0 else state.height) / 2.0
         x_new, y_new = self._clamp_position(x, y + half_height + float(y_offset))
         state.last_x, state.last_y = state.x, state.y
-        state.vx = clamp((x_new - state.x) / dt, -max_vel, max_vel)
-        state.vy = clamp((y_new - state.y) / dt, -max_vel, max_vel)
+        continuous = state.exists and state.missing_frames == 0
+        state.vx = clamp((x_new - state.x) / dt, -max_vel, max_vel) if continuous else 0.0
+        state.vy = clamp((y_new - state.y) / dt, -max_vel, max_vel) if continuous else 0.0
         state.x, state.y = x_new, y_new
 
         state.prev_bbox_w, state.prev_bbox_h = state.bbox_w, state.bbox_h
@@ -249,10 +252,11 @@ class Memory:
 
         # Identity is resolved by the self-indicator under the current schema, and
         # by class label under the legacy one. The schema is inferred per frame.
+        can_continue = self.time_since_indicator + dt <= IDENTITY_HOLD_SECONDS
         resolution = resolve_detections(
             yolo_detections,
-            last_agent_xy=self._last_xy(self.player),
-            last_opponent_xy=self._last_xy(self.opponent),
+            last_agent_xy=self._last_xy(self.player) if can_continue else None,
+            last_opponent_xy=self._last_xy(self.opponent) if can_continue else None,
         )
         self.detection_schema = resolution.schema
         self.identity_source = resolution.identity_source
@@ -453,6 +457,8 @@ class Memory:
         self.player.last_action_id = float(action_id)
 
     def update_jumps(self, action_jump: bool) -> None:
+        # The environment passes a new emitted press, never a repeated held-key
+        # request. This remains an estimate: hitstun can reject a physical press.
         if action_jump and not (self.player.grounded or self.player.on_edge):
             self.player.jumps_left = max(0, int(self.player.jumps_left - 1))
 

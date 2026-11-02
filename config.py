@@ -1,3 +1,6 @@
+# Fixed 1920x1080 HUD calibration: Wu Shang (agent) RIGHT, Mordex LEFT.
+# These are scoreboard slots, not world positions. No portrait tracking: if the
+# training-room HUD reorders, stop and restore this layout before trusting rewards.
 UI_REGIONS = {
     "stock": (1863, 45),
     "op": (1795, 80),

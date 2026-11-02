@@ -245,6 +245,32 @@ def test_recovery_heavy_is_not_emitted_on_consecutive_steps() -> None:
     assert second == int(Action.MOVE_TOWARD), describe(second)
 
 
+def test_recovery_waits_after_dodge_before_heavy(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("time.perf_counter", lambda: now[0])
+    obs = _obs()
+    for key, value in {"player_is_offstage": 1., "player_grounded": 0.,
+                       "player_jumps_norm": 0., "signed_dx_to_ledge": .1,
+                       "dy_to_ledge": .1, "dodge_cooldown_norm": 0.}.items():
+        obs[StateSpec.index(key)] = value
+    teacher = HeuristicTeacher()
+    assert teacher.action("recovery_mastery", obs) == int(Action.DODGE_UP_TOWARD)
+    obs[StateSpec.index("dodge_cooldown_norm")] = 1.
+    now[0] += .03
+    assert teacher.action("recovery_mastery", obs) == int(Action.MOVE_TOWARD)
+    now[0] += .5
+    assert teacher.action("recovery_mastery", obs) == int(Action.HEAVY_TOWARD)
+
+
+def test_recovery_never_uses_spot_dodge_inside_horizontal_deadband():
+    obs = _obs()
+    for key, value in {"player_is_offstage": 1., "player_grounded": 0.,
+                       "player_jumps_norm": 0., "signed_dx_to_ledge": -.005,
+                       "dy_to_ledge": -.1, "dodge_cooldown_norm": 0.}.items():
+        obs[StateSpec.index(key)] = value
+    assert HeuristicTeacher().action("recovery_mastery", obs) == int(Action.DODGE_AWAY)
+
+
 def test_recovery_setup_approaches_then_jumps_outward_through_ledge_deadband() -> None:
     setup = teachers.RecoverySetupController()
     obs = _obs()

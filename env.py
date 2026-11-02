@@ -18,6 +18,7 @@ import capture_first
 from capture import DxcamFrameProvider, MssFrameProvider, create_frame_provider
 from config import UI_REGIONS
 from control.input import KeySet, NullInputController, PyDirectInputController
+from control.taps import TapSequencer
 from reward.providers import NullRewardProvider
 from reward.ui_probe import PixelStocksHealthProvider
 from action_space import (
@@ -36,6 +37,7 @@ from feature_extractor.memory.canonicalize import (
     should_mirror,
 )
 from feature_extractor.memory.structured_memory import Memory
+from feature_extractor.memory.detection_schema import IDENTITY_CONTRACT_VERSION
 from feature_extractor.memory.state_spec import StateSpec
 from feature_extractor.yolo.extract import Extract
 from perception.weapon_classifier import (
@@ -47,6 +49,13 @@ from perception.weapon_classifier import (
 from reward.extract_rgb import get_rgb
 from reward.rgb_to_dmg import get_dmg
 from reward.stock import get_stock
+
+
+RUNTIME_CONTRACT = {
+    "input_contract_version": TapSequencer.VERSION,
+    "hud_contract_version": PixelStocksHealthProvider.VERSION,
+    "identity_contract_version": IDENTITY_CONTRACT_VERSION,
+}
 
 
 @dataclass
@@ -177,7 +186,7 @@ class BrawlDeepEnv(gym.Env):
         self._last_detections: list = []
         self._step_time_sum = 0.0
         self._step_time_count = 0
-        self._tap_latch_remaining = {key: 0 for key in sorted(TAP_KEYS)}
+        self._tap_sequencer = TapSequencer(self.config.tap_latch_steps)
         self._last_obs: Optional[np.ndarray] = None  # cached for None-frame fallback
         self._last_movement: int = 0     # last horizontal direction (0 = neutral)
         self._movement_hold_count: int = 0  # consecutive steps with same movement
@@ -226,11 +235,17 @@ class BrawlDeepEnv(gym.Env):
     def _weapon_classifier_boxes(self) -> dict[str, tuple[float, float, float, float]]:
         """Return classifier crops from the identity-resolved fighter states."""
         boxes: dict[str, tuple[float, float, float, float]] = {}
+        # A confident weapon prediction on the wrong fighter is still wrong.
+        # Returning no boxes also prunes cached predictions on skipped cadence
+        # frames, so reacquisition cannot inherit the old identity's crop.
+        if not self.memory.identity_observed:
+            return boxes
         for name, fighter in (
             ("player", self.memory.player),
             ("opponent", self.memory.opponent),
         ):
-            if not fighter.exists or fighter.bbox_w <= 0.0 or fighter.bbox_h <= 0.0:
+            if (not fighter.exists or fighter.missing_frames > 0
+                    or fighter.bbox_w <= 0.0 or fighter.bbox_h <= 0.0):
                 continue
             # Memory stores foot y; the classifier was trained on the detector's
             # centre-based crop contract.
@@ -255,6 +270,12 @@ class BrawlDeepEnv(gym.Env):
             ("player", self.memory.player, self._player_weapon_fusion),
             ("opponent", self.memory.opponent, self._opponent_weapon_fusion),
         ):
+            respawn_timer = (self.memory.player_respawn_timer if name == "player"
+                             else self.memory.opponent_respawn_timer)
+            if respawn_timer > 0.:
+                fusion.reset()
+                fighter.weapon_state = 0.0
+                continue
             prediction = predictions.get(name)
             armed, disarmed = fusion.resolve(fighter.weapon_state > 0.0, prediction)
             fighter.weapon_state = 1.0 if armed else 0.0
@@ -276,6 +297,8 @@ class BrawlDeepEnv(gym.Env):
                 prediction is not None and prediction.fresh
             ),
             "player_weapon_visual_disarm_event": float(self._weapon_disarm_event),
+            "player_weapon_possession_confirmed": float(self._player_weapon_fusion.confirmed),
+            "player_weapon_pickup_pending": float(self._player_weapon_fusion.pickup_pending > 0),
         }
 
     @staticmethod
@@ -292,7 +315,7 @@ class BrawlDeepEnv(gym.Env):
 
         return movement, jump, dodge, attack
 
-    def _apply_action(self, action: int, *, emit_tap_actions: bool = True) -> None:
+    def _apply_action(self, action: int, *, emit_tap_actions: bool = True) -> set[str]:
         """Translate a canonical action into physical key state.
 
         `to_keys` is the single place the mirror touches the action path: the policy
@@ -301,21 +324,13 @@ class BrawlDeepEnv(gym.Env):
         held, tapped = to_keys(int(action), mirrored=self._mirrored)
         self.input_controller.set_pressed(held)
 
-        if emit_tap_actions:
-            latch_steps = max(1, int(self.config.tap_latch_steps))
-            for key in tapped:
-                self._tap_latch_remaining[key] = max(self._tap_latch_remaining.get(key, 0), latch_steps)
-
-        # Hold each tap key down for its whole latch window, then release it.
-        # A press-release pair inside one step lasts well under the game's ~16.7ms
-        # input poll and is often dropped entirely.
-        for key in list(self._tap_latch_remaining.keys()):
-            remaining = self._tap_latch_remaining[key]
-            if remaining > 0:
-                self.input_controller.key_down(key)
-                self._tap_latch_remaining[key] = remaining - 1
-            else:
-                self.input_controller.key_up(key)
+        down, up = self._tap_sequencer.advance(
+            tapped if emit_tap_actions else set(), now=time.perf_counter())
+        for key in sorted(up):
+            self.input_controller.key_up(key)
+        for key in sorted(down):
+            self.input_controller.key_down(key)
+        return down  # Emitted edges, not a claim that the game accepted them.
 
     def _release_all_inputs(self) -> None:
         """Release movement holds and any tap key still inside its hold window.
@@ -324,8 +339,8 @@ class BrawlDeepEnv(gym.Env):
         latched tap cannot stay physically held down across the gap.
         """
         self.input_controller.set_pressed(set())
-        for key in list(self._tap_latch_remaining.keys()):
-            self._tap_latch_remaining[key] = 0
+        self._tap_sequencer.release(now=time.perf_counter())
+        for key in sorted(TAP_KEYS):
             self.input_controller.key_up(key)
 
     def _get_effective_action(self, action) -> int:
@@ -335,6 +350,15 @@ class BrawlDeepEnv(gym.Env):
         are canonical, and the physical conversion happens in `_apply_action`.
         """
         return sanitize(action)
+
+    def _action_components(self, action: int):
+        return action_components(action)
+
+    def _record_action(self, action: int) -> None:
+        self.memory.update_action(action)
+
+    def _describe_action(self, action: int) -> str:
+        return describe_action(action)
 
     def action_masks(self) -> np.ndarray:
         """Legal-action mask, in the convention masking-aware algorithms expect.
@@ -452,6 +476,12 @@ class BrawlDeepEnv(gym.Env):
 
         if self.stocks_health_provider is not None:
             self_stocks_left, op_stocks_left, self_health, op_health = self.stocks_health_provider(frame, detections)
+            hud = getattr(self.stocks_health_provider, 'damage_info', {})
+            # First sight of an already-damaged fighter is a baseline, not a hit.
+            # This also covers starting while a KO flash makes reset unreadable.
+            for side, health in (('self', self_health), ('op', op_health)):
+                if health is not None and hud.get(f'{side}_damage_initialized', False):
+                    setattr(self.memory, f'{side}_health', float(health))
             self.memory.update_stocks_and_health(
                 self_stocks_left=self_stocks_left,
                 self_health=self_health,
@@ -579,7 +609,7 @@ class BrawlDeepEnv(gym.Env):
         self._last_detections = []
         self._step_time_sum = 0.0
         self._step_time_count = 0
-        self._tap_latch_remaining = {key: 0 for key in sorted(TAP_KEYS)}
+        self._tap_sequencer.release(now=time.perf_counter())
         self._last_movement = 0
         self._movement_hold_count = 0
         self._state_history.clear()
@@ -659,10 +689,8 @@ class BrawlDeepEnv(gym.Env):
         effective_action = self._get_effective_action(action)
         repeat_steps = self._sample_action_repeat_steps()
 
-        comp = action_components(effective_action)
-        action_jump = bool(comp.jump)
-        action_dodge = bool(comp.dodge)
-        action_pick_throw = bool(comp.interact)
+        comp = self._action_components(effective_action)
+        emitted_taps: set[str] = set()
 
         reward = 0.0
         reward_breakdown_total: dict[str, float] = {}
@@ -673,9 +701,6 @@ class BrawlDeepEnv(gym.Env):
         for repeat_idx in range(repeat_steps):
             self._step_count += 1
             first_repeat_frame = bool(repeat_idx == 0)
-            frame_jump = bool(action_jump and first_repeat_frame)
-            frame_dodge = bool(action_dodge and first_repeat_frame)
-            frame_pick_throw = bool(action_pick_throw and first_repeat_frame)
 
             inner_t0 = time.perf_counter()
 
@@ -711,7 +736,13 @@ class BrawlDeepEnv(gym.Env):
                 self._movement_hold_count = 0
 
             t0 = time.perf_counter()
-            self._apply_action(effective_action, emit_tap_actions=first_repeat_frame)
+            new_presses = self._apply_action(effective_action, emit_tap_actions=first_repeat_frame)
+            emitted_taps.update(new_presses)
+            # Resource/possession inference must not consume another jump or
+            # toggle a weapon merely because the policy repeated a held input.
+            frame_jump = 'space' in new_presses
+            frame_dodge = 'e' in new_presses
+            frame_pick_throw = 'num5' in new_presses
             apply_action_dt = time.perf_counter() - t0
 
             t0 = time.perf_counter()
@@ -726,9 +757,16 @@ class BrawlDeepEnv(gym.Env):
                 dt=dt_for_dets,
             )
             dist_to_weapon = self._distance_player_to_weapon()
-            self.memory.update_player_weapon_from_action(action_pick_throw=frame_pick_throw, dist_to_weapon=dist_to_weapon)
+            # This capture predates this step's key injection. Fuse its visual
+            # evidence before the newer input intent, or an unarmed pre-pickup
+            # image immediately cancels the pickup we just inferred.
             self._update_weapon_classification(self._last_frame)
-            self.memory.update_action(effective_action)
+            self.memory.update_player_weapon_from_action(action_pick_throw=frame_pick_throw, dist_to_weapon=dist_to_weapon)
+            self._player_weapon_fusion.observe_action(
+                pickup=self.memory.weapon_pickup_action_this_frame,
+                dropped=self.memory.weapon_drop_action_this_frame,
+            )
+            self._record_action(effective_action)
             memory_dt = time.perf_counter() - t0
 
             t0 = time.perf_counter()
@@ -802,7 +840,10 @@ class BrawlDeepEnv(gym.Env):
         info: dict[str, Any] = {
             "detections": detections,
             "effective_action": int(effective_action),
-            "action_name": describe_action(effective_action),
+            "action_name": self._describe_action(effective_action),
+            "input_contract": TapSequencer.VERSION,
+            "input_taps_pressed": sorted(emitted_taps),
+            "hud_diagnostics": getattr(self.stocks_health_provider, 'damage_info', {}).copy(),
             "canon_mirrored": float(1.0 if self._mirrored else 0.0),
             "action_mask": self.action_masks(),
             "op_stock_lost_step": op_stock_lost_step,

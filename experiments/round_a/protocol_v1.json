@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "timesteps": 2000000,
+  "control_hz": 30.0,
+  "image_width": 256,
+  "image_height": 144,
+  "n_steps": 512,
+  "batch_size": 256,
+  "n_epochs": 4,
+  "learning_rate": 0.0001,
+  "ent_coef": 0.01,
+  "bc_epochs": 40,
+  "bc_learning_rate": 0.0003,
+  "sequence_length": 32,
+  "split_seed": 42,
+  "eval_every": 250000,
+  "baseline_seconds": 900.0,
+  "interim_seconds": 300.0,
+  "final_seconds": 3600.0,
+  "eval_block_seconds": 600.0,
+  "window_steps": 1200,
+  "checkpoint_every": 50000
+}

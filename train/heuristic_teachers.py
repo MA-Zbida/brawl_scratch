@@ -14,6 +14,7 @@ are mirror-invariant.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Mapping
 
 import numpy as np
@@ -36,6 +37,7 @@ class HeuristicConfig:
     rising_speed: float = 0.02
     recovery_dodge_ready_threshold: float = 0.05  # Zero-ish cooldown means the air dodge is available.
     recovery_heavy_cooldown_steps: int = 10  # Space recovery inputs so a held heavy does not dominate demos.
+    recovery_post_dodge_delay_s: float = 0.15  # Separate recovery from a directional dodge's cancel window; live-verify timing.
     recovery_setup_jump_distance: float = 0.035  # Jump near the ledge so setup reliably creates an offstage start.
     dash_distance: float = 0.20  # Reserve ground dashes for targets well beyond walking range.
     dash_cooldown_steps: int = 12  # Space dash inputs so one approach does not become dodge spam.
@@ -55,6 +57,7 @@ class HeuristicState:
     last_pickup_step: int = -1_000_000
     combat_threat_steps: int = 0
     last_recovery_heavy_step: int = -1_000_000
+    last_recovery_dodge_at: float = float("-inf")
 
 
 class HeuristicTeacher:
@@ -293,13 +296,22 @@ def _recovery_action(
             <= cfg.recovery_dodge_ready_threshold
         )
         if dodge_ready:
-            return int((_DODGE_UP if ledge_is_above else _DODGE)[hdir])
+            # Recovery never intends a neutral air dodge: following it with a
+            # heavy can become a signature via gravity cancel instead of recovery.
+            dodge_hdir = _horizontal(dx_to_ledge, 0.0)
+            if dodge_hdir == 0:
+                dodge_hdir = _horizontal(StateSpec.get(obs, "signed_dx_to_stage_center"), 0.0) or 1
+            if time.perf_counter() - state.last_recovery_dodge_at >= cfg.recovery_post_dodge_delay_s:
+                state.last_recovery_dodge_at = time.perf_counter()
+                return int((_DODGE_UP if ledge_is_above else _DODGE)[dodge_hdir])
 
         heavy_ready = (
             state.step - state.last_recovery_heavy_step
             >= max(1, int(cfg.recovery_heavy_cooldown_steps))
         )
-        if heavy_ready:
+        # Cooldown means "a dodge was attempted", not "its cancel window ended".
+        # Use elapsed time, since detector/recording cadence changes steps/second.
+        if heavy_ready and time.perf_counter() - state.last_recovery_dodge_at >= cfg.recovery_post_dodge_delay_s:
             state.last_recovery_heavy_step = state.step
             # Recovery is the remaining vertical resource after jumps and air
             # dodge are gone. Requiring the ledge to already be above suppressed

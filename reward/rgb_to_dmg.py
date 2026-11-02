@@ -1,9 +1,18 @@
+from __future__ import annotations
+
 import numpy as np
 
-def get_dmg(rgb: np.ndarray) -> float:
+def decode_damage(rgb: np.ndarray) -> float | None:
+    """Existing colour curve, with abstention distinct from genuine white/zero."""
+    rgb = np.asarray(rgb)
+    if rgb.shape != (3,) or not np.isfinite(rgb).all() or np.any((rgb < 0) | (rgb > 255)):
+        return None
     r = rgb[0]
     g = rgb[1]
     b = rgb[2]
+
+    if r == g == b == 255:
+        return 0.0
 
     # White to Yellow (0-50)
     if g == 255 and r == 255 and b < 255:
@@ -40,8 +49,13 @@ def get_dmg(rgb: np.ndarray) -> float:
         dmg = 300 + (74 - r) / 74 * 51
         return max(300, min(351, dmg))
     
-    # Default case - no damage detected
+    # A flash/anti-aliased pixel is unknown, not evidence that damage was healed.
     else:
-        return 0.0
+        return None
 
+
+def get_dmg(rgb: np.ndarray) -> float:
+    """Legacy numeric API for inspection tools; live reward uses decode_damage."""
+    value = decode_damage(rgb)
+    return 0.0 if value is None else value
 

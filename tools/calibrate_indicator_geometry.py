@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 """Measure the indicator-to-character association constants from labelled data.
 
-`feature_extractor/memory/detection_schema.py` decides which `character` carries the
-`indicator_self` triangle with
+This calibrates the historical outer geometry envelope used by
+`feature_extractor/memory/detection_schema.py`:
 
     score = H_WEIGHT * |dx| + V_WEIGHT * max(0, dy)
 
-rejecting a match when `score > INDICATOR_MAX_MATCH_SCORE`, or when the character sits
-more than `INDICATOR_ABOVE_TOLERANCE` above the indicator. Those constants started life
-as guesses. This measures them.
+The live bounded_triangle_v2 resolver additionally checks body-relative height,
+runner-up ambiguity, and bounded temporal continuation. This report does NOT
+evaluate those gates or measure live identity accuracy. Its legacy
+INDICATOR_ABOVE_TOLERANCE output is retained for historical comparisons only.
 
 Why not just take min/max of the observed scores
 ------------------------------------------------

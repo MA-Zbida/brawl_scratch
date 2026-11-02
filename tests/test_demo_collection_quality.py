@@ -6,6 +6,7 @@ from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from feature_extractor.memory.state_spec import StateSpec
 from train import collect_bc_locomotion_demos as collector
@@ -408,3 +409,40 @@ def test_recovery_collector_discards_inactive_goal_respawn_frames(
         assert archive["obs"].shape[0] == 2
         assert not np.any(np.isclose(archive["goal_target"], 0.0).all(axis=1))
         assert np.all(np.any(archive["goal_mask"] > 0.0, axis=1))
+
+
+@pytest.mark.parametrize("visual", [True, False])
+def test_weapon_collection_survives_one_negative_classifier_refresh(monkeypatch, tmp_path, visual):
+    class WeaponEnv(_TrivialThenUsefulEnv):
+        def __init__(self):
+            super().__init__()
+            self.stage_spec = build_phase_spec("weapon_acquisition")
+
+        def reset(self):
+            obs, info = super().reset()
+            self.current_error = .2
+            info["goal_type"] = "weapon_acquisition"
+            return obs, info
+
+        def step(self, action):
+            obs, reward, terminated, truncated, info = super().step(action)
+            negative = visual and 2 <= self.step_count <= 5
+            obs[StateSpec.index("player_has_weapon")] = float(not negative)
+            info.update(
+                goal_type="weapon_acquisition", weapon_visual_confirmed=float(not negative),
+                player_weapon_visual_valid=float(visual), player_weapon_visual_confidence=.99,
+                player_weapon_visual_armed=float(not negative),
+                player_weapon_visual_fresh=float(self.step_count not in (3, 4, 5)),
+            )
+            return obs, reward, terminated, truncated, info
+
+    args = _collector_args(tmp_path, "weapon_acquisition", weapon_classifier=visual,
+                           max_collection_attempts=1, max_episode_steps=12,
+                           weapon_hold_steps=4)
+    path = _run_fake_collection(monkeypatch, args, WeaponEnv())
+    with np.load(path, allow_pickle=False) as data:
+        assert data["episodes_collected"].tolist() == [1]
+        assert data["episodes_rejected_weapon"].tolist() == [0]
+        assert data["weapon_drop_grace_unit"].tolist() == [
+            "fresh_confident_refreshes" if visual else "control_steps"
+        ]

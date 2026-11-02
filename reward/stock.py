@@ -9,7 +9,8 @@ def get_stock(rgb):
     if r >= 210 and g <= 50 and b <= 50:
         return -1
 
-    # Cyan flash: opponent stock lost (you won stock trade)
+    # Cyan at the player's calibrated HUD point is game-credited stock gain.
+    # Do not reinterpret it as every opponent death or impose a guessed hit timer.
     if r <= 80 and g >= 210 and b >= 210:
         return 1
 

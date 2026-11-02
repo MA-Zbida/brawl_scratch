@@ -23,7 +23,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from env import BrawlDeepEnv, EnvConfig
+from env import BrawlDeepEnv, EnvConfig, RUNTIME_CONTRACT
 from feature_extractor.memory.state_spec import StateSpec
 from reward.match_objective import MatchObjective, NoMatchReward
 from train.checkpoint_roles import read_checkpoint_metadata
@@ -109,6 +109,12 @@ class FinalTrainingMetricsCallback(BaseCallback):
 
 
 def _make_env(cfg: FinalAgentConfig) -> BrawlDeepEnv:
+    if cfg.weapon_state_source == "visual_fusion":
+        # Catch path typos before environment creation; never substitute an older model.
+        checkpoint = Path(cfg.weapon_classifier_checkpoint)
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"Weapon classifier checkpoint not found: {checkpoint}")
+        print(f"Weapon classifier checkpoint: {checkpoint.resolve()}")
     return BrawlDeepEnv(
         reward_provider=NoMatchReward(),
         config=EnvConfig(
@@ -119,6 +125,8 @@ def _make_env(cfg: FinalAgentConfig) -> BrawlDeepEnv:
             action_repeat_min_steps=1,
             action_repeat_max_steps=1,
             tap_latch_steps=1,
+            weapon_classifier_enabled=cfg.weapon_state_source == "visual_fusion",
+            weapon_classifier_checkpoint=cfg.weapon_classifier_checkpoint,
         )
     )
 
@@ -147,11 +155,13 @@ def main() -> None:
     save_dir = Path(cfg.save_dir) / session
     save_dir.mkdir(parents=True, exist_ok=True)
     (save_dir / "config.json").write_text(
-        json.dumps(asdict(cfg) | {"reward_version": MatchObjective.VERSION}, indent=2),
+        json.dumps(asdict(cfg) | {"reward_version": MatchObjective.VERSION} | RUNTIME_CONTRACT, indent=2),
         encoding="utf-8",
     )
     print(f"Run directory: {save_dir}")
     print(f"Mode: {cfg.mode} | policy device: {cfg.device} | budget per block: {cfg.timesteps:,}")
+    print(f"Weapon state source: {cfg.weapon_state_source} (policy device remains {cfg.device})")
+    print(f"Runtime contracts: {RUNTIME_CONTRACT}; old checkpoints retain weights, not old input/HUD behaviour.")
     print(f"Starting in {cfg.delay:.0f}s - switch to Brawlhalla with attacking Easy Mordex")
     time.sleep(max(0., cfg.delay))
     match = MatchTrainingEnv(
@@ -163,7 +173,7 @@ def main() -> None:
         writer = WorldReplayWriter(
             cfg.world_replay, phase="final_agent",
             metadata=asdict(cfg) | {"reward_version": MatchObjective.VERSION,
-                                   "run_directory": str(save_dir)})
+                                   "run_directory": str(save_dir)} | RUNTIME_CONTRACT)
         env = ReplayGymWrapper(match, writer)
         print(f"World replay: {writer.dir}")
     vec_env = DummyVecEnv([lambda: env])
@@ -183,7 +193,7 @@ def main() -> None:
             metadata = read_checkpoint_metadata(cfg.resume) | {"resumed_from": cfg.resume}
         model.set_logger(configure(str(save_dir / "ppo"), ["stdout", "csv"]))
         campaign = FinalCampaign(cfg, match, save_dir,
-                                 metadata | {"reward_version": MatchObjective.VERSION})
+                                 metadata | {"reward_version": MatchObjective.VERSION} | RUNTIME_CONTRACT)
         campaign.init_callback(model)
         campaign.save("initializer" if cfg.init_from else "resume_start")
         while cfg.timesteps > 0:

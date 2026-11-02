@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "name": "structured27_bc_ppo_v1",
+  "recorded_at": "2026-09-23",
+  "source_run": "train/models/primitive27/20260923-102521_584762",
+  "status": "completed_pilot_not_evidence_of_improvement",
+  "preservation": "Existing files were not moved or rewritten; hashes identify local artifacts, not a backup.",
+  "provenance_limit": "Perception and calibration hashes observed at freeze time; the historical run did not hash these dependencies.",
+  "artifacts": [
+    {
+      "path": "train/models/primitive27/20260922-204156_198297/demos.npz",
+      "sha256": "cd03dabcaa5f561ec3b4be4d4d53398a249db6684bd9979b3a90a82c6e26e6e4"
+    },
+    {
+      "path": "train/models/primitive27/pickup_geometry_v1/bc_init.zip",
+      "sha256": "a0d020303b27d4cbb2bdcef121796f10673abd6fd630ff00509e5c71b63ea08e"
+    },
+    {
+      "path": "train/models/primitive27/20260923-102521_584762/latest.zip",
+      "sha256": "f03f4a608475b91a054d14528912f89068f2126144a9a80be899a8c1acf17a7e"
+    },
+    {
+      "path": "train/models/primitive27/20260923-102521_584762/best.zip",
+      "sha256": "38cc5b113c7016b682ae27197764292465c3fe551fe85d615ed39ebaf7a8e6b5"
+    },
+    {
+      "path": "train/models/primitive27/20260923-102521_584762/config.json",
+      "sha256": "391ac172e4528bcb9daa6bcedde4f942bc3421885b89c1e6e900fc72186a4f87"
+    },
+    {
+      "path": "train/models/primitive27/20260923-102521_584762/bc_agreement.jsonl",
+      "sha256": "d529472a4487a0338ccac7744457bcc8b8ef87a6089cdc4c46d4906516f483f2"
+    },
+    {
+      "path": "train/models/primitive27/20260923-102521_584762/evaluations.csv",
+      "sha256": "a031ea716bda9544cfb1127bfcbc30cc0ecc1d6fd80a2201f6b1faa2bb40fdcd"
+    },
+    {
+      "path": "feature_extractor/yolo/best.engine",
+      "sha256": "becdbec2eb857a8f718b22b9ebf15b7ac0ef303be495c18ac5b8b9bd6976827b"
+    },
+    {
+      "path": "train/models/weapon_classifier_r18_live_v1.pt",
+      "sha256": "7a672ff8876b6236e3c93f4a2c14b12d16dbae6615e65a21404f15207c71c146"
+    },
+    {
+      "path": "config.py",
+      "sha256": "312b68a55b37406350d5a57cd1a17bd3712de0377863e0a2e7a90c003f369654"
+    }
+  ]
+}

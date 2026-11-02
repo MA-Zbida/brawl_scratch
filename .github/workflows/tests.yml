@@ -26,7 +26,7 @@ jobs:
           python -m pip install --upgrade pip
           # CPU torch only: CI exercises logic, not the GPU pipeline.
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install numpy gymnasium "stable-baselines3[extra]" matplotlib pytest pyyaml
+          python -m pip install numpy gymnasium "stable-baselines3[extra]==2.9.0" "sb3-contrib==2.9.0" opencv-python-headless matplotlib pytest pyyaml
           # ultralytics, dxcam, pydirectinput and keyboard are Windows/GPU-only.
           # tests/conftest.py substitutes them when absent, so the suite runs headless.
 

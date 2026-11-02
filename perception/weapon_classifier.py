@@ -2,15 +2,15 @@
 
 Weapon state has two sources and neither is sufficient alone:
 
-* **Action inference** knows the agent pressed pickup. It is correct until a
-  knockback disarms the fighter, which it cannot see at all, and it says nothing
-  whatsoever about the opponent.
+* **Action inference** records executed pickup/throw intent. Pickup remains
+  provisional until confirmed; an ignored input is not proof of possession.
+  It cannot see knockback disarms and says nothing about the opponent.
 * **This classifier** sees the result. Cross-validated at 95.7% on 300 hand-labelled
   crops, it works identically for both fighters because it only looks at pixels.
 
 They fail in different directions, so `WeaponStateFusion` below keeps both and
-treats a confident disagreement as evidence of the event action-inference is blind
-to: a weapon lost to knockback.
+treats sustained confident disagreement after confirmed possession as a possible
+disarm, without turning isolated prediction errors into events.
 
 **Cadence.** Inference costs ~4.4 ms for two crops, which is 21% of a 21 ms step --
 too much to pay every frame. Weapon state is also one of the slowest-moving
@@ -29,12 +29,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
 #: Below this confidence the classifier abstains rather than overwrite a prior.
-DEFAULT_MIN_CONFIDENCE = 0.70
+from perception.weapon_evidence import DEFAULT_MIN_CONFIDENCE
 
 
 @dataclass
@@ -45,8 +45,8 @@ class WeaponPrediction:
     #: not run on this frame. Callers must not treat an abstention as "unarmed".
     valid: bool = True
     #: True only on a frame where the classifier actually evaluated this crop.
-    #: Held predictions may update the fused state, but cannot independently
-    #: certify that a pickup happened on the current transition.
+    #: Held predictions are diagnostic history, not new evidence capable of
+    #: overriding a more recent pickup/throw inference.
     fresh: bool = True
 
 
@@ -88,6 +88,8 @@ class WeaponClassifier:
 
         self._frame = 0
         self._cache: dict[str, WeaponPrediction] = {}
+        # Diagnostics only; normal training performs no crop copies or disk I/O.
+        self.prediction_observer: Optional[Callable] = None
 
     # ── cropping ───────────────────────────────────────────────────────────
 
@@ -134,7 +136,13 @@ class WeaponClassifier:
         """
         run = self.should_run()
         self._frame += 1
-        if not run or frame is None or not boxes:
+        if frame is None:
+            self._cache.clear()
+            return {}
+        # A returning fighter must be re-observed, not inherit a crop from before
+        # disappearance/respawn. Prune even when this is a cadence-skipped frame.
+        self._cache = {name: prediction for name, prediction in self._cache.items() if name in boxes}
+        if not run or not boxes:
             return {name: replace(prediction, fresh=False) for name, prediction in self._cache.items()}
 
         names: list[str] = []
@@ -149,9 +157,12 @@ class WeaponClassifier:
             names.append(name)
             patches.append(patch)
 
-        for name, prediction in zip(names, self.predict_batch(patches)):
+        observer = getattr(self, "prediction_observer", None)
+        for name, patch, prediction in zip(names, patches, self.predict_batch(patches)):
             self._cache[name] = prediction
             refreshed.add(name)
+            if observer is not None:
+                observer(name, boxes[name], patch, prediction)
         return {
             name: prediction if name in refreshed else replace(prediction, fresh=False)
             for name, prediction in self._cache.items()
@@ -159,33 +170,64 @@ class WeaponClassifier:
 
 
 class WeaponStateFusion:
-    """Combine action-inferred weapon state with the classifier.
+    """Immediate action intent, bounded confirmation, debounced visual correction.
 
-    Action inference is authoritative about *intent* -- it knows a pickup was
-    pressed -- and blind to knockback disarms. The classifier is authoritative
-    about *appearance* and has a few percent of error. Neither should simply
-    override the other, so:
-
-    * the classifier only overrides when it is confident (`min_confidence`), which
-      keeps its residual error from flickering the flag every few frames;
-    * a confident "unarmed" against an action-inferred "armed" is reported as a
-      **disarm event**. That is the knockback drop neither source detects alone,
-      and it is worth surfacing rather than silently absorbing.
+    Counters count independent classifier refreshes, never cached predictions.
+    A rejected pickup is not a disarm: possession must first be established.
     """
 
     def __init__(self, min_confidence: float = DEFAULT_MIN_CONFIDENCE) -> None:
         self.min_confidence = float(min_confidence)
+        if not 0 <= self.min_confidence <= 1:
+            raise ValueError('Invalid weapon confidence threshold')
         self.disarm_events = 0
+        self.reset()
+
+    def reset(self) -> None:
+        self.confirmed = False
+        self.pickup_pending = 0
+        self.throw_guard = 0
+        self.positive_refreshes = self.negative_refreshes = 0
+        self.evidence_age = 0
+
+    def observe_action(self, *, pickup: bool, dropped: bool) -> None:
+        """Called AFTER fusion of the capture that predates this executed input."""
+        if pickup or dropped:
+            self.reset()
+            # Three classifier periods to establish a pickup, two to let a
+            # throw leave the crop. Neither intent can latch state forever.
+            self.pickup_pending = 12 if pickup and not dropped else 0
+            self.throw_guard = 8 if dropped else 0
 
     def resolve(self, action_inferred: bool, prediction: Optional[WeaponPrediction]) -> tuple[bool, bool]:
         """Return `(armed, disarm_detected)`."""
-        if prediction is None or not prediction.valid:
-            return bool(action_inferred), False
-        if prediction.confidence < self.min_confidence:
-            return bool(action_inferred), False
-
-        armed = bool(prediction.armed)
-        disarm = bool(action_inferred and not armed)
-        if disarm:
-            self.disarm_events += 1
-        return armed, disarm
+        was_pending = self.pickup_pending > 0
+        self.pickup_pending = max(0, self.pickup_pending - 1)
+        self.evidence_age += 1
+        if self.evidence_age > 8:
+            self.positive_refreshes = self.negative_refreshes = 0
+        if self.throw_guard:
+            self.throw_guard -= 1
+            return False, False
+        reliable = (prediction is not None and prediction.valid and prediction.fresh
+                    and self.min_confidence <= prediction.confidence <= 1.)
+        if reliable:
+            self.evidence_age = 0
+            if prediction.armed:
+                self.positive_refreshes += 1
+                self.negative_refreshes = 0
+                if self.positive_refreshes >= 2:
+                    self.confirmed = True
+                    self.pickup_pending = 0
+                    return True, False
+            else:
+                self.negative_refreshes += 1
+                self.positive_refreshes = 0
+                if self.negative_refreshes >= 3 and not self.pickup_pending:
+                    disarm = bool(action_inferred and self.confirmed)
+                    self.disarm_events += int(disarm)
+                    self.confirmed = False
+                    return False, disarm
+        if was_pending and not self.pickup_pending and not self.confirmed:
+            return False, False
+        return bool(action_inferred), False

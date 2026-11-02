@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from brawl.pipelines.llc.phase_registry import PHASE_ORDER
+from brawl.paths import DATA, LEGACY_RUNS
 
 PHASE_CHOICES = PHASE_ORDER
 
@@ -23,7 +24,7 @@ class TrainConfig:
     phase: str = PHASE_ORDER[0]
     timesteps: int = 500_000
     max_episode_steps: int = 200
-    save_dir: str = "train/models"
+    save_dir: str = str(LEGACY_RUNS / "llc")
     model_name: str = ""
     resume: Optional[str] = None
     seed: int = 42
@@ -78,7 +79,7 @@ class TrainConfig:
     #: captures). Enabling it corrupts `player_has_weapon` throughout training with
     #: no visible symptom. Turn on once retrained on live crops.
     weapon_classifier: bool = False
-    weapon_classifier_checkpoint: str = "train/models/weapon_classifier_r18.pt"
+    weapon_classifier_checkpoint: str = str(DATA / "models" / "weapon_classifier_r18.pt")
     yolo_every: int = 1
     # Transition recording is opt-in because compression and disk writes compete
     # with the real-time loop; reserve it for deliberate world-model sessions.

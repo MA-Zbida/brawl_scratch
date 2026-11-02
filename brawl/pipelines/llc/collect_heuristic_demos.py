@@ -9,6 +9,7 @@ from pathlib import Path
 
 from brawl.paths import REPO_ROOT
 from brawl.pipelines.llc.phase_registry import PHASE_ORDER
+from brawl.paths import LEGACY_RUNS
 
 
 PHASES = PHASE_ORDER
@@ -33,7 +34,7 @@ def parse_args() -> argparse.Namespace:
         help="'all', 'core', or comma/semicolon-separated phase names",
     )
     p.add_argument("--episodes-per-phase", type=int, default=50)
-    p.add_argument("--output-dir", type=str, default="train/models")
+    p.add_argument("--output-dir", type=str, default=str(LEGACY_RUNS / "llc"))
     p.add_argument("--delay", type=float, default=3.0)
     p.add_argument("--python", type=str, default=sys.executable or "python")
     p.add_argument("--max-collection-attempts", type=int, default=0)

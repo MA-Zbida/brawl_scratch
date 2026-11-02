@@ -20,6 +20,7 @@ from scripts.llc.print_llc_phase_commands import (
 from scripts.llc.record_llc_observation import observation_status
 from scripts.llc.validate_llc_demos import validate_demo_archive
 from brawl.pipelines.llc.retention import PHASE_ORDER, previous_phases
+from brawl.paths import LEGACY_RUNS
 
 
 COLLECT_COMMANDS: dict[str, str] = {
@@ -111,10 +112,10 @@ class Advice:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Inspect LLC artifacts and print the next safe manual training action")
     p.add_argument("--phase", type=str, default="auto", choices=["auto", *list(PHASE_ORDER)])
-    p.add_argument("--models-dir", type=str, default="train/models")
-    p.add_argument("--outputs-dir", type=str, default="outputs")
+    p.add_argument("--models-dir", type=str, default=str(LEGACY_RUNS / "llc"))
+    p.add_argument("--outputs-dir", type=str, default=str(LEGACY_RUNS / "llc"))
     p.add_argument("--device", type=str, default="$device")
-    p.add_argument("--best-scores", type=str, default="train/models/llc_retention_best.json")
+    p.add_argument("--best-scores", type=str, default=str(LEGACY_RUNS / "llc" / "llc_retention_best.json"))
     p.add_argument("--python", type=str, default="python")
     p.add_argument("--bc-epochs", type=int, default=20)
     p.add_argument("--eval-episodes", type=int, default=5)

@@ -15,8 +15,8 @@
 # the run even when the process exits 0. Exit codes are the only failure signal here.
 $ErrorActionPreference = "Continue"
 $PY   = "C:\venvs\brawl312\Scripts\python.exe"
-$M    = "train\models\easy_bot_v0"
-$D    = "train\models\recollected"
+$M    = "runs\legacy\llc\easy_bot_v0"
+$D    = "runs\legacy\llc\recollected"
 $STEPS = 200000
 $LOG  = "$M\resume2_$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 New-Item -ItemType Directory -Force -Path $LOG | Out-Null

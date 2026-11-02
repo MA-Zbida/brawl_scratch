@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from brawl.paths import REPO_ROOT, source_files
 from brawl.training.run_utils import sha256, write_json
+from brawl.paths import DATA
 
 
 def block_schedule(rounds: int) -> list[tuple[str, str]]:
@@ -211,7 +212,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument('--device', choices=('cpu', 'cuda'), default='cpu')
     p.add_argument('--delay', type=float, default=5.)
     p.add_argument('--weapon-classifier-checkpoint', type=Path,
-                   default=Path('train/models/weapon_classifier_r18_live_v1.pt'))
+                   default=DATA / 'models' / 'weapon_classifier_r18_live_v1.pt')
     return p
 
 

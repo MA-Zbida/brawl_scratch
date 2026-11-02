@@ -19,7 +19,7 @@ def test_train_config_parses_anti_collapse_flags(monkeypatch) -> None:
             "5",
             "--eval-include-previous",
             "--retention-scores-path",
-            "train/models/llc_retention_best.json",
+            "runs/legacy/llc/llc_retention_best.json",
         ],
     )
 
@@ -29,7 +29,7 @@ def test_train_config_parses_anti_collapse_flags(monkeypatch) -> None:
     assert cfg.bc_demos_path == "a.npz;b.npz"
     assert cfg.anchor_pool_size == 5
     assert cfg.eval_include_previous is True
-    assert cfg.retention_scores_path == "train/models/llc_retention_best.json"
+    assert cfg.retention_scores_path == "runs/legacy/llc/llc_retention_best.json"
 
 
 def test_all_skills_defaults_are_consolidation_oriented() -> None:

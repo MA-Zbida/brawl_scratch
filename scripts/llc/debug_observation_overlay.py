@@ -53,6 +53,7 @@ from brawl.env.live import BrawlDeepEnv, EnvConfig, NullInputController
 from brawl.state.state_spec import StateSpec
 from brawl.pipelines.llc.curriculum_config import PHASES, build_phase_spec
 from brawl.pipelines.llc.stage_common import StageGoalEnv, StageSpec
+from brawl.paths import LEGACY_RUNS
 
 
 MOVEMENT_KEYS = ("a", "d", "s", "w")
@@ -66,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Record phase-aware observation debug video while playing")
     p.add_argument("--phase", type=str, required=True, choices=list(PHASES), help="Phase used for success logic")
     p.add_argument("--output", type=str, default="", help="Output video path (.mp4). Auto-generated if empty")
-    p.add_argument("--out-dir", type=str, default="debug", help="Directory for auto-generated output")
+    p.add_argument("--out-dir", type=str, default=str(LEGACY_RUNS / "llc" / "debug_videos"), help="Directory for auto-generated output")
     p.add_argument("--target-fps", type=int, default=20, help="Environment step rate")
     p.add_argument("--yolo-every", type=int, default=3, help="Run YOLO every N steps")
     p.add_argument("--yolo-conf", type=float, default=0.15, help="YOLO confidence threshold")

@@ -12,9 +12,10 @@ from pathlib import Path
 import numpy as np
 
 from brawl.pipelines.llc.phase_registry import PHASE_ORDER
+from brawl.paths import LEGACY_RESULTS, LEGACY_RUNS
 
-MODELS_DIR = Path("train/models")
-FIGURES_DIR = Path("assets/figures")
+MODELS_DIR = LEGACY_RUNS / "llc"
+FIGURES_DIR = LEGACY_RESULTS / "llc" / "figures"
 
 PHASES = PHASE_ORDER
 

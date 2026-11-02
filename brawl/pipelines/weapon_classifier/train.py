@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
+from brawl.paths import DATA
 
 
 #: Must match the padding used when the crops were cut, or the model sees a
@@ -121,8 +122,8 @@ def load_images(cv2, paths: Sequence[Path], size: tuple[int, int]) -> np.ndarray
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data", type=Path, default=Path("data/weapon_crops"))
-    p.add_argument("--out", type=Path, default=Path("train/models/weapon_classifier.pt"))
+    p.add_argument("--data", type=Path, default=DATA / "weapon_crops")
+    p.add_argument("--out", type=Path, default=DATA / "models" / "weapon_classifier.pt")
     p.add_argument("--width", type=int, default=64)
     p.add_argument("--height", type=int, default=96, help="Median crop aspect is ~1.65 h/w.")
     p.add_argument("--folds", type=int, default=5)

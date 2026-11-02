@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from brawl.paths import LEGACY_RUNS, REPO_ROOT
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -56,8 +57,8 @@ INSTALL_REQUIREMENTS = "python -m pip install -r requirements.txt"
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Preflight checks before live Brawlhalla LLC training")
     p.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu", "auto"])
-    p.add_argument("--models-dir", type=str, default="train/models")
-    p.add_argument("--outputs-dir", type=str, default="outputs")
+    p.add_argument("--models-dir", type=str, default=str(LEGACY_RUNS / "llc"))
+    p.add_argument("--outputs-dir", type=str, default=str(LEGACY_RUNS / "llc"))
     p.add_argument("--strict-warnings", action="store_true", help="Treat warnings as failures")
     p.add_argument("--skip-cuda-import", action="store_true", help="Do not import torch to query CUDA")
     return p.parse_args()
@@ -138,7 +139,7 @@ def check_cuda(args: argparse.Namespace) -> Check:
 def check_required_files() -> list[Check]:
     checks: list[Check] = []
     for raw in REQUIRED_FILES:
-        path = Path(raw)
+        path = REPO_ROOT / raw
         if path.exists():
             size = path.stat().st_size if path.is_file() else 0
             checks.append(Check(f"file:{raw}", "PASS", f"found ({size} bytes)" if size else "found"))

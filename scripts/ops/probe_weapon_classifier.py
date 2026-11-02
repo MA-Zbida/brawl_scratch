@@ -28,14 +28,15 @@ _HERE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_HERE))
 
 import brawl.capture_first  # noqa: E402,F401  (must precede torch)
+from brawl.paths import DATA, LEGACY_RUNS
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--checkpoint", type=str, default="train/models/weapon_classifier_r18.pt")
+    p.add_argument("--checkpoint", type=str, default=str(DATA / "models" / "weapon_classifier_r18.pt"))
     p.add_argument("--samples", type=int, default=12)
     p.add_argument("--interval", type=float, default=0.5, help="Seconds between samples.")
-    p.add_argument("--out", type=Path, default=Path("weapon_probe"))
+    p.add_argument("--out", type=Path, default=LEGACY_RUNS / "weapon_classifier" / "probe")
     return p.parse_args(argv)
 
 

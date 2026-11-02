@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 
-SCRIPT = Path("experiments/easy_bot_v0/run_chain.ps1").resolve()
+SCRIPT = Path("scripts/llc/easy_bot_v0/run_chain.ps1").resolve()
 
 
 def _run_driver(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:

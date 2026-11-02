@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.llc.check_llc_phase_gate import evaluate_gate, recommend_actions
 from scripts.llc.validate_llc_demos import default_paths_for_phase, validate_demo_archive
+from brawl.paths import LEGACY_RUNS
 
 
 PLOT_SUFFIXES = (
@@ -27,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--phase", required=True, help="Current phase")
     p.add_argument("--eval-csv", required=True, help="Retention/eval CSV used for gate checking")
     p.add_argument("--phases", type=str, default="", help="'all' or comma/semicolon phase list. Default: current + previous")
-    p.add_argument("--models-dir", type=str, default="train/models")
+    p.add_argument("--models-dir", type=str, default=str(LEGACY_RUNS / "llc"))
     p.add_argument("--prefix", type=str, default="", help="Plot/model prefix. Default: llc_<phase>")
     p.add_argument("--out", type=str, default="", help="Markdown output path")
     p.add_argument("--include-demo-check", action="store_true", default=True)
@@ -193,7 +194,7 @@ def build_report(args: argparse.Namespace) -> str:
 def main() -> None:
     args = parse_args()
     report = build_report(args)
-    out = Path(args.out) if args.out else Path("outputs") / f"llc_{str(args.phase).strip().lower()}_run_report.md"
+    out = Path(args.out) if args.out else LEGACY_RUNS / "llc" / f"llc_{str(args.phase).strip().lower()}_run_report.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(report, encoding="utf-8")
     print(out)

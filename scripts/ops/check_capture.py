@@ -25,6 +25,7 @@ import argparse
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
+from brawl.paths import ASSETS
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -208,7 +209,7 @@ def diagnose_order() -> int:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", type=Path,
-                   default=Path("assets/yolo/best.engine"))
+                   default=ASSETS / "yolo" / "best.engine")
     p.add_argument("--imgsz", type=int, default=960)
     p.add_argument("--rebuild-engine", action="store_true",
                    help="Re-export the .engine from the sibling .pt against the installed TensorRT")

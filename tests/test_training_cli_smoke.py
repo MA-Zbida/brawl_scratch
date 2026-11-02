@@ -70,7 +70,7 @@ def test_bc_pretrain_cli_accepts_current_phase_names(monkeypatch) -> None:
             "--epochs",
             "1",
             "--demos",
-            "train/models/movement_fluency_demos.npz",
+            "runs/legacy/llc/movement_fluency_demos.npz",
         ],
     )
 

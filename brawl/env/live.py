@@ -49,6 +49,7 @@ from brawl.perception.weapon_classifier import (
 from brawl.reward.extract_rgb import get_rgb
 from brawl.reward.rgb_to_dmg import get_dmg
 from brawl.reward.stock import get_stock
+from brawl.paths import DATA
 
 
 RUNTIME_CONTRACT = {
@@ -82,7 +83,7 @@ class EnvConfig:
     # Below ~90% the classifier is worse than action inference for the agent's own
     # weapon state, so the weak model would make `player_has_weapon` noisier rather
     # than cleaner while looking like an upgrade.
-    weapon_classifier_checkpoint: str = "train/models/weapon_classifier_r18.pt"
+    weapon_classifier_checkpoint: str = str(DATA / "models" / "weapon_classifier_r18.pt")
     weapon_classifier_device: str = ""
     weapon_classifier_interval: int = 4
     weapon_classifier_min_confidence: float = DEFAULT_MIN_CONFIDENCE

@@ -30,7 +30,7 @@ def _args(**overrides) -> Namespace:
     data = {
         "python": "python",
         "episodes_per_phase": 50,
-        "output_dir": "train/models",
+        "output_dir": "runs/legacy/llc",
         "delay": 0.0,
         "max_collection_attempts": 0,
         "min_episode_steps": 4,
@@ -78,7 +78,7 @@ def test_command_for_phase_runs_heuristic_single_phase_collector() -> None:
     assert "--phase weapon_acquisition" in joined
     assert "--teacher heuristic" in joined
     assert "--episodes 50" in joined
-    assert "--output train\\models\\weapon_acquisition_demos.npz" in joined or "--output train/models/weapon_acquisition_demos.npz" in joined
+    assert "--output runs\\legacy\\llc\\weapon_acquisition_demos.npz" in joined or "--output runs/legacy/llc/weapon_acquisition_demos.npz" in joined
     assert "--weapon-hold-steps 20" in joined
     assert "--weapon-reset-max-steps 30" in joined
     assert "--weapon-drop-grace-steps 3" in joined

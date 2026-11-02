@@ -13,9 +13,9 @@ def _option(argv: tuple[str, ...], name: str) -> str:
 def test_three_hour_plan_is_one_sequential_policy_chain_with_no_recovery() -> None:
     plan = build_run_plan(
         python="C:/venvs/brawl312/Scripts/python.exe",
-        models_dir=Path("train/models/easy_bot_v0"),
-        demos_dir=Path("train/models/recollected"),
-        movement_init=Path("train/models/easy_bot_v0/llc_movement_fluency_masked_pilot.zip"),
+        models_dir=Path("runs/legacy/llc/easy_bot_v0"),
+        demos_dir=Path("runs/legacy/llc/recollected"),
+        movement_init=Path("runs/legacy/llc/easy_bot_v0/llc_movement_fluency_masked_pilot.zip"),
         world_replay=Path("data/world_replay/easy_bot_v0_3h"),
         opponent_setup="moving_non_attacking",
         movement_steps=60_000,

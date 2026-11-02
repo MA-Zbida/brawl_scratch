@@ -21,6 +21,7 @@ from brawl.state.state_spec import StateSpec
 from brawl.reward.providers import MatchRewardProvider
 from brawl.pipelines.final_agent.policy import load_final_model
 from brawl.world_model.replay_log import WorldReplayRecorder, WorldReplayWriter
+from brawl.paths import LEGACY_RUNS
 
 
 @dataclass
@@ -73,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--stochastic", action="store_true")
     parser.add_argument("--delay", type=float, default=3.0)
-    parser.add_argument("--csv", default="outputs/final_agent_matches.csv")
+    parser.add_argument("--csv", default=str(LEGACY_RUNS / "final_agent" / "matches.csv"))
     parser.add_argument("--world-replay", default="")
     parser.add_argument("--yolo-every", type=int, default=1)
     return parser

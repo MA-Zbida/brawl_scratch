@@ -23,6 +23,7 @@ from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 
 from brawl.control.action_space import ACTION_DIM, Action
 from brawl.analysis import io, style
+from brawl.paths import LEGACY_RUNS
 
 
 PRIMARY_PHASES: tuple[str, ...] = (
@@ -37,8 +38,8 @@ PHASE_LABEL = {
     "spacing_neutral": "Spacing",
     "combat_execution": "Combat",
 }
-DEFAULT_MODELS_DIR = Path("train/models/easy_bot_v0")
-DEFAULT_DEMOS_DIR = Path("train/models/recollected")
+DEFAULT_MODELS_DIR = LEGACY_RUNS / "llc" / "easy_bot_v0"
+DEFAULT_DEMOS_DIR = LEGACY_RUNS / "llc" / "recollected"
 DEFAULT_OUTPUT_DIR = Path("brawlhalla_gcrl_paper/evidence")
 RETENTION_GATE = 0.85
 

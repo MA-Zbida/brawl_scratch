@@ -13,6 +13,7 @@ from pathlib import Path
 from brawl.training.cli import parser as shared_parser, _validate
 from brawl.training.runner import TrainingHooks, run_training
 from brawl.training.run_utils import write_json as _json, sha256 as _sha256, prompt as _prompt
+from brawl.paths import LEGACY_RUNS
 
 
 def parser(*, primitive=False):
@@ -150,7 +151,7 @@ def main(argv=None):
     # Validate inputs before touching live controls or creating output artifacts.
     data = load_demos(args.demos) if args.demos else None
     model = load_model(args.resume) if args.resume else None
-    directory = args.run_dir or Path('train/models/semantic57') / (time.strftime('%Y%m%d-%H%M%S') + '_' + uuid.uuid4().hex[:6])
+    directory = args.run_dir or (LEGACY_RUNS / 'semantic57') / (time.strftime('%Y%m%d-%H%M%S') + '_' + uuid.uuid4().hex[:6])
     directory.mkdir(parents=True, exist_ok=False)
     hashes = {name: _sha256(path)
               for name, path in (('demos', args.demos), ('resume', args.resume)) if path}

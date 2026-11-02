@@ -20,10 +20,11 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from brawl.compat import load_sb3
+from brawl.paths import LEGACY_CONFIGS
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG = REPO_ROOT / "experiments" / "easy_bot_v0" / "config.json"
+DEFAULT_CONFIG = LEGACY_CONFIGS / "llc" / "easy_bot_v0" / "config.json"
 
 
 class PreflightFailure(RuntimeError):
@@ -277,7 +278,7 @@ def _real_environment_factory(
                         REPO_ROOT,
                         perception.get(
                             "weapon_classifier_checkpoint",
-                            "train/models/weapon_classifier_r18.pt",
+                            "data/models/weapon_classifier_r18.pt",
                         ),
                     )
                 ),

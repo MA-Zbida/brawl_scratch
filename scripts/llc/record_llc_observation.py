@@ -11,6 +11,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from brawl.pipelines.llc.retention import PHASE_ORDER
+from brawl.paths import LEGACY_RUNS
 
 
 TRI_STATES = ("yes", "no", "na")
@@ -20,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Record manual visual approval for an LLC phase")
     p.add_argument("--phase", required=True, choices=list(PHASE_ORDER))
     p.add_argument("--approved", required=True, choices=["yes", "no"], help="Your visual approval for advancing")
-    p.add_argument("--outputs-dir", type=str, default="outputs")
+    p.add_argument("--outputs-dir", type=str, default=str(LEGACY_RUNS / "llc"))
     p.add_argument("--notes", type=str, default="")
     p.add_argument("--movement-collapse-visible", choices=TRI_STATES, default="na")
     p.add_argument("--recovery-reliable", choices=TRI_STATES, default="na")

@@ -28,8 +28,8 @@
 
 $ErrorActionPreference = "Stop"
 $PY   = "C:\venvs\brawl312\Scripts\python.exe"
-$M    = "train\models\easy_bot_v0"
-$D    = "train\models\recollected"
+$M    = "runs\legacy\llc\easy_bot_v0"
+$D    = "runs\legacy\llc\recollected"
 $BASE = "$M\llc_movement_fluency.zip"     # movement PPO, already accepted
 $STEPS = 200000                            # per PPO phase
 $LOG  = "$M\overnight_$(Get-Date -Format 'yyyyMMdd-HHmmss')"

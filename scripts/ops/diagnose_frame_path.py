@@ -37,6 +37,7 @@ _HERE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_HERE))
 
 import brawl.capture_first  # noqa: E402,F401  (must precede torch)
+from brawl.paths import ASSETS
 
 
 def _describe(name: str, arr) -> None:
@@ -72,7 +73,7 @@ def _time(fn, warmup: int, iters: int) -> float:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model", type=Path, default=Path("assets/yolo/best.engine"))
+    p.add_argument("--model", type=Path, default=ASSETS / "yolo" / "best.engine")
     p.add_argument("--imgsz", type=int, default=960)
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--iters", type=int, default=40)

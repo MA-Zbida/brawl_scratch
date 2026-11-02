@@ -17,15 +17,15 @@ def test_retention_evaluator_cli_parses_without_training_stack(monkeypatch) -> N
         [
             "evaluate_retention",
             "--model",
-            "train/models/llc_all_skills_llc.zip",
+            "runs/legacy/llc/llc_all_skills_llc.zip",
             "--phase",
             "all_skills_llc",
             "--phases",
             "all",
             "--best-scores",
-            "train/models/llc_retention_best.json",
+            "runs/legacy/llc/llc_retention_best.json",
             "--csv",
-            "train/models/retention_eval.csv",
+            "runs/legacy/llc/retention_eval.csv",
         ],
     )
 

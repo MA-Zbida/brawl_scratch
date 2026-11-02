@@ -24,6 +24,7 @@ import torch
 from brawl.control.action_space import ACTION_DIM, Action
 from brawl.state.state_spec import StateSpec
 from brawl.env.match import MatchTrainingEnv
+from brawl.paths import LEGACY_RUNS
 
 
 class CaptureProbe:
@@ -311,7 +312,7 @@ def parse_args(argv: Sequence[str] | None = None):
     from brawl.pipelines.final_agent.config import add_weapon_state_argument
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--out-dir", default="outputs/final_diagnostics")
+    parser.add_argument("--out-dir", default=str(LEGACY_RUNS / "final_agent" / "diagnostics"))
     parser.add_argument("--windows", type=int, default=2)
     parser.add_argument("--seconds", type=float, default=120.)
     parser.add_argument("--max-steps", type=int, default=10000, help="Safety cap per window")

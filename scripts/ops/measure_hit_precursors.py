@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from brawl.state.state_spec import StateSpec
 from brawl.world_model import read_session
+from brawl.paths import DATA
 
 FEATURES: tuple[str, ...] = (
     "opponent_dw",
@@ -87,7 +88,7 @@ def label_within_k(events: np.ndarray, episode: np.ndarray, k: int) -> np.ndarra
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--root", type=Path, default=Path("data/world_replay"))
+    p.add_argument("--root", type=Path, default=DATA / "world_replay")
     p.add_argument("--horizons", type=int, nargs="+", default=[1, 2, 3, 5, 8, 10, 15])
     p.add_argument("--damage-threshold", type=float, default=1e-6)
     return p.parse_args(argv)

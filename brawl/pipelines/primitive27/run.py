@@ -15,6 +15,7 @@ from brawl.training.cli import _validate, parser as shared_parser
 from brawl.training.runner import TrainingHooks, run_training
 from brawl.training.experiment_config import (parse_experiment_args, write_resolved_experiment,
                                      write_model_config, validate_model_components)
+from brawl.paths import LEGACY_RUNS
 
 
 def parser():
@@ -164,7 +165,7 @@ def main(argv=None):
     model = backend.load_model(args.resume) if args.resume else None
     if args.experiment and model is not None:
         validate_model_components(model)
-    directory = args.run_dir or Path('train/models/primitive27') / (time.strftime('%Y%m%d-%H%M%S')+'_'+uuid.uuid4().hex[:6])
+    directory = args.run_dir or (LEGACY_RUNS / 'primitive27') / (time.strftime('%Y%m%d-%H%M%S')+'_'+uuid.uuid4().hex[:6])
     directory.mkdir(parents=True, exist_ok=False)
     _json(directory/'config.json', vars(args) | dict(policy_contract=backend.metadata(),
         device='cpu', python=sys.version, torch=torch.__version__,

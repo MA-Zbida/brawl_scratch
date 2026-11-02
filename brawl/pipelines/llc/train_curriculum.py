@@ -27,6 +27,7 @@ from brawl.pipelines.llc.curriculum_config import PHASES, build_phase_spec
 from brawl.pipelines.llc.stage_common import StageGoalEnv, train_stage_model
 from brawl.pipelines.llc.train_config import parse_args, TrainConfig
 from brawl.world_model import WorldReplayRecorder, WorldReplayWriter
+from brawl.paths import DATA
 
 
 class _GymWorldReplayRecorder(WorldReplayRecorder, gym.Env):
@@ -151,7 +152,7 @@ def _make_env(cfg: TrainConfig, spec) -> gym.Env:
         tap_latch_steps=1,
         weapon_classifier_enabled=bool(getattr(cfg, "weapon_classifier", False)),
         weapon_classifier_checkpoint=str(
-            getattr(cfg, "weapon_classifier_checkpoint", "train/models/weapon_classifier_r18.pt")
+            getattr(cfg, "weapon_classifier_checkpoint", str(DATA / "models" / "weapon_classifier_r18.pt"))
         ),
     )
     # Visual confirmation is a reward gate that only the classifier can satisfy.

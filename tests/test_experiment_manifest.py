@@ -81,20 +81,20 @@ def test_manifest_verifier_fails_closed_after_archive_changes(tmp_path) -> None:
 
 
 def test_easy_bot_config_freezes_the_deferred_pilot_contract() -> None:
-    config_path = Path("experiments/easy_bot_v0/config.json")
-    manifest_path = Path("experiments/easy_bot_v0/manifest.json")
+    config_path = Path("configs/legacy/llc/easy_bot_v0/config.json")
+    manifest_path = Path("configs/legacy/llc/easy_bot_v0/manifest.json")
 
     config = json.loads(config_path.read_text(encoding="utf-8"))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert config["schema_version"] == 2
-    assert config["model_dir"] == "train/models/easy_bot_v0"
+    assert config["model_dir"] == "runs/legacy/llc/easy_bot_v0"
     # The current checkpoint learned the export pipeline rather than live crops:
     # it reports mean P(armed)=0.873 on unarmed live samples. Keep the live chain
     # on action inference until the classifier is retrained on its serving domain.
     perception = config["perception"]
     assert perception["weapon_classifier_enabled"] is False
-    assert perception["weapon_classifier_checkpoint"] == "train/models/weapon_classifier_r18.pt"
+    assert perception["weapon_classifier_checkpoint"] == "data/models/weapon_classifier_r18.pt"
     assert perception["weapon_classifier_cv_accuracy"] >= 0.90
     # 4-frame cadence: ~1.7 ms/frame amortised (8% of a 21 ms step) versus 21% if
     # it ran every frame, against a variable that moved 3 times in 1537 live steps.
@@ -128,7 +128,7 @@ def test_easy_bot_config_freezes_the_deferred_pilot_contract() -> None:
         "action_dim": 27,
         "goal_conditioning": False,
     }
-    protocol = Path("experiments/easy_bot_v0/protocol.md").read_text(encoding="utf-8")
+    protocol = Path("configs/legacy/llc/easy_bot_v0/protocol.md").read_text(encoding="utf-8")
     assert protocol.count("--device cuda") == 1  # TensorRT/CUDA preflight only.
     assert protocol.count("--device cpu") == 12
     assert manifest["aggregate"] == {

@@ -18,13 +18,14 @@ import uuid
 
 from brawl.pipelines.round_a.config import CANDIDATES, Protocol, checkpoint_contract, validate_dataset_contract
 from brawl.training.run_utils import prompt, sha256, write_json
+from brawl.paths import DATA, LEGACY_CONFIGS, LEGACY_RUNS
 
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--stage', required=True, choices=('collect', 'pretrain', 'train', 'evaluate', 'smoke', 'preflight'))
     p.add_argument('--candidate', choices=CANDIDATES, default='mlp')
-    p.add_argument('--protocol', type=Path, default=Path('experiments/round_a/protocol_v1.json'))
+    p.add_argument('--protocol', type=Path, default=LEGACY_CONFIGS / 'round_a' / 'protocol_v1.json')
     p.add_argument('--set', action='append', default=[], metavar='PROTOCOL_KEY=JSON_VALUE')
     p.add_argument('--run-dir', type=Path, help='New directory only')
     p.add_argument('--demos', type=Path, help='Aligned dataset directory, not a legacy NPZ')
@@ -37,7 +38,7 @@ def parser():
     p.add_argument('--attempts-factor', type=int, default=4)
     p.add_argument('--delay', type=float, default=5.)
     p.add_argument('--weapon-classifier-checkpoint', type=Path,
-                   default=Path('train/models/weapon_classifier_r18_live_v1.pt'))
+                   default=DATA / 'models' / 'weapon_classifier_r18_live_v1.pt')
     p.add_argument('--world-replay', type=Path, help='Opt-in structured dynamics replay; never training eval data')
     p.add_argument('--profile-timing', action='store_true',
                    help='Train stage: save qualification_timing.json even if the live gate fails; no PPO profiling')
@@ -230,7 +231,7 @@ def main(argv=None):
     else:
         contract = dict(candidate=args.candidate, **protocol.as_dict(),
                         dataset_sha256=sha256(args.demos / 'dataset.json') if args.demos else None)
-    directory = args.run_dir or Path('train/models/round_a') / (time.strftime('%Y%m%d-%H%M%S')+'_'+args.candidate+'_'+uuid.uuid4().hex[:6])
+    directory = args.run_dir or (LEGACY_RUNS / 'round_a') / (time.strftime('%Y%m%d-%H%M%S')+'_'+args.candidate+'_'+uuid.uuid4().hex[:6])
     directory.mkdir(parents=True, exist_ok=False)
     provenance(args, protocol, directory)
     if args.init_bc:

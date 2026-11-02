@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from brawl.control.action_space import ACTION_DIM, components  # noqa: E402  (needs the path above)
 from brawl.pipelines.llc.retention import PHASE_ORDER  # noqa: E402
+from brawl.paths import LEGACY_RUNS
 
 
 DEMO_PHASES = tuple(phase for phase in PHASE_ORDER if phase != "all_skills_llc")
@@ -27,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Validate LLC behavioral-cloning demo archives before training")
     p.add_argument("paths", nargs="*", help="NPZ demo paths. Semicolon/comma separated values are accepted.")
     p.add_argument("--phase", type=str, default="", choices=["", "all", *DEMO_PHASES], help="Expected phase or all default demo archives")
-    p.add_argument("--models-dir", type=str, default="train/models")
+    p.add_argument("--models-dir", type=str, default=str(LEGACY_RUNS / "llc"))
     p.add_argument("--min-samples", type=int, default=100)
     p.add_argument("--min-action-entropy", type=float, default=0.02)
     p.add_argument("--max-idle-rate", type=float, default=0.60)

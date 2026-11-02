@@ -2,7 +2,7 @@
   "schema_version": 2,
   "experiment_id": "easy_bot_v0",
   "objective": "Use goal-conditioned competency pretraining to initialize one goal-independent policy, then measure full-match play against one fixed Easy bot.",
-  "model_dir": "train/models/easy_bot_v0",
+  "model_dir": "runs/legacy/llc/easy_bot_v0",
   "game_setup": {
     "player_legend": "Wu Shang",
     "opponent_legend": "Mordex",
@@ -19,7 +19,7 @@
     "detector": "assets/yolo/best.engine",
     "yolo_infer_every_n_steps": 1,
     "weapon_classifier_enabled": false,
-    "weapon_classifier_checkpoint": "train/models/weapon_classifier_r18.pt",
+    "weapon_classifier_checkpoint": "data/models/weapon_classifier_r18.pt",
     "weapon_classifier_interval": 4,
     "weapon_classifier_min_confidence": 0.7,
     "weapon_classifier_cv_accuracy": 0.957
@@ -47,66 +47,66 @@
     ],
     "recovery": {
       "mode": "bc_only_existing_archive",
-      "archive": "train/models/recollected/recovery_mastery_demos.npz",
+      "archive": "runs/legacy/llc/recollected/recovery_mastery_demos.npz",
       "reason": "The heuristic becomes meaningful only after the setup has put the player offstage; do not spend a live collection stage repeating that setup."
     },
     "required_checkpoints": [
       {
         "name": "movement_base",
-        "path": "train/models/easy_bot_v0/llc_movement_fluency.zip",
+        "path": "runs/legacy/llc/easy_bot_v0/llc_movement_fluency.zip",
         "role": "goal_conditioned_skill",
         "observation_dim": 168,
         "action_dim": 27
       },
       {
         "name": "recovery_bc_handoff",
-        "path": "train/models/easy_bot_v0/llc_recovery_mastery_bc_init.zip",
+        "path": "runs/legacy/llc/easy_bot_v0/llc_recovery_mastery_bc_init.zip",
         "role": "goal_conditioned_skill",
         "observation_dim": 168,
         "action_dim": 27
       },
       {
         "name": "weapon_bc_handoff",
-        "path": "train/models/easy_bot_v0/llc_weapon_acquisition_bc_init.zip",
+        "path": "runs/legacy/llc/easy_bot_v0/llc_weapon_acquisition_bc_init.zip",
         "role": "goal_conditioned_skill",
         "observation_dim": 168,
         "action_dim": 27
       },
       {
         "name": "preserved_weapon_ppo",
-        "path": "train/models/easy_bot_v0/llc_weapon_acquisition.zip",
+        "path": "runs/legacy/llc/easy_bot_v0/llc_weapon_acquisition.zip",
         "role": "goal_conditioned_skill",
         "observation_dim": 168,
         "action_dim": 27
       }
     ],
     "deferred_checkpoint_outputs": [
-      "train/models/easy_bot_v0/llc_all_skills_llc.zip"
+      "runs/legacy/llc/easy_bot_v0/llc_all_skills_llc.zip"
     ],
     "demo_archives": [
       {
         "phase": "movement_fluency",
-        "path": "train/models/recollected/movement_fluency_demos.npz",
+        "path": "runs/legacy/llc/recollected/movement_fluency_demos.npz",
         "min_samples": 100
       },
       {
         "phase": "recovery_mastery",
-        "path": "train/models/recollected/recovery_mastery_demos.npz",
+        "path": "runs/legacy/llc/recollected/recovery_mastery_demos.npz",
         "min_samples": 100
       },
       {
         "phase": "weapon_acquisition",
-        "path": "train/models/recollected/weapon_acquisition_demos.npz",
+        "path": "runs/legacy/llc/recollected/weapon_acquisition_demos.npz",
         "min_samples": 100
       },
       {
         "phase": "spacing_neutral",
-        "path": "train/models/recollected/spacing_neutral_demos.npz",
+        "path": "runs/legacy/llc/recollected/spacing_neutral_demos.npz",
         "min_samples": 100
       },
       {
         "phase": "combat_execution",
-        "path": "train/models/recollected/combat_execution_demos.npz",
+        "path": "runs/legacy/llc/recollected/combat_execution_demos.npz",
         "min_samples": 100
       }
     ]
@@ -137,7 +137,7 @@
       "combat_execution"
     ],
     "initialization": {
-      "movement_checkpoint": "train/models/easy_bot_v0/llc_movement_fluency.zip",
+      "movement_checkpoint": "runs/legacy/llc/easy_bot_v0/llc_movement_fluency.zip",
       "device": "cpu",
       "later_phase_bc_epochs": 8,
       "bc_batch_size": 512,
@@ -157,8 +157,8 @@
     }
   },
   "final_agent": {
-    "checkpoint_dir": "train/models/easy_bot_v0/final_agent",
-    "init_from_skill_checkpoint": "train/models/easy_bot_v0/llc_all_skills_llc.zip",
+    "checkpoint_dir": "runs/legacy/llc/easy_bot_v0/final_agent",
+    "init_from_skill_checkpoint": "runs/legacy/llc/easy_bot_v0/llc_all_skills_llc.zip",
     "goal_conditioning": false,
     "objective": "match",
     "observation_dim": 146,

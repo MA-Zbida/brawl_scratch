@@ -44,6 +44,7 @@ from brawl.pipelines.llc.retention import (
     update_best_scores,
 )
 from brawl.compat import load_sb3
+from brawl.paths import LEGACY_RUNS
 
 
 ActionAdapter = Callable[[np.ndarray], np.ndarray]
@@ -2475,7 +2476,7 @@ def parse_train_args(default_name: str, default_steps: int) -> argparse.Namespac
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--max-episode-steps", type=int, default=1200)
-    p.add_argument("--save-dir", type=str, default="train/models")
+    p.add_argument("--save-dir", type=str, default=str(LEGACY_RUNS / "llc"))
     p.add_argument("--model-name", type=str, default=default_name)
     p.add_argument("--resume", type=str, default=None)
     p.add_argument("--plot-every", type=int, default=0)
@@ -2725,7 +2726,7 @@ def _build_ppo(args, vec_env, stage_spec, FiLMClass):
 
     if not bc_demos_path:
         candidates: list[Path] = []
-        save_root = Path(getattr(args, "save_dir", "train/models"))
+        save_root = Path(getattr(args, "save_dir", LEGACY_RUNS / "llc"))
         phase_name = getattr(args, "phase", None)
         if str(phase_name or "").strip().lower() == "all_skills_llc":
             archive_paths = [

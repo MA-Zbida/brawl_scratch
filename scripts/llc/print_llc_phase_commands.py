@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from brawl.pipelines.llc.retention import PHASE_ORDER, previous_phases
+from brawl.paths import LEGACY_RUNS, REPO_ROOT
 
 
 DEMO_BY_PHASE: dict[str, str] = {
@@ -31,12 +32,12 @@ DEFAULT_TIMESTEPS: dict[str, int] = {
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Print the exact LLC phase commands for the mastery ladder")
     p.add_argument("--phase", required=True, choices=list(PHASE_ORDER) + ["all"], help="Phase to print, or 'all'")
-    p.add_argument("--models-dir", type=str, default="train/models")
+    p.add_argument("--models-dir", type=str, default=str(LEGACY_RUNS / "llc"))
     p.add_argument("--device", type=str, default="$device", help="Device literal to put in commands, e.g. cuda, cpu, or $device")
     p.add_argument(
         "--best-scores",
         type=str,
-        default="train/models/llc_retention_best.json",
+        default=str(LEGACY_RUNS / "llc" / "llc_retention_best.json"),
         help="Retention JSON path or Powershell variable",
     )
     p.add_argument("--python", type=str, default="python", help="Python command literal")
@@ -90,7 +91,7 @@ def _timesteps(phase: str, override: int) -> int:
 
 
 def _report_path(phase: str) -> str:
-    return str(Path("outputs") / f"llc_{phase}_run_report.md").replace("\\", "/")
+    return (LEGACY_RUNS / "llc" / f"llc_{phase}_run_report.md").relative_to(REPO_ROOT).as_posix()
 
 
 def commands_for_phase(args: argparse.Namespace, phase: str) -> list[str]:

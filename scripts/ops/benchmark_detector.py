@@ -37,6 +37,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional, Sequence
+from brawl.paths import ASSETS
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -189,7 +190,7 @@ def breakdown(model_path: Path, iters: int = 50) -> None:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--models", type=str, default="assets/yolo/best.engine",
+    p.add_argument("--models", type=str, default=str(ASSETS / "yolo" / "best.engine"),
                    help="Comma-separated model paths to compare (.engine / .pt / .onnx)")
     p.add_argument("--sizes", type=str, default="640,768,960",
                    help="Comma-separated imgsz values")

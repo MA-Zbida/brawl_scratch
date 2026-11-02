@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.llc.check_llc_phase_gate import evaluate_gate
 from brawl.pipelines.llc.retention import PHASE_ORDER, phase_score_threshold
+from brawl.paths import LEGACY_RUNS
 
 
 COMBAT_PHASES = {"combat_execution", "all_skills_llc"}
@@ -22,7 +23,7 @@ COMBAT_PHASES = {"combat_execution", "all_skills_llc"}
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Monitor LLC training CSVs for collapse and retention signals")
     p.add_argument("--phase", required=True, choices=list(PHASE_ORDER), help="Current LLC phase")
-    p.add_argument("--models-dir", type=str, default="train/models")
+    p.add_argument("--models-dir", type=str, default=str(LEGACY_RUNS / "llc"))
     p.add_argument("--steps-csv", type=str, default="")
     p.add_argument("--episodes-csv", type=str, default="")
     p.add_argument("--eval-csv", type=str, default="")

@@ -28,6 +28,7 @@ from brawl.training.teachers import HeuristicTeacher, RecoverySetupController
 from brawl.pipelines.llc.stage_common import StageGoalEnv
 from brawl.perception.weapon_evidence import EVIDENCE_VERSION, WeaponEvidence, WeaponHoldGate
 from brawl.world_model import WorldReplayRecorder, WorldReplayWriter
+from brawl.paths import DATA, LEGACY_RUNS
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,7 +107,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--weapon-classifier-checkpoint",
         type=str,
-        default="train/models/weapon_classifier_r18.pt",
+        default=str(DATA / "models" / "weapon_classifier_r18.pt"),
         help="Crop classifier used for independent visual weapon confirmation.",
     )
     p.add_argument(
@@ -296,7 +297,7 @@ def _resolve_output_path(args: argparse.Namespace) -> Path:
     if args.output.strip():
         out = Path(args.output)
     else:
-        out = Path("train/models") / f"{args.phase}_demos.npz"
+        out = LEGACY_RUNS / "llc" / f"{args.phase}_demos.npz"
     out.parent.mkdir(parents=True, exist_ok=True)
     return out
 

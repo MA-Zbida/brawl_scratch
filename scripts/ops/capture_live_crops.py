@@ -35,11 +35,12 @@ _HERE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_HERE))
 
 import brawl.capture_first  # noqa: E402,F401  (must precede torch)
+from brawl.paths import DATA
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--out", type=Path, default=Path("data/weapon_crops_live/unlabelled"))
+    p.add_argument("--out", type=Path, default=DATA / "weapon_crops_live" / "unlabelled")
     p.add_argument("--samples", type=int, default=400, help="Crops to capture (both fighters count separately).")
     p.add_argument("--interval", type=float, default=0.35,
                    help="Seconds between captures. Consecutive frames are near-duplicates; "

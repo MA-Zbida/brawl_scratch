@@ -11,6 +11,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
+from brawl.paths import DATA, LEGACY_RUNS
 
 
 CORE_PHASES: tuple[str, ...] = (
@@ -289,17 +290,17 @@ def _parser() -> argparse.ArgumentParser:
             "fail-closed LLC checkpoint chain."
         )
     )
-    parser.add_argument("--models-dir", type=Path, default=Path("train/models/easy_bot_v0"))
-    parser.add_argument("--demos-dir", type=Path, default=Path("train/models/recollected"))
+    parser.add_argument("--models-dir", type=Path, default=LEGACY_RUNS / "llc" / "easy_bot_v0")
+    parser.add_argument("--demos-dir", type=Path, default=LEGACY_RUNS / "llc" / "recollected")
     parser.add_argument(
         "--movement-init",
         type=Path,
-        default=Path("train/models/easy_bot_v0/llc_movement_fluency_masked_pilot.zip"),
+        default=LEGACY_RUNS / "llc" / "easy_bot_v0" / "llc_movement_fluency_masked_pilot.zip",
     )
     parser.add_argument(
         "--world-replay",
         type=Path,
-        default=Path("data/world_replay/easy_bot_v0_3h"),
+        default=DATA / "world_replay" / "easy_bot_v0_3h",
         help="Root for four phase-specific world-model replay sessions.",
     )
     parser.add_argument("--opponent-setup", default="moving_non_attacking")

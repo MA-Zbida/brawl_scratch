@@ -17,16 +17,16 @@ point is now the resumable driver:
 
 ```powershell
 # Prove that the whole control flow closes with tiny budgets first.
-experiments\easy_bot_v0\run_chain.ps1 --smoke
+scripts\llc\easy_bot_v0\run_chain.ps1 --smoke
 
 # Continue the production chain after the preserved weapon PPO checkpoint.
-experiments\easy_bot_v0\run_chain.ps1 --from spacing
+scripts\llc\easy_bot_v0\run_chain.ps1 --from spacing
 
 # Run spacing only, then stop after its retention evaluation.
-experiments\easy_bot_v0\run_chain.ps1 --from spacing_bc --to spacing --timesteps 200000
+scripts\llc\easy_bot_v0\run_chain.ps1 --from spacing_bc --to spacing --timesteps 200000
 
 # After changing the opponent setup, run combat only.
-experiments\easy_bot_v0\run_chain.ps1 --from combat --to combat --timesteps 200000
+scripts\llc\easy_bot_v0\run_chain.ps1 --from combat --to combat --timesteps 200000
 ```
 
 The driver runs preflight first, records stdout and stderr in one UTF-8 log, and
@@ -36,7 +36,7 @@ exist. Recovery is always `recovery_bc`; it is never collected or PPO-trained.
 ## Frozen contract
 
 - Interpreter: `C:\venvs\brawl312\Scripts\python.exe`
-- Output directory: `train/models/easy_bot_v0`
+- Output directory: `runs/legacy/llc/easy_bot_v0`
 - Chain order: movement base -> recovery BC -> weapon -> spacing -> combat
 - Compute split: MLP policy and optimizer on CPU; TensorRT detection remains on CUDA
 - Perception: YOLO every step; weapon classifier disabled. The existing classifier
@@ -72,10 +72,10 @@ this experiment.
 C:\venvs\brawl312\Scripts\python.exe -m scripts.llc.verify_experiment_manifest
 C:\venvs\brawl312\Scripts\python.exe -m scripts.llc.llc_preflight --device cuda --strict-warnings
 C:\venvs\brawl312\Scripts\python.exe -m scripts.llc.validate_llc_demos `
-  train\models\recollected\movement_fluency_demos.npz `
-  train\models\recollected\weapon_acquisition_demos.npz `
-  train\models\recollected\spacing_neutral_demos_v2.npz `
-  train\models\recollected\combat_execution_demos.npz `
+  runs\legacy\llc\recollected\movement_fluency_demos.npz `
+  runs\legacy\llc\recollected\weapon_acquisition_demos.npz `
+  runs\legacy\llc\recollected\spacing_neutral_demos_v2.npz `
+  runs\legacy\llc\recollected\combat_execution_demos.npz `
   --strict-warnings --min-samples 1
 ```
 
@@ -90,13 +90,13 @@ BC initializer allowed into the sequential chain.
 ```powershell
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum `
   --phase movement_fluency `
-  --resume train\models\llc_movement_fluency_bc_init.zip `
+  --resume runs\legacy\llc\llc_movement_fluency_bc_init.zip `
   --timesteps 4096 `
   --n-steps 512 `
   --batch-size 256 `
   --max-episode-steps 200 `
-  --bc-demos-path "train\models\recollected\movement_fluency_demos.npz" `
-  --save-dir train\models\easy_bot_v0 `
+  --bc-demos-path "runs\legacy\llc\recollected\movement_fluency_demos.npz" `
+  --save-dir runs\legacy\llc\easy_bot_v0 `
   --model-name llc_movement_fluency `
   --seed 42 `
   --device cpu `
@@ -110,13 +110,13 @@ Then run the two-episode skill check:
 
 ```powershell
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.evaluate_retention `
-  --model train\models\easy_bot_v0\llc_movement_fluency.zip `
+  --model runs\legacy\llc\easy_bot_v0\llc_movement_fluency.zip `
   --phase movement_fluency `
   --phases movement_fluency `
   --episodes 2 `
   --max-episode-steps 200 `
-  --best-scores train\models\easy_bot_v0\retention_best.json `
-  --csv train\models\easy_bot_v0\llc_movement_fluency_retention_eval.csv `
+  --best-scores runs\legacy\llc\easy_bot_v0\retention_best.json `
+  --csv runs\legacy\llc\easy_bot_v0\llc_movement_fluency_retention_eval.csv `
   --seed 42 `
   --device cpu
 ```
@@ -133,25 +133,25 @@ archives anchoring the same policy.
 ```powershell
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.pretrain_bc `
   --phase weapon_acquisition `
-  --demos train\models\recollected\weapon_acquisition_demos.npz `
-  --resume train\models\easy_bot_v0\llc_movement_fluency.zip `
+  --demos runs\legacy\llc\recollected\weapon_acquisition_demos.npz `
+  --resume runs\legacy\llc\easy_bot_v0\llc_movement_fluency.zip `
   --epochs 8 `
   --batch-size 512 `
   --learning-rate 0.0002 `
   --entropy-coef 0.001 `
   --goal-relabel `
-  --output train\models\easy_bot_v0\llc_weapon_acquisition_bc_init.zip `
+  --output runs\legacy\llc\easy_bot_v0\llc_weapon_acquisition_bc_init.zip `
   --device cpu
 
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum `
   --phase weapon_acquisition `
-  --resume train\models\easy_bot_v0\llc_weapon_acquisition_bc_init.zip `
+  --resume runs\legacy\llc\easy_bot_v0\llc_weapon_acquisition_bc_init.zip `
   --timesteps 4096 `
   --n-steps 512 `
   --batch-size 256 `
   --max-episode-steps 200 `
-  --bc-demos-path "train\models\recollected\movement_fluency_demos.npz;train\models\recollected\weapon_acquisition_demos.npz" `
-  --save-dir train\models\easy_bot_v0 `
+  --bc-demos-path "runs\legacy\llc\recollected\movement_fluency_demos.npz;runs\legacy\llc\recollected\weapon_acquisition_demos.npz" `
+  --save-dir runs\legacy\llc\easy_bot_v0 `
   --model-name llc_weapon_acquisition `
   --seed 42 `
   --device cpu `
@@ -161,13 +161,13 @@ C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum `
   --eval-every-steps 0
 
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.evaluate_retention `
-  --model train\models\easy_bot_v0\llc_weapon_acquisition.zip `
+  --model runs\legacy\llc\easy_bot_v0\llc_weapon_acquisition.zip `
   --phase weapon_acquisition `
   --phases movement_fluency,weapon_acquisition `
   --episodes 2 `
   --max-episode-steps 200 `
-  --best-scores train\models\easy_bot_v0\retention_best.json `
-  --csv train\models\easy_bot_v0\llc_weapon_acquisition_retention_eval.csv `
+  --best-scores runs\legacy\llc\easy_bot_v0\retention_best.json `
+  --csv runs\legacy\llc\easy_bot_v0\llc_weapon_acquisition_retention_eval.csv `
   --seed 42 `
   --device cpu
 ```
@@ -181,25 +181,25 @@ is interacting with the same game.
 ```powershell
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.pretrain_bc `
   --phase spacing_neutral `
-  --demos train\models\recollected\spacing_neutral_demos_v2.npz `
-  --resume train\models\easy_bot_v0\llc_weapon_acquisition.zip `
+  --demos runs\legacy\llc\recollected\spacing_neutral_demos_v2.npz `
+  --resume runs\legacy\llc\easy_bot_v0\llc_weapon_acquisition.zip `
   --epochs 8 `
   --batch-size 512 `
   --learning-rate 0.0002 `
   --entropy-coef 0.001 `
   --goal-relabel `
-  --output train\models\easy_bot_v0\llc_spacing_neutral_bc_init.zip `
+  --output runs\legacy\llc\easy_bot_v0\llc_spacing_neutral_bc_init.zip `
   --device cpu
 
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum `
   --phase spacing_neutral `
-  --resume train\models\easy_bot_v0\llc_spacing_neutral_bc_init.zip `
+  --resume runs\legacy\llc\easy_bot_v0\llc_spacing_neutral_bc_init.zip `
   --timesteps 4096 `
   --n-steps 512 `
   --batch-size 256 `
   --max-episode-steps 200 `
-  --bc-demos-path "train\models\recollected\movement_fluency_demos.npz;train\models\recollected\weapon_acquisition_demos.npz;train\models\recollected\spacing_neutral_demos_v2.npz" `
-  --save-dir train\models\easy_bot_v0 `
+  --bc-demos-path "runs\legacy\llc\recollected\movement_fluency_demos.npz;runs\legacy\llc\recollected\weapon_acquisition_demos.npz;runs\legacy\llc\recollected\spacing_neutral_demos_v2.npz" `
+  --save-dir runs\legacy\llc\easy_bot_v0 `
   --model-name llc_spacing_neutral `
   --seed 42 `
   --device cpu `
@@ -209,13 +209,13 @@ C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum `
   --eval-every-steps 0
 
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.evaluate_retention `
-  --model train\models\easy_bot_v0\llc_spacing_neutral.zip `
+  --model runs\legacy\llc\easy_bot_v0\llc_spacing_neutral.zip `
   --phase spacing_neutral `
   --phases movement_fluency,weapon_acquisition,spacing_neutral `
   --episodes 2 `
   --max-episode-steps 200 `
-  --best-scores train\models\easy_bot_v0\retention_best.json `
-  --csv train\models\easy_bot_v0\llc_spacing_neutral_retention_eval.csv `
+  --best-scores runs\legacy\llc\easy_bot_v0\retention_best.json `
+  --csv runs\legacy\llc\easy_bot_v0\llc_spacing_neutral_retention_eval.csv `
   --seed 42 `
   --device cpu
 ```
@@ -225,25 +225,25 @@ C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.evaluate_retention `
 ```powershell
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.pretrain_bc `
   --phase combat_execution `
-  --demos train\models\recollected\combat_execution_demos.npz `
-  --resume train\models\easy_bot_v0\llc_spacing_neutral.zip `
+  --demos runs\legacy\llc\recollected\combat_execution_demos.npz `
+  --resume runs\legacy\llc\easy_bot_v0\llc_spacing_neutral.zip `
   --epochs 8 `
   --batch-size 512 `
   --learning-rate 0.0002 `
   --entropy-coef 0.001 `
   --goal-relabel `
-  --output train\models\easy_bot_v0\llc_combat_execution_bc_init.zip `
+  --output runs\legacy\llc\easy_bot_v0\llc_combat_execution_bc_init.zip `
   --device cpu
 
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum `
   --phase combat_execution `
-  --resume train\models\easy_bot_v0\llc_combat_execution_bc_init.zip `
+  --resume runs\legacy\llc\easy_bot_v0\llc_combat_execution_bc_init.zip `
   --timesteps 4096 `
   --n-steps 512 `
   --batch-size 256 `
   --max-episode-steps 200 `
-  --bc-demos-path "train\models\recollected\movement_fluency_demos.npz;train\models\recollected\weapon_acquisition_demos.npz;train\models\recollected\spacing_neutral_demos_v2.npz;train\models\recollected\combat_execution_demos.npz" `
-  --save-dir train\models\easy_bot_v0 `
+  --bc-demos-path "runs\legacy\llc\recollected\movement_fluency_demos.npz;runs\legacy\llc\recollected\weapon_acquisition_demos.npz;runs\legacy\llc\recollected\spacing_neutral_demos_v2.npz;runs\legacy\llc\recollected\combat_execution_demos.npz" `
+  --save-dir runs\legacy\llc\easy_bot_v0 `
   --model-name llc_combat_execution `
   --seed 42 `
   --device cpu `
@@ -253,13 +253,13 @@ C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.train_curriculum `
   --eval-every-steps 0
 
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.evaluate_retention `
-  --model train\models\easy_bot_v0\llc_combat_execution.zip `
+  --model runs\legacy\llc\easy_bot_v0\llc_combat_execution.zip `
   --phase combat_execution `
   --phases movement_fluency,weapon_acquisition,spacing_neutral,combat_execution `
   --episodes 2 `
   --max-episode-steps 200 `
-  --best-scores train\models\easy_bot_v0\retention_best.json `
-  --csv train\models\easy_bot_v0\llc_combat_execution_retention_eval.csv `
+  --best-scores runs\legacy\llc\easy_bot_v0\retention_best.json `
+  --csv runs\legacy\llc\easy_bot_v0\llc_combat_execution_retention_eval.csv `
   --seed 42 `
   --device cpu
 ```
@@ -323,9 +323,9 @@ starts from its score.
 
 ```powershell
 C:\venvs\brawl312\Scripts\python.exe -m brawl.pipelines.llc.compare_checkpoints `
-  --bc-model train\models\llc_movement_fluency_bc_init.zip `
-  --ppo-model train\models\easy_bot_v0\llc_movement_fluency.zip `
-  --csv train\models\easy_bot_v0\movement_bc_ppo_diagnostic.csv `
+  --bc-model runs\legacy\llc\llc_movement_fluency_bc_init.zip `
+  --ppo-model runs\legacy\llc\easy_bot_v0\llc_movement_fluency.zip `
+  --csv runs\legacy\llc\easy_bot_v0\movement_bc_ppo_diagnostic.csv `
   --repeats 1 `
   --max-episode-steps 200 `
   --seed 42 `

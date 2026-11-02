@@ -23,7 +23,7 @@
   "demo_archives": [
     {
       "phase": "movement_fluency",
-      "path": "train/models/recollected/movement_fluency_demos.npz",
+      "path": "runs/legacy/llc/recollected/movement_fluency_demos.npz",
       "sha256": "8c1d548e2b3853ed8b7d6bf58a86a4b1b73e019ac1a2c907025dada9677943bd",
       "size_bytes": 206202,
       "samples": 1596,
@@ -36,7 +36,7 @@
     },
     {
       "phase": "weapon_acquisition",
-      "path": "train/models/recollected/weapon_acquisition_demos.npz",
+      "path": "runs/legacy/llc/recollected/weapon_acquisition_demos.npz",
       "sha256": "1aaffe0faa3f426e5bc87e65a5ea500f350d50289b154b455192f62c763cebf3",
       "size_bytes": 406314,
       "samples": 3366,
@@ -49,7 +49,7 @@
     },
     {
       "phase": "spacing_neutral",
-      "path": "train/models/recollected/spacing_neutral_demos_v2.npz",
+      "path": "runs/legacy/llc/recollected/spacing_neutral_demos_v2.npz",
       "sha256": "ff04966da5f6ba5cd5c8ebb4aa542e3af0fca40dccadfe489920f77245a5cfcb",
       "size_bytes": 148053,
       "samples": 1230,
@@ -62,7 +62,7 @@
     },
     {
       "phase": "combat_execution",
-      "path": "train/models/recollected/combat_execution_demos.npz",
+      "path": "runs/legacy/llc/recollected/combat_execution_demos.npz",
       "sha256": "da5b0bfe344abd087e219ad7298178148e17fbf34b4b520b91c01cdffda86192",
       "size_bytes": 226211,
       "samples": 1746,
@@ -82,13 +82,13 @@
   "artifacts": [
     {
       "role": "experiment_config",
-      "path": "experiments/easy_bot_v0/config.json",
+      "path": "configs/legacy/llc/easy_bot_v0/config.json",
       "sha256": "e9a0ac79fac92eb960538931d3203856a3649aca5e7c4b289b0da248330856e8",
       "size_bytes": 2747
     },
     {
       "role": "movement_bc_initialization",
-      "path": "train/models/llc_movement_fluency_bc_init.zip",
+      "path": "runs/legacy/llc/llc_movement_fluency_bc_init.zip",
       "sha256": "dcdcf2ab974238ec9e33bd10034ee63f0f48cc6712d77636f6c34080682d036f",
       "size_bytes": 3774104
     },

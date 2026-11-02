@@ -16,16 +16,16 @@ param(
 $ErrorActionPreference = "Continue"
 
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RepoRoot = (Resolve-Path (Join-Path $ScriptRoot "..\..")).Path
+$RepoRoot = (Resolve-Path (Join-Path $ScriptRoot "..\..\..")).Path
 $Python = "C:\venvs\brawl312\Scripts\python.exe"
-$ProductionModels = Join-Path $RepoRoot "train\models\easy_bot_v0"
-$ProductionDemos = Join-Path $RepoRoot "train\models\recollected"
+$ProductionModels = Join-Path $RepoRoot "runs\legacy\llc\easy_bot_v0"
+$ProductionDemos = Join-Path $RepoRoot "runs\legacy\llc\recollected"
 
 if ([string]::IsNullOrWhiteSpace($StateRoot)) {
-    $StateRoot = Join-Path $ScriptRoot ".chain_state"
+    $StateRoot = Join-Path $RepoRoot "runs\legacy\llc\easy_bot_v0\.chain_state"
 }
 if ([string]::IsNullOrWhiteSpace($LogRoot)) {
-    $LogRoot = Join-Path $ScriptRoot "logs"
+    $LogRoot = Join-Path $RepoRoot "runs\legacy\llc\easy_bot_v0\logs"
 }
 
 $Mode = if ($Smoke) { "smoke" } else { "production" }

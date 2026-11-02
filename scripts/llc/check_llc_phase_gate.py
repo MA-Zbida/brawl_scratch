@@ -10,15 +10,16 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from brawl.pipelines.llc.retention import parse_phase_list, phase_score_threshold, previous_phases
+from brawl.paths import LEGACY_RUNS
 
 
 COMBAT_PHASES = {"combat_execution", "all_skills_llc"}
 DEMO_PATHS: dict[str, str] = {
-    "recovery_mastery": "train/models/recovery_mastery_demos.npz",
-    "movement_fluency": "train/models/movement_fluency_demos.npz",
-    "weapon_acquisition": "train/models/weapon_acquisition_demos.npz",
-    "spacing_neutral": "train/models/spacing_neutral_demos.npz",
-    "combat_execution": "train/models/combat_execution_demos.npz",
+    "recovery_mastery": str(LEGACY_RUNS / "llc" / "recovery_mastery_demos.npz"),
+    "movement_fluency": str(LEGACY_RUNS / "llc" / "movement_fluency_demos.npz"),
+    "weapon_acquisition": str(LEGACY_RUNS / "llc" / "weapon_acquisition_demos.npz"),
+    "spacing_neutral": str(LEGACY_RUNS / "llc" / "spacing_neutral_demos.npz"),
+    "combat_execution": str(LEGACY_RUNS / "llc" / "combat_execution_demos.npz"),
 }
 
 
@@ -167,11 +168,11 @@ def recommend_actions(
         recommendations.append(
             "Suggested rehearse command template: "
             f"python -m brawl.pipelines.llc.train_curriculum --phase {current_phase} "
-            f"--resume train/models/llc_{current_phase}.zip "
+            f"--resume runs/legacy/llc/llc_{current_phase}.zip "
             f"--timesteps 100000 --model-name llc_{current_phase}_rehearsal "
             f"--bc-demos-path \"{demo_chain}\" --anchor-kl-coef 0.06 --bc-loss-coef 0.12 "
             f"--eval-every-steps 25000 --eval-episodes 5 --eval-phases {phase_list} "
-            "--retention-scores-path train/models/llc_retention_best.json --log-csv"
+            "--retention-scores-path runs/legacy/llc/llc_retention_best.json --log-csv"
         )
 
     if any("idle " in failure for failure in failures):

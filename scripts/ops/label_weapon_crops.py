@@ -44,6 +44,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional, Sequence
+from brawl.paths import DATA, LEGACY_RUNS
 
 _HERE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_HERE))
@@ -192,7 +193,7 @@ def write_preview(cv2, patch, path: Path, scale: int) -> None:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--dataset", type=Path, default=Path("brawlhalla-yolo-data"))
+    p.add_argument("--dataset", type=Path, default=DATA / "yolo_dataset")
     p.add_argument("--crops-dir", type=Path, default=None,
                    help="Label pre-cut crops from <dir>/unlabelled instead of the YOLO "
                         "dataset. Use for live captures, whose distribution matches "
@@ -200,7 +201,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--splits", nargs="+", default=["train", "valid", "test"])
     p.add_argument("--out", type=Path, default=None,
                    help="Label destination. Default: crops-dir for pre-cut inputs, otherwise data/weapon_crops.")
-    p.add_argument("--preview", type=Path, default=Path("cropped.png"),
+    p.add_argument("--preview", type=Path, default=LEGACY_RUNS / "weapon_classifier" / "label_preview.png",
                    help="Fixed path rewritten for each crop. Keep it open in the editor.")
     p.add_argument("--pad", type=float, default=0.45,
                    help="Fractional padding around the box; a held weapon extends past it.")
@@ -224,7 +225,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # Resolve the destination BEFORE reading progress. Pre-cut mode previously
     # loaded the YOLO ledger, then silently changed its output directory.
-    out: Path = args.out or args.crops_dir or Path("data/weapon_crops")
+    out: Path = args.out or args.crops_dir or DATA / "weapon_crops"
     for name in LABEL_NAMES.values():
         (out / name).mkdir(parents=True, exist_ok=True)
     ledger = out / "labels.jsonl"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from typing import Sequence
+from brawl.paths import DATA, LEGACY_RUNS
 
 
 @dataclass(frozen=True)
@@ -16,7 +17,7 @@ class FinalAgentConfig:
     allow_untyped_skill_checkpoint: bool = False
     timesteps: int = 500_000
     max_episode_steps: int = 3000
-    save_dir: str = "train/models/final_agent"
+    save_dir: str = str(LEGACY_RUNS / "final_agent")
     model_name: str = "final_agent"
     seed: int = 42
     delay: float = 3.0
@@ -41,7 +42,7 @@ class FinalAgentConfig:
     yolo_every: int = 1
     log_csv: bool = True
     weapon_state_source: str = "action"
-    weapon_classifier_checkpoint: str = "train/models/weapon_classifier_r18.pt"
+    weapon_classifier_checkpoint: str = str(DATA / "models" / "weapon_classifier_r18.pt")
 
     @property
     def goal_conditioning(self) -> bool:
@@ -77,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--timesteps", type=int, default=500_000)
     parser.add_argument("--max-episode-steps", type=int, default=3000)
-    parser.add_argument("--save-dir", type=str, default="train/models/final_agent")
+    parser.add_argument("--save-dir", type=str, default=str(LEGACY_RUNS / "final_agent"))
     parser.add_argument("--model-name", type=str, default="final_agent")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--delay", type=float, default=3.0)

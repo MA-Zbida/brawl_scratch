@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from brawl.paths import DATA
 
 
 def parser(*, primitive: bool = False) -> argparse.ArgumentParser:
@@ -33,7 +34,7 @@ def parser(*, primitive: bool = False) -> argparse.ArgumentParser:
     p.add_argument('--eval-episodes', type=int, default=3)
     p.add_argument('--window-steps', type=int, default=3000, help='Training-room reporting/evaluation window, not a game reset')
     p.add_argument('--delay', type=float, default=5.)
-    p.add_argument('--weapon-classifier-checkpoint', type=Path, default=Path('train/models/weapon_classifier_r18_live_v1.pt'))
+    p.add_argument('--weapon-classifier-checkpoint', type=Path, default=DATA / 'models' / 'weapon_classifier_r18_live_v1.pt')
     p.add_argument('--world-replay', type=Path, help='Opt-in compressed transitions; no video')
     return p
 

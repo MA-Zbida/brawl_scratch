@@ -8,6 +8,8 @@ import sys
 
 import pytest
 
+from brawl.paths import DATA
+
 
 def test_legacy_primitive_defaults_are_preserved():
     from brawl.pipelines.primitive27.run import parser
@@ -18,7 +20,7 @@ def test_legacy_primitive_defaults_are_preserved():
         hours=0., n_steps=512, batch_size=256, learning_rate=.0001, ent_coef=.01,
         seed=42, checkpoint_every=10240, eval_every=4096, eval_episodes=3,
         window_steps=1200, delay=5., world_replay=None, live_check_attempts=3,
-        weapon_classifier_checkpoint=Path('train/models/weapon_classifier_r18_live_v1.pt'))
+        weapon_classifier_checkpoint=DATA / 'models' / 'weapon_classifier_r18_live_v1.pt')
     assert {key: args[key] for key in expected} == expected
 
 
@@ -74,7 +76,7 @@ def test_baseline_config_and_cli_are_equivalent():
     from brawl.training.experiment_config import parse_experiment_args
     from brawl.pipelines.primitive27.run import parser
     args, spec = parse_experiment_args(parser(), [
-        '--experiment', 'experiments/baselines/structured27_bc_ppo_v1.json'])
+        '--experiment', 'configs/legacy/primitive27/structured27_bc_ppo_v1.json'])
     assert spec['name'] == 'structured27_bc_ppo_v1'
     assert (args.timesteps, args.n_steps, args.batch_size, args.eval_episodes) == (4096, 512, 256, 2)
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from brawl.paths import LEGACY_CONFIGS
 
 
 def _sha256(path: Path) -> str:
@@ -177,7 +178,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--manifest",
-        default="experiments/easy_bot_v0/manifest.json",
+        default=str(LEGACY_CONFIGS / "llc" / "easy_bot_v0" / "manifest.json"),
     )
     parser.add_argument("--repo-root", default=".")
     return parser.parse_args()

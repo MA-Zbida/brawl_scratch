@@ -1,12 +1,13 @@
 from ultralytics import YOLO  # type: ignore[attr-defined]
 from typing import Optional, List, Dict
 from pathlib import Path
+from brawl.paths import ASSETS
 
 
 class Extract:
     def __init__(
         self,
-        yolo_model: str = "assets/yolo/best.engine",
+        yolo_model: str = str(ASSETS / "yolo" / "best.engine"),
         config=None,
         max_det: int = 5,
         verbose: bool = False,

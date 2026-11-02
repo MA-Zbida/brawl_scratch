@@ -1,8 +1,8 @@
 # Resume the overnight chain from weapon BC.
 #
 # Recovery BC and weapon collection already succeeded:
-#   train\models\easy_bot_v0\llc_recovery_mastery_bc_init.zip
-#   train\models\recollected\weapon_acquisition_demos.npz   (2,817 samples, PASS)
+#   runs\legacy\llc\easy_bot_v0\llc_recovery_mastery_bc_init.zip
+#   runs\legacy\llc\recollected\weapon_acquisition_demos.npz   (2,817 samples, PASS)
 # Neither is redone here.
 #
 # The original run died in weapon BC on a guard added for the *collector*: a stage
@@ -18,8 +18,8 @@
 
 $ErrorActionPreference = "Stop"
 $PY   = "C:\venvs\brawl312\Scripts\python.exe"
-$M    = "train\models\easy_bot_v0"
-$D    = "train\models\recollected"
+$M    = "runs\legacy\llc\easy_bot_v0"
+$D    = "runs\legacy\llc\recollected"
 $STEPS = 200000
 $LOG  = "$M\resume_$(Get-Date -Format 'yyyyMMdd-HHmmss')"
 New-Item -ItemType Directory -Force -Path $LOG | Out-Null

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable
 
 import numpy as np
+from brawl.paths import LEGACY_RUNS
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -407,7 +408,7 @@ def _default_out_dir(args: argparse.Namespace) -> Path:
     for candidate in (args.eval_csv, args.episodes_csv, args.steps_csv):
         if candidate:
             return Path(candidate).resolve().parent
-    return Path("train/models")
+    return LEGACY_RUNS / "llc"
 
 
 def main() -> None:

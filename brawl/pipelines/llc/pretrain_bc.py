@@ -37,6 +37,7 @@ from brawl.pipelines.llc.phase_action_policy import (
     phase_allowed_action_ids,
 )
 from brawl.compat import load_sb3
+from brawl.paths import LEGACY_RUNS
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,9 +101,9 @@ def _resolve_paths(args: argparse.Namespace) -> tuple[str, str]:
         phase_for_default_paths = PHASES[0]
 
     if not demos:
-        demos = f"train/models/{phase_for_default_paths}_demos.npz"
+        demos = str(LEGACY_RUNS / "llc" / f"{phase_for_default_paths}_demos.npz")
     if not output:
-        output = f"train/models/llc_{phase_for_default_paths}_bc_init.zip"
+        output = str(LEGACY_RUNS / "llc" / f"llc_{phase_for_default_paths}_bc_init.zip")
     return demos, output
 
 
@@ -364,7 +365,7 @@ def main() -> None:
     if str(args.phase).strip().lower() == "auto":
         print(f"[BC pretrain] Auto phase detected from dataset: {resolved_phase}")
         if not args.output.strip():
-            output_path = f"train/models/llc_{resolved_phase}_bc_init.zip"
+            output_path = str(LEGACY_RUNS / "llc" / f"llc_{resolved_phase}_bc_init.zip")
 
     n_samples_raw = int(obs_np.shape[0])
     if n_samples_raw < 1000:

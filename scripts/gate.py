@@ -237,6 +237,7 @@ def t1(s: Session) -> tuple[bool, list[str]]:
 def t2(s: Session) -> tuple[bool, list[str]]:
     lines = s.ensure_paused()
     n = s.args.frames
+    confirm, s.args.confirm, s.clock.counter = s.args.confirm, False, None  # measure raw drops
     gaps = [float(g) for g in s.args.sweep_gap.split(",")]
     rng = random.Random(2)
     keys = sorted(FIGHT_KEYS)
@@ -258,6 +259,8 @@ def t2(s: Session) -> tuple[bool, list[str]]:
         lines.append(f"| {gap_ms:g} | {missed_f6} | {missed_f5} | {'yes' if back else 'NO'} | {per_step * 1000:.0f} |")
     lines.append("\nWithout --confirm a dropped press is lost; the shortest gap with no drops is the one to use.")
     s.clock.key_gap_s = s.args.key_gap_ms / 1000
+    s.args.confirm = confirm
+    s.clock.counter = s.frame_counter if confirm else None
     # Held keys vs keys re-pressed with every F6, compared on exact, counter-checked frames.
     lines += [""] + s.calibrate()
     m = 30
@@ -328,8 +331,9 @@ def main(argv=None) -> int:
     p.add_argument("--rearm", action="store_true", help="re-press keys together with every F6")
     p.add_argument("--tap-ms", type=float, default=10.0)
     p.add_argument("--settle-ms", type=float, default=34.0, help="wait after a step before capturing")
-    p.add_argument("--key-gap-ms", type=float, default=0.0, help="wait between a key change and the F6 that follows")
-    p.add_argument("--confirm", action="store_true", help="confirm every press on the frame counter and retry drops")
+    p.add_argument("--key-gap-ms", type=float, default=10.0, help="wait between a key change and the F6 that follows")
+    p.add_argument("--no-confirm", dest="confirm", action="store_false",
+                   help="do not confirm presses on the frame counter (t2 always measures without)")
     p.add_argument("--sweep-gap", default="0,5,10,20,35", help="t2: key gaps to compare (ms)")
     p.add_argument("--countdown", type=int, default=5)
     args = p.parse_args(argv)

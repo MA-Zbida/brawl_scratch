@@ -191,3 +191,41 @@ The complete module map is `brawl.compat.LEGACY_MODULES`.
   defines its own env wrappers.
 - **The research hypothesis** (`research/HYPOTHESIS.md`), then the PADP experiment harness with the
   first pipeline designed for it.
+
+---
+
+## 2026-11-05: Stage 0, game layer gates (T0-T5, first rounds)
+
+**Command:** `python scripts/gate.py t0 ... t5` (three rounds; reports in
+[../results/gates/](../results/gates/)).
+
+**Result:**
+
+- **Rounds 1-2 were measurement errors, not game failures.** The screen keeps animating while
+  paused (smoke, respawn ring), so "a new frame arrived" and whole-screen differences could not see
+  a stepped frame or a key; and pause is a toggle, so each gate's pause press resumed the game left
+  paused by the previous gate.
+- **The paused toolbar shows the game's frame counter** ("F5 Prev | 1544 | F6 Next"): the ground
+  truth for steps. The game renders at 144 FPS (simulation rate not yet measured).
+- **T0 (human reads the counter), without confirmation:** with no fight keys changing, 200/200 F6
+  and 200/200 F5 applied. With random keys changing every step, only **166/200 F6** applied; F5
+  199/200. The game drops F6 presses, mostly when fight keys change on the same step.
+- **T2, key gap sweep without confirmation (300 F6 each):** 8, 2, 1, 31, 6 drops at 0, 5, 10, 20,
+  35 ms. Drops are partly random, so no gap removes them.
+- **T0 with confirmation** (`SteppedClock(counter=...)`: wait for the counter to change, re-press if
+  not; 10 ms key gap): **200/200 in all four rows, as read by the human**; the clock re-pressed 15
+  dropped presses.
+- **T4:** about 50 ms per step and 12 ms per rewound frame (tap 10 ms, before confirmation; to be
+  re-measured with it).
+- **T5:** the difficulty macro is not reliable: Tab toggles the bot menu and D changes whichever
+  row is selected (it changed Set Damage and pushed AI Setting to "Attack Heavy"). Withdrawn;
+  difficulty is set by hand until the macro navigates the menu.
+- **Bot menu options found:** Set Damage (0-750, current frame), Damage Reset and Position Reset
+  (on Brawlhalla's own timing; kept Off), Attack/Dodge/Jump Reaction (kept Off for fairness).
+
+**Reading:** stepping is exact only when every press is confirmed against the frame counter. With
+that, the clock and the game cannot disagree about the frame, which is what rewind, paired
+evaluation and determinism all rely on.
+
+**Decision:** confirmation is the default (`--no-confirm` to disable); key gap 10 ms. Next: T1
+(keys) and T3 (determinism) with confirmation, and T4 re-measured.

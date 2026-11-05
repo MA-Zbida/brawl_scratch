@@ -54,6 +54,7 @@ class Writer:
         self.rows = 0
         self.shards = 0
         self.stills = 0
+        self.still_failures = 0
         self._columns: dict[str, list[Any]] = {}
         self._frames: list[bytes] = []
 
@@ -69,14 +70,22 @@ class Writer:
             self.flush()
         return self.rows - 1
 
-    def still(self, row: int, image: np.ndarray) -> None:
-        """Save a full-resolution lossless copy of the frame of ``row``."""
+    def still(self, row: int, image: np.ndarray, attempts: int = 3) -> bool:
+        """Save a full-resolution lossless copy of the frame of ``row``. A failed write (a sync
+        client can lock a new folder for a moment) is retried, then counted, never silent."""
+        import time
+
         import cv2
 
         folder = self.root / "stills"
-        folder.mkdir(exist_ok=True)
-        cv2.imwrite(str(folder / f"{row:07d}.png"), image)
-        self.stills += 1
+        for attempt in range(attempts):
+            folder.mkdir(exist_ok=True)
+            if cv2.imwrite(str(folder / f"{row:07d}.png"), image):
+                self.stills += 1
+                return True
+            time.sleep(0.05 * (attempt + 1))
+        self.still_failures += 1
+        return False
 
     def flush(self) -> None:
         if not self._frames:
@@ -93,7 +102,7 @@ class Writer:
     def close(self) -> None:
         self.flush()
         meta = {**self.meta, "format": FORMAT, "rows": self.rows, "shards": self.shards,
-                "stills": self.stills, "columns": sorted(self._columns),
+                "stills": self.stills, "still_failures": self.still_failures, "columns": sorted(self._columns),
                 "frame": {"encoding": "jpeg", "scale": self.scale, "quality": self.quality}}
         (self.root / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 

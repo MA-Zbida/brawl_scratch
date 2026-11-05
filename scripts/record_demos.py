@@ -118,6 +118,9 @@ def main(argv=None) -> int:
     p.add_argument("--countdown", type=int, default=5)
     args = p.parse_args(argv)
     print(capture.status())
+    if "onedrive" in str(DATA).lower():
+        print(f"note: recording into {DATA}, inside OneDrive; set BRAWL_DATA to a folder outside it "
+              f"(and open a new terminal after setx)")
     screen = capture.Screen(timeout_s=0.05)
     out = DATA / "demos" / datetime.now().strftime("%Y%m%d_%H%M%S")
     meta = {"source": "human", "regime": "realtime", "started": datetime.now().isoformat(timespec="seconds"),
@@ -149,6 +152,8 @@ def main(argv=None) -> int:
           f"{size:.0f} MB -> {out}")
     print(f"late rows {stats['late']}, skipped {stats['skipped']}, dropped {stats['dropped']}, "
           f"repeated frames {stats['stale']}, rows with keys held {stats['rows_with_keys']}")
+    if writer.still_failures:
+        print(f"WARNING: {writer.still_failures} stills could not be written (is {out} in a synced folder?)")
     return 0
 
 

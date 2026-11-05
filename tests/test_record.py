@@ -140,3 +140,27 @@ def test_labels_are_complete_only_when_both_fighters_are_resolved(tmp_path):
     labels.save()
     assert json.loads((tmp_path / "labels.json").read_text())["a.png"]["mordex"] == {"absent": True}
     assert label.Labels(tmp_path).complete("a.png")
+
+
+def test_a_still_that_cannot_be_written_is_retried_then_counted(tmp_path, monkeypatch):
+    import cv2
+
+    calls = []
+    monkeypatch.setattr(cv2, "imwrite", lambda path, img: calls.append(path) or len(calls) > 1)
+    w = Writer(tmp_path / "rec", {})
+    assert w.still(0, image(1))                      # the first attempt fails, the retry works
+    monkeypatch.setattr(cv2, "imwrite", lambda path, img: False)
+    assert not w.still(1, image(1))
+    w.close()
+    meta = Recording(tmp_path / "rec").meta
+    assert (meta["stills"], meta["still_failures"]) == (1, 1)
+
+
+def test_a_frame_that_is_not_gameplay_is_complete_and_has_no_fighters(tmp_path):
+    label = script("label")
+    labels = label.Labels(tmp_path)
+    labels.set_box("menu.png", "wu_shang", (0, 0, 10, 10))
+    labels.toggle_unusable("menu.png")
+    assert labels.complete("menu.png") and labels.data["menu.png"] == {"unusable": True}
+    labels.toggle_unusable("menu.png")
+    assert not labels.complete("menu.png")

@@ -12,7 +12,8 @@ first unfinished frame.
 
 Mouse: drag a box for the selected fighter.
 Keys:  1 / 2  select Wu Shang / Mordex     f  facing (right, left)     w  weapon (cycles)
-       x      not on screen (toggle)       n or space  next     b  back     q or Esc  save and quit
+       x      not on screen (toggle)       u  not gameplay: menu, loading (toggle, skips the frame)
+       n or space  next     b  back     q or Esc  save and quit
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ DISPLAY_SCALE = 0.5
 
 class Labels:
     """labels.json: {frame name: {fighter: {"box": [x0, y0, x1, y1], "facing", "weapon"} or
-    {"absent": true}}}. Boxes are in full-resolution pixels."""
+    {"absent": true}} or {"unusable": true}}. Boxes are in full-resolution pixels."""
 
     def __init__(self, folder: Path) -> None:
         self.path = Path(folder) / "labels.json"
@@ -52,6 +53,10 @@ class Labels:
         frame = self.frame(name)
         frame[fighter] = {} if frame.get(fighter, {}).get("absent") else {"absent": True}
 
+    def toggle_unusable(self, name: str) -> None:
+        """Not a gameplay frame (a menu is open, the game is loading): excluded from the set."""
+        self.data[name] = {} if self.data.get(name, {}).get("unusable") else {"unusable": True}
+
     def cycle(self, name: str, fighter: str, field: str) -> None:
         entry = self.frame(name).get(fighter)
         if not entry or "box" not in entry:
@@ -63,6 +68,8 @@ class Labels:
     def complete(self, name: str) -> bool:
         """Both fighters are either absent, or boxed with a facing and a weapon."""
         frame = self.data.get(name, {})
+        if frame.get("unusable"):
+            return True
         for fighter in FIGHTERS:
             entry = frame.get(fighter, {})
             if not entry.get("absent") and not ("box" in entry and entry.get("facing") and entry.get("weapon")):
@@ -96,7 +103,7 @@ def draw(image, labels: Labels, name: str, selected: str, index: int, total: int
         entry = frame.get(fighter, {})
         state = "absent" if entry.get("absent") else ("boxed" if "box" in entry else "TODO")
         status.append(f"{'>' if fighter == selected else ' '}{fighter}: {state}")
-    done = "complete" if labels.complete(name) else "incomplete"
+    done = "NOT GAMEPLAY" if frame.get("unusable") else ("complete" if labels.complete(name) else "incomplete")
     header = f"{index + 1}/{total} {name} [{done}]   " + "   ".join(status)
     cv2.rectangle(view, (0, view.shape[0] - 24), (view.shape[1], view.shape[0]), (0, 0, 0), -1)
     cv2.putText(view, header, (6, view.shape[0] - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
@@ -129,7 +136,7 @@ def main(argv=None) -> int:
                 box = tuple(int(round(v / DISPLAY_SCALE)) for v in (x0, y0, x, y))
                 labels.set_box(files[index].name, state["selected"], box)
 
-    window = "label: drag a box | 1/2 fighter | f facing | w weapon | x absent | n next | b back | q quit"
+    window = "label: drag a box | 1/2 fighter | f facing | w weapon | x absent | u not gameplay | n next | b back | q quit"
     cv2.namedWindow(window)
     cv2.setMouseCallback(window, on_mouse)
     image, loaded = None, None
@@ -151,6 +158,8 @@ def main(argv=None) -> int:
             labels.cycle(name, state["selected"], "weapon")
         elif key == ord("x"):
             labels.toggle_absent(name, state["selected"])
+        elif key == ord("u"):
+            labels.toggle_unusable(name)
         elif key in (ord("n"), ord(" ")):
             labels.save()
             index = min(index + 1, len(files) - 1)
@@ -161,7 +170,8 @@ def main(argv=None) -> int:
     labels.save()
     cv2.destroyAllWindows()
     done = sum(labels.complete(f.name) for f in files)
-    print(f"{done}/{len(files)} frames complete -> {labels.path}")
+    skipped = sum(bool(labels.data.get(f.name, {}).get("unusable")) for f in files)
+    print(f"{done}/{len(files)} frames complete ({skipped} not gameplay) -> {labels.path}")
     return 0
 
 

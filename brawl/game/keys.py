@@ -1,4 +1,4 @@
-"""The only module that touches the keyboard.
+"""The only module that touches the keyboard: sending keys to the game, and reading the human's.
 
 Bindings are Brawlhalla's in-game controls as this project configures them. Training-mode
 controls (pause, frame step) are the F-keys; on a laptop they are FN+F5/F6/F7, but software
@@ -90,3 +90,83 @@ class Keys:
 
     def release_all(self) -> None:
         self.hold(())
+
+
+# -- the bitmask used in recordings --------------------------------------------------------
+KEY_ORDER: tuple[str, ...] = tuple(sorted(FIGHT_KEYS))  # bit i of a key mask is KEY_ORDER[i]
+
+
+def to_mask(keys: Iterable[str]) -> int:
+    return sum(1 << KEY_ORDER.index(key) for key in keys)
+
+
+def from_mask(mask: int) -> frozenset[str]:
+    return frozenset(key for i, key in enumerate(KEY_ORDER) if mask >> i & 1)
+
+
+# -- reading the human's keyboard ------------------------------------------------------------
+# Windows virtual-key codes of the fight keys. The numpad sends VK_NUMPAD4/5/6 with Num Lock on
+# and VK_LEFT/CLEAR/RIGHT with it off; both are accepted (so are the arrow keys, which share
+# those codes).
+VIRTUAL_KEYS: dict[str, tuple[int, ...]] = {
+    LEFT: (0x41,), RIGHT: (0x44,), UP: (0x57,), DOWN: (0x53,), JUMP: (0x20,), DODGE: (0x45,),
+    LIGHT: (0x64, 0x25), HEAVY: (0x66, 0x27), THROW: (0x65, 0x0C),
+}
+STOP_KEY = 0x79  # F10: ends a recording
+
+
+def _async_key_down(vk: int) -> bool:
+    import ctypes
+
+    return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+class KeyReader:
+    """Which fight keys the human holds, and which were pressed since the last ``take``.
+
+    ``poll`` samples the keyboard once; ``start`` runs it every ``poll_s`` in a thread, so a tap
+    between two recorded frames is still seen as a press. Presses matter: a jump or an attack
+    starts on the press, not on the held state.
+    """
+
+    def __init__(self, is_down: Callable[[int], bool] = _async_key_down, poll_s: float = 0.001) -> None:
+        import threading
+
+        self.is_down = is_down
+        self.poll_s = poll_s
+        self._held: frozenset[str] = frozenset()
+        self._pressed: set[str] = set()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def poll(self) -> None:
+        held = frozenset(key for key, codes in VIRTUAL_KEYS.items() if any(self.is_down(c) for c in codes))
+        with self._lock:
+            self._pressed |= held - self._held
+            self._held = held
+
+    def take(self) -> tuple[frozenset[str], frozenset[str]]:
+        """(held now, pressed since the previous take)."""
+        with self._lock:
+            pressed, self._pressed = frozenset(self._pressed), set()
+            return self._held, pressed
+
+    def stop_requested(self) -> bool:
+        return self.is_down(STOP_KEY)
+
+    def start(self) -> None:
+        import threading
+
+        def run() -> None:
+            while not self._stop.is_set():
+                self.poll()
+                time.sleep(self.poll_s)
+
+        self._thread = threading.Thread(target=run, name="key-reader", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)

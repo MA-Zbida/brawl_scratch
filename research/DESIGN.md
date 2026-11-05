@@ -40,19 +40,26 @@ selected by configuration:
 | Regime | `advance` does | Learning happens |
 |---|---|---|
 | `realtime` | Holds the keys and waits until `frames` game frames (1/60 s each) have passed | While the game runs (stalls are real) |
-| `stepped` | Game paused; for each frame, presses the keys together with F6 | Between steps, while paused (no stalls) |
+| `stepped` | Game paused; for each frame, holds the keys and presses F6, then waits for the frame counter to change (re-pressing if the game dropped the press) | Between steps, while paused (no stalls) |
 
-**Rewind** (`stepped` only): `rewind(n)` steps back `n` frames with F5. The clock counts every
-frame it advances, so the environment always knows the exact frame index and can return to it.
+**Rewind** (`stepped` only): `rewind(n)` steps back `n` frames with F5, each confirmed the same way.
+
+**Confirmed steps.** The paused toolbar shows the game's frame counter. The game drops some F6
+presses, mostly when fight keys change on the same step (gate T0: 166/200 applied unconfirmed). With
+every press confirmed against the counter, 800 of 800 presses landed exactly, as read by a human
+(T0). A 10 ms gap between a key change and the following F6 reduces drops; confirmation removes
+them. The clock's frame index and the game's frame number therefore cannot disagree.
 
 **Decision period.** The agent decides every `k` game frames (config, default `k = 3`, i.e. 20
 decisions per game second). The same `k` is used in both regimes, so a policy trained in `stepped`
 mode sees exactly the same timing in `realtime`, as long as perception plus inference fit within
 `k / 60` s (50 ms at `k = 3`). This budget is a deployment gate (D1).
 
-**Train stepped, deploy in real time.** Stepped training removes stalls, late decisions and the
-no-reset problem. The final evaluation, and the headline Chosen result, run in `realtime`, so the
-claim is about an agent that plays at game speed.
+**Roles of the regimes** ([HYPOTHESIS.md](HYPOTHESIS.md)). `realtime` is the **target setting**:
+the method must work there and the headline Chosen result is played there. `stepped` with rewind is
+the **oracle**: the same game with full control, used as the upper bound that every real-time
+result is measured against, and as an alternative training route (train in the oracle, deploy in
+real time, hypothesis H6).
 
 ## 4. The step function
 
@@ -214,10 +221,17 @@ come from easier starting situations. This needs fewer evaluation minutes for th
 | BC -> PPO | Reproduces the old degradation (H2) |
 | QR-DQN (or DQN) with replay prefilled by demos | Main off-policy candidate; reuses every frame |
 
-In `stepped` mode, SB3's synchronous loop is automatically correct: the game only advances when
-SB3 calls `step`, so updates never stall the world. In `realtime` mode the same code suffers real
-stalls. **The regime is the experimental variable; the learner code is identical.** A custom
-learner is written only if Stage 2 shows SB3's options are not enough.
+In `stepped` mode (the oracle), SB3's synchronous loop is automatically correct: the game only
+advances when SB3 calls `step`, so updates never stall the world. In `realtime` mode the same code
+suffers real stalls, which is exactly the baseline the gap (H1) is measured from.
+
+**The real-time method** (H3) needs one component SB3 does not have: **asynchronous learning**. An
+actor thread keeps stepping the live game at the decision rate with the latest policy weights,
+while the learner updates from the replay buffer in parallel; weights are copied to the actor
+after each update. This is one small module (`learn.py`'s async runner), written in Stage 2 and
+used only by real-time runs; the learner algorithms themselves stay SB3's. Its other ingredients
+(action history, the opponent-prediction head, demonstration-seeded replay) are already part of
+the observation and data design.
 
 ## 9. Gates (Stage 0, before any training)
 
@@ -309,5 +323,6 @@ Each step ends with its gates passing:
 3. Reward `(dealt - taken) / 100 + 1.0 * (KO scored - KO lost)`, gamma 0.995.
 4. Overlays on during play: hurtboxes, hitboxes, stun; damage numbers only for validating the HUD
    reader (they clutter the screen).
-5. Train in `stepped` mode, report the headline in `realtime`.
+5. `realtime` is the target setting and the headline; `stepped` with rewind is the oracle and an
+   alternative training route.
 6. Delete the old pipelines from the tree once Stage 0 passes (kept under the tag `legacy-eras`).

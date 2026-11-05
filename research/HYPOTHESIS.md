@@ -27,20 +27,27 @@ Ladder, one rung per bot difficulty (targets confirmed in review):
 - **Pause** freezes everything. **Frame step forward** applies the keys held at the same moment to
   exactly one frame. **Frame step backward** reaches back over the whole session, and stepping
   forward from there changes the past.
-- **Deterministic:** after a rewind, the bot repeats exactly what it did given the same inputs.
+- **Deterministic:** after a rewind, the bot repeats exactly what it did given the same inputs
+  (seen by eye, and measured on replayed frames in gate T1).
 - **No self-play:** one laptop, one keyboard, one screen; the opponent is always a built-in bot.
 - **Bot difficulty** steps up with Tab+D and down with Tab+A, so the ladder runs unattended.
 
-So the same live game can be played in three regimes:
+So the same live game can be played in three regimes, and each has a role in the paper:
 
-| Regime | Time | Resets |
-|---|---|---|
-| Real time | The game never waits | None |
-| Stepped | The game advances only when the agent has decided | None |
-| Stepped + rewind | The game waits | Return to any earlier frame and retry |
+| Regime | Time | Resets | Role |
+|---|---|---|---|
+| Real time | The game never waits | None | **Target setting**: what any live game offers. The method must work here, and the headline result is played here |
+| Stepped | The game advances only when the agent has decided | None | Removes real-time pressure only: separates what time costs from what resets cost |
+| Stepped + rewind | The game waits | Return to any earlier frame and retry | **Oracle**: the upper bound with full control of the same game |
 
-Few real-world learning problems allow this: the real-time constraint and the reset constraint can
-each be switched on and off, against the same opponent, in the same environment.
+**Instruments.** The paused toolbar's frame counter is ground truth for every step (presses are
+confirmed against it; the game drops about 2-17% of unconfirmed presses, gate T0). Game state is
+deterministic: replays after a rewind show identical fighters; only cosmetic animations (weapon
+spawn effects, background phantoms) differ (gate T1). So comparisons can use paired starts from
+identical frames.
+
+This is like sim-to-real work with one difference: the reference is not a simulator but the real
+game in a controlled mode, so there is no reality gap between the oracle and the target.
 
 ## Win definition (virtual matches)
 
@@ -50,26 +57,31 @@ is never interrupted. **Net stocks per minute** comes from the same event log.
 
 ## Research question
 
-**When an agent can only learn by playing a live game, with no API and no parallel copies, what do
-real-time pressure and the lack of resets cost it, and how much of that can be recovered?**
+**Using only the screen and the keyboard of a live game, how much of the gap between real-time,
+reset-free learning and an oracle that can pause and rewind the same game can a learner close, and
+what closes it?**
 
 At 20 decisions per game second, one machine produces about 1.7M decisions per day of play: about
 one Atari-200M budget every four months. Emulator results (Atari 100k, about 2 hours of game time)
-show human-level learning in hours when the environment waits and resets. Here we can measure what
-happens when it does not, and when it partly does.
+show human-level learning in hours when the environment waits and resets. Most live settings
+cannot measure how far they are from that; here the oracle makes the gap measurable.
 
 ## Main hypothesis (H)
 
-Most of what makes live, single-instance RL hard is **time and resets, not the policy**:
+Standard learners leave a large gap between the real-time setting and the oracle, and most of it
+comes from **time and data waste, not from the policy**. Each of these can be attacked using only
+screen and keyboard:
 
-1. **Real time wastes learning.** Updates stall the agent and decisions arrive late; stepping the
-   game removes both.
-2. **On-policy learning wastes data.** PPO uses each expensive frame a few times and discards it;
-   a replay-based learner reuses every frame, including the rare ones.
-3. **No resets starve rare skills.** Recovery and weapon situations arise only when the game
-   produces them; rewinding to just before a failure lets the agent practise them directly.
-4. **Stepped training transfers.** With the same decision period in both regimes, a policy trained
-   stepped loses little when deployed in real time, provided perception fits in the time budget.
+1. **Stalls and late decisions.** Synchronous updates stop acting while the game runs, and
+   decisions arrive late. Remedy: learn asynchronously while acting, and make decisions
+   delay-aware (action history; a predictive model of the opponent).
+2. **Discarded data.** On-policy PPO uses each expensive frame a few times and discards it. Remedy:
+   a replay-based learner seeded with demonstrations.
+3. **Rare situations.** Without resets, recovery and weapon situations arise only when the game
+   produces them. In real time, replay that keeps rare events longer partly substitutes; the
+   oracle's rewind measures how much remains out of reach.
+4. **Transfer is an alternative route.** Training in the oracle and deploying in real time, with the
+   same decision period, should lose little if perception fits the time budget.
 
 ## Predictions
 
@@ -78,27 +90,30 @@ noise floor, before Stage 1 starts.
 
 | ID | Prediction | Falsified if | Stage |
 |---|---|---|---|
-| H1 Real-time cost | The same learner learns more per interaction stepped than in real time (win rate after a fixed budget, higher by a margin*) | No difference within the noise floor | 1 |
-| H2 Degradation | BC -> PPO falls below the BC policy's win rate within 100k steps in at least 4 of 5 seeds, in real time | BC -> PPO matches or beats BC in most seeds | 1 |
-| H3 Replay | In the stepped regime, a replay learner seeded with demos reaches each rung in fewer interactions than PPO and BC -> PPO | No significant difference in interactions-to-target or area under the win-rate curve | 2 |
-| H4 Rewind | Rewinding to before lost stocks improves recovery success and overall win rate per interaction, compared with stepped training without rewind | No difference in recovery rate or win rate | 2 |
-| H5 Transfer | A policy trained stepped keeps most of its win rate when evaluated in real time (gap below a margin*) | The real-time win rate collapses | 2 |
-| H6 Ladder | The best regime and learner reach R3, R4 and R5, the last in real time | Plateau below R3 within the time budget | 3 |
+| H1 Gap | PPO in real time reaches a lower win rate per interaction than the same PPO in the oracle, by a margin* | No gap within the noise floor: real time costs nothing here | 1 |
+| H2 Degradation | BC -> PPO in real time falls below the BC policy's win rate within 100k steps in at least 4 of 5 seeds | BC -> PPO matches or beats BC in most seeds | 1 |
+| H3 Method | The real-time method (asynchronous, delay-aware, replay with demos) closes at least half* of the H1 gap per interaction, and more per hour | It closes less than that | 2 |
+| H4 Ingredients | Removing any one ingredient reopens a measurable part of the gap (ablation) | An ingredient's removal changes nothing: drop it from the method | 2 |
+| H5 Resets | In the oracle, rewinding to before lost stocks improves recovery success and win rate per interaction over stepped training without rewind: the share of the gap only resets recover | No difference | 2 |
+| H6 Transfer | An oracle-trained policy keeps most of its win rate when evaluated in real time (loss below a margin*) | The real-time win rate collapses | 2 |
+| H7 Ladder | The better route (H3 or H6) reaches R3, R4 and R5, with R5 played in real time | Plateau below R3 within the time budget | 3 |
 
-H2 turns "PPO made BC worse in every old pipeline" into the motivating observation. H1 and H4
-together measure the two constraints separately, which is the paper's main contribution.
+H2 turns "PPO made BC worse in every old pipeline" into the motivating observation. H1 and H5
+measure the gap and split it between time and resets; H3 and H4 are the method's contribution.
 
 ## Contributions (if the predictions hold)
 
-- **C1 Measurement.** What real-time pressure and the lack of resets each cost a single-instance
-  learner in a live game, measured separately in one environment.
-- **C2 System.** One clean loop that runs the same learner in real time or stepped, with exact
-  rewind-based resets, from screen pixels and keyboard only.
-- **C3 Result.** A seeded, statistically reported path up the bot ladder to Chosen, played in real
+- **C1 Measurement.** The size of the gap between live, real-time, reset-free RL and a pause/rewind
+  oracle of the same game, and how it splits between time pressure and resets.
+- **C2 Method.** A learner for the real-time setting, using only screen and keyboard, and the share
+  of the gap each of its ingredients closes.
+- **C3 System.** One loop that runs the same learner in either regime, with frame-exact control
+  (every step confirmed against the game's frame counter).
+- **C4 Result.** A seeded, statistically reported path up the bot ladder to Chosen, played in real
   time.
 
-**Not claimed:** the first agent for a commercial game from pixels, a new RL algorithm, or
-generality to other maps, legends or games.
+**Not claimed:** the first agent for a commercial game from pixels, a new RL algorithm from scratch,
+or generality to other maps, legends or games.
 
 ## Closest prior work (to verify in a dated literature search, Stage 0)
 
@@ -132,17 +147,19 @@ confidence intervals; every seed; Mann-Whitney tests per matched pair (PADP's st
 | Stage | What | Tests |
 |---|---|---|
 | 0 | Gates for every part ([DESIGN.md](DESIGN.md) section 9), ground-truth labels, your demonstrations, noise floor, literature search | Nothing trained on a part before its gate passes |
-| 1 | Easy and Medium: PPO and BC -> PPO, each in real time and stepped, 3-5 seeds | H1, H2 |
-| 2 | Medium and Hard: replay learner, with and without rewind; real-time evaluation of stepped policies | H3, H4, H5 |
-| 3 | The ladder, Hard to Chosen, with the best combination | H6 |
+| 1 | Easy and Medium: PPO and BC -> PPO, in real time and in the oracle, 3-5 seeds | H1, H2 |
+| 2 | Medium and Hard: the real-time method and its ablations; rewind vs no rewind in the oracle; real-time evaluation of oracle-trained policies | H3, H4, H5, H6 |
+| 3 | The ladder, Hard to Chosen, by the better route | H7 |
 
-**Budget.** About 70 h/week unattended. Stepped mode runs slower than the game (perception sets the
-pace), so interactions per hour are measured in Gate T4 and the stage budgets are fixed after it.
+**Budget.** About 70 h/week unattended. Gate T4: the oracle runs at about 20.7 game frames per
+second with every press confirmed (6.9 decisions/s at `k = 3`), roughly a third of the game's
+speed if the game simulates 60 frames per second (to be measured). Oracle runs are therefore the
+expensive arm; stage budgets are fixed from these numbers.
 
 ## Threats to validity
 
-- **Stepped play is not real play.** Training is stepped, but the headline result is evaluated in
-  real time, and H5 measures the gap directly.
+- **The oracle is not real play.** It is the reference, not the target: the headline result and the
+  method are evaluated in real time, and H6 measures what oracle training loses when deployed there.
 - **Overlays are training-mode aids.** They are visible to any player, not memory reading. Stated
   as scope; an overlays-off ablation measures their value.
 - **Carried-over health.** A virtual match can start with a fighter already damaged; report the

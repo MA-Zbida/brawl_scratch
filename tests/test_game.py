@@ -1,10 +1,12 @@
 """brawl.game: keys, clock (both regimes), the difficulty macro and capture, against FakeGame."""
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from brawl.game.capture import Screen
-from brawl.game.clock import RealtimeClock, SteppedClock, change_difficulty
+from brawl.game.clock import RealtimeClock, StepError, SteppedClock, change_difficulty
+from brawl.game.counter import FrameCounter
 from brawl.game.fake import LEVELS, FakeGame
 from brawl.game.keys import JUMP, LEFT, LIGHT, RIGHT, Keys
 
@@ -103,6 +105,50 @@ def test_rearm_mode_is_what_a_game_that_needs_fresh_presses_requires(rearm):
     clock.advance([frozenset({RIGHT})] * 3)
     # Without re-arming, only the first frame sees the newly pressed key.
     assert game.x == (3 if rearm else 1)
+
+
+# -- confirmed stepping (the frame counter) -------------------------------------------------
+def counted(game: FakeGame, **kw) -> SteppedClock:
+    """A stepped clock that confirms every press against the fake game's frame number."""
+    clock_time = FakeTime()
+    screen = Screen(game, timeout_s=0.01, now=clock_time.now, sleep=clock_time.sleep)
+    counter = FrameCounter(screen, extract=lambda img: np.asarray(img)[..., :1].astype(float),
+                           changed=lambda a, b: bool((a != b).any()), now=clock_time.now)
+    clock = SteppedClock(keys_for(game), counter=counter, sleep=clock_time.sleep, **kw)
+    clock.start()
+    return clock
+
+
+def test_without_confirmation_dropped_presses_lose_frames():
+    game = FakeGame(drop_presses={1, 4})
+    clock = stepped(game)
+    clock.advance([frozenset({RIGHT})] * 5)
+    assert clock.frame == 5 and game.frame == 3  # the clock believes 5; the game moved 3
+
+
+def test_confirmed_steps_retry_dropped_presses_and_stay_exact():
+    game = FakeGame(drop_presses={1, 4, 5})
+    clock = counted(game)
+    timing = clock.advance([frozenset({RIGHT})] * 5)
+    assert (clock.frame, game.frame, game.x, timing.retries) == (5, 5, 5, 3)
+    timing = clock.rewind(5)
+    assert (clock.frame, game.frame, game.x) == (0, 0, 0)
+
+
+def test_a_game_that_never_responds_raises():
+    game = FakeGame(drop_presses=set(range(100)))
+    clock = counted(game, max_retries=2)
+    with pytest.raises(StepError):
+        clock.advance([NO_KEYS])
+
+
+def test_key_gap_only_waits_when_keys_change():
+    waits = []
+    game = FakeGame()
+    clock = SteppedClock(keys_for(game), key_gap_s=0.01, sleep=waits.append)
+    clock.start()
+    clock.advance([frozenset({RIGHT}), frozenset({RIGHT}), NO_KEYS])
+    assert waits.count(0.01) == 2  # RIGHT pressed, then released; the repeat needs no gap
 
 
 # -- realtime clock -------------------------------------------------------------------------

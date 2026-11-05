@@ -20,6 +20,7 @@ LEVELS = ("easy", "medium", "hard", "extreme", "chosen", "evasive")
 @dataclass
 class FakeGame:
     needs_rearm: bool = False  # True: the game only applies keys pressed since the last step
+    drop_presses: set[int] = field(default_factory=set)  # indices of F5/F6 presses to ignore, like the real game
     paused: bool = False
     frame: int = 0
     x: int = 0
@@ -30,6 +31,7 @@ class FakeGame:
     _since_step: set[str] = field(default_factory=set)
     _history: list[tuple[int, int]] = field(default_factory=list)
     _new_frame: bool = True
+    _presses: int = 0
 
     def __post_init__(self) -> None:
         self._history = [(self.x, self.bot)]
@@ -37,6 +39,10 @@ class FakeGame:
     # -- keyboard backend ----------------------------------------------------------------
     def key_down(self, key: str) -> None:
         self.log.append(("down", key))
+        if key in (STEP, REWIND) and self.paused:
+            self._presses += 1
+            if self._presses - 1 in self.drop_presses:
+                return
         if key == PAUSE:
             self.paused = not self.paused
         elif key == STEP and self.paused:

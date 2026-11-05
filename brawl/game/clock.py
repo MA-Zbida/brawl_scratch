@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Protocol, Sequence
+from typing import Any, Callable, Optional, Protocol, Sequence
 
 from brawl.game.keys import DIFFICULTY_DOWN, DIFFICULTY_UP, MENU, PAUSE, REWIND, STEP, Keys
 
@@ -23,6 +23,11 @@ class Timing:
     frames: int = 0
     wall_s: float = 0.0
     late_frames: int = 0  # realtime only: frames whose keys were set after the frame began
+    retries: int = 0      # stepped only: presses the game dropped and that were pressed again
+
+
+class StepError(RuntimeError):
+    """The game did not respond to a frame step or rewind, even after retries."""
 
 
 class Clock(Protocol):
@@ -41,14 +46,20 @@ class Clock(Protocol):
 class SteppedClock:
     """The game stays paused; it advances one frame per F6 press, with the plan's keys held.
 
-    ``rearm_each_frame``: release and re-press the frame's keys together with every F6, for the
-    case where the game only applies keys pressed at the same moment as the step (Gate T2
-    decides which mode is needed).
+    ``counter``: the toolbar's frame counter (``brawl.game.counter.FrameCounter``). With it, every
+    F6 and F5 is confirmed: the clock waits for the counter to change and presses again if the
+    game dropped the press. The game drops F6 when fight keys change at the same moment (gate
+    T0), so ``key_gap_s`` separates a key change from the F6 that follows it.
+    ``rearm_each_frame``: release and re-press the frame's keys with every F6.
+    ``settle_s``: a fixed wait after a plan, for use without a counter.
     """
 
     keys: Keys
+    counter: Optional[Any] = None
+    key_gap_s: float = 0.0
+    max_retries: int = 3
     rearm_each_frame: bool = False
-    settle_s: float = 0.0  # wait after the last step of a plan so the game has drawn that frame
+    settle_s: float = 0.0
     now: Callable[[], float] = time.perf_counter
     sleep: Callable[[float], None] = time.sleep
     frame: int = 0
@@ -71,15 +82,33 @@ class SteppedClock:
     def advance(self, plan: Plan) -> Timing:
         if not self.paused:
             raise RuntimeError("SteppedClock.advance needs a paused game: call start() first")
+        timing = Timing(frames=len(plan))
         t0 = self.now()
         for frame_keys in plan:
             if self.rearm_each_frame:
                 self.keys.release_all()
+            keys_changed = frozenset(frame_keys) != self.keys.held
             self.keys.hold(frame_keys)
-            self.keys.tap(STEP)
+            if keys_changed and self.key_gap_s:
+                self.sleep(self.key_gap_s)
+            timing.retries += self._press(STEP)
             self.frame += 1
         self.sleep(self.settle_s)
-        return Timing(frames=len(plan), wall_s=self.now() - t0)
+        timing.wall_s = self.now() - t0
+        return timing
+
+    def _press(self, key: str) -> int:
+        """Tap ``key``; with a counter, confirm it moved and retry if the game dropped the press.
+        Returns the number of retries."""
+        if self.counter is None:
+            self.keys.tap(key)
+            return 0
+        before = self.counter.read()
+        for attempt in range(self.max_retries + 1):
+            self.keys.tap(key)
+            if self.counter.wait_change(before):
+                return attempt
+        raise StepError(f"the game ignored {key} {self.max_retries + 1} times (frame {self.frame})")
 
     def rewind(self, frames: int) -> Timing:
         """Step back ``frames`` frames. The game is deterministic, so replaying the same keys from
@@ -88,13 +117,15 @@ class SteppedClock:
             raise RuntimeError("rewind needs a paused game")
         if frames > self.frame:
             raise ValueError(f"cannot rewind {frames} frames from frame {self.frame}")
+        timing = Timing(frames=-frames)
         t0 = self.now()
         self.keys.release_all()
         for _ in range(frames):
-            self.keys.tap(REWIND)
-        self.frame -= frames
+            timing.retries += self._press(REWIND)
+            self.frame -= 1
         self.sleep(self.settle_s)
-        return Timing(frames=-frames, wall_s=self.now() - t0)
+        timing.wall_s = self.now() - t0
+        return timing
 
 
 @dataclass

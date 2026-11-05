@@ -39,12 +39,12 @@ from datetime import datetime  # noqa: E402
 import numpy as np  # noqa: E402
 
 from brawl.game.clock import SteppedClock  # noqa: E402
+from brawl.game.counter import FrameCounter, counter_changed  # noqa: E402
 from brawl.game.keys import FIGHT_KEYS, PAUSE, RIGHT, DirectInput, Keys  # noqa: E402
 from brawl.paths import RESULTS, RUNS  # noqa: E402
 
 GATES_DIR = RESULTS / "gates"
 NO_KEYS: frozenset[str] = frozenset()
-COUNTER_BOX = (700, 40, 760, 62)   # x0, y0, x1, y1 of the frame counter at 1920 x 1080
 TOOLBAR_BOX = (600, 40, 900, 62)   # dark toolbar box (paused) or sky (running)
 SCALE = 4                          # fighter comparisons at 480 x 270
 PIXEL_THRESHOLD = 24.0             # grey levels for a pixel to count as changed
@@ -65,8 +65,13 @@ class Session:
         self.out = RUNS / "gates" / args.gate
         self.out.mkdir(parents=True, exist_ok=True)
         self.keys = Keys(DirectInput(), tap_s=args.tap_ms / 1000)
-        self.clock = SteppedClock(self.keys, rearm_each_frame=args.rearm, settle_s=args.settle_ms / 1000)
-        self.screen = capture.Screen(timeout_s=0.3)
+        self.screen = capture.Screen(timeout_s=0.05)
+        self.frame_counter = FrameCounter(self.screen)
+        # --confirm: the clock checks every press against the counter and retries dropped ones.
+        self.clock = SteppedClock(self.keys, counter=self.frame_counter if args.confirm else None,
+                                  key_gap_s=args.key_gap_ms / 1000, rearm_each_frame=args.rearm,
+                                  settle_s=0.0 if args.confirm else args.settle_ms / 1000)
+        self.retries = 0
         self.mask: np.ndarray | None = None
         self.floor = 0.0
 
@@ -92,25 +97,23 @@ class Session:
                 f"{min(before, after):.0f} paused)"]
 
     def counter(self) -> np.ndarray:
-        return grey(self.image(), COUNTER_BOX)
+        return self.frame_counter.read()
 
-    @staticmethod
-    def counter_changed(a: np.ndarray, b: np.ndarray) -> bool:
-        """The counter is static UI text: any digit change moves dozens of pixels by ~50 grey
-        levels, while an unchanged counter moves none. Six pixels is a safe margin."""
-        return int((np.abs(a - b) > 20).sum()) >= 6
+    counter_changed = staticmethod(counter_changed)
 
     def step(self, frame_keys=NO_KEYS) -> tuple[np.ndarray, bool]:
-        """One frame step; returns the frame and whether the counter moved."""
+        """One frame step; returns the frame and whether the counter moved (waiting for it)."""
         before = self.counter()
-        self.clock.advance([frame_keys])
-        image = self.image()
-        return image, self.counter_changed(before, grey(image, COUNTER_BOX))
+        timing = self.clock.advance([frame_keys])
+        self.retries += timing.retries
+        moved = True if self.args.confirm else self.frame_counter.wait_change(before)
+        return self.image(), moved
 
     def rewind_one(self) -> bool:
         before = self.counter()
-        self.clock.rewind(1)
-        return self.counter_changed(before, self.counter())
+        timing = self.clock.rewind(1)
+        self.retries += timing.retries
+        return True if self.args.confirm else self.frame_counter.wait_change(before)
 
     def play(self, plan) -> tuple[list[np.ndarray], int]:
         frames, missed = [], 0
@@ -201,6 +204,7 @@ def t0(s: Session) -> tuple[bool, list[str]]:
         lines.append(f"| {phase}: F6 | {n} | {human_f6} | {n - missed_f6} | {n - human_f6} | {held} |")
         lines.append(f"| {phase}: F5 | {n} | {human_f5} | {n - missed_f5} | {n - human_f5} | - |")
         ok &= human_f6 == n and human_f5 == n
+    lines.append(f"\nWith --confirm the clock re-pressed {s.retries} dropped presses (key gap {s.args.key_gap_ms} ms).")
     lines.append("\nIf 'you read' equals the presses, the game applied every press and any detected misses are "
                  "the script's detector. If 'you read' is lower, the game really skipped presses.")
     return ok, lines
@@ -233,25 +237,28 @@ def t1(s: Session) -> tuple[bool, list[str]]:
 def t2(s: Session) -> tuple[bool, list[str]]:
     lines = s.ensure_paused()
     n = s.args.frames
-    taps = [float(t) for t in s.args.sweep_tap.split(",")] if s.args.sweep_tap else [s.args.tap_ms]
-    lines += ["", f"| Key hold (ms) | Missed F6 of {n} | Missed F5 of {n} | Back at the start frame | ms per step |",
+    gaps = [float(g) for g in s.args.sweep_gap.split(",")]
+    rng = random.Random(2)
+    keys = sorted(FIGHT_KEYS)
+    lines += ["", "Keys change on every step (random fight keys), the case where the game drops F6.", "",
+              f"| Key gap (ms) | Dropped F6 of {n} | Dropped F5 of {n} | Back at the start frame | ms per step |",
               "|---|---|---|---|---|"]
     best_ok = False
-    for tap_ms in taps:
-        s.keys.tap_s = tap_ms / 1000
+    for gap_ms in gaps:
+        s.clock.key_gap_s = gap_ms / 1000
+        plan = [frozenset(rng.sample(keys, rng.randint(1, 2))) for _ in range(n)]
         start = s.counter()
         t0 = time.perf_counter()
-        missed_f6 = sum(int(not s.step(frozenset({RIGHT}) if i % 30 < 15 else NO_KEYS)[1]) for i in range(n))
+        missed_f6 = sum(int(not s.step(k)[1]) for k in plan)
         per_step = (time.perf_counter() - t0) / n
         missed_f5 = s.rewind(n)
         back = not s.counter_changed(start, s.counter())
         ok = missed_f6 == 0 and missed_f5 == 0 and back
         best_ok |= ok
-        lines.append(f"| {tap_ms:g} | {missed_f6} | {missed_f5} | {'yes' if back else 'NO'} | {per_step * 1000:.0f} |")
-    if best_ok:
-        lines.append("\nUse the shortest key hold with no misses (`--tap-ms`).")
+        lines.append(f"| {gap_ms:g} | {missed_f6} | {missed_f5} | {'yes' if back else 'NO'} | {per_step * 1000:.0f} |")
+    lines.append("\nWithout --confirm a dropped press is lost; the shortest gap with no drops is the one to use.")
+    s.clock.key_gap_s = s.args.key_gap_ms / 1000
     # Held keys vs keys re-pressed with every F6, compared on exact, counter-checked frames.
-    s.keys.tap_s = s.args.tap_ms / 1000
     lines += [""] + s.calibrate()
     m = 30
     s.clock.rearm_each_frame = False
@@ -319,9 +326,11 @@ def main(argv=None) -> int:
     p.add_argument("gate", choices=sorted(GATES))
     p.add_argument("--frames", type=int, default=None, help="frames per test (default per gate)")
     p.add_argument("--rearm", action="store_true", help="re-press keys together with every F6")
-    p.add_argument("--tap-ms", type=float, default=20.0)
+    p.add_argument("--tap-ms", type=float, default=10.0)
     p.add_argument("--settle-ms", type=float, default=34.0, help="wait after a step before capturing")
-    p.add_argument("--sweep-tap", default="10,20,35,50", help="t2: key hold times to compare (ms)")
+    p.add_argument("--key-gap-ms", type=float, default=0.0, help="wait between a key change and the F6 that follows")
+    p.add_argument("--confirm", action="store_true", help="confirm every press on the frame counter and retry drops")
+    p.add_argument("--sweep-gap", default="0,5,10,20,35", help="t2: key gaps to compare (ms)")
     p.add_argument("--countdown", type=int, default=5)
     args = p.parse_args(argv)
     args.frames = args.frames or {"t2": 300, "t3": 120, "t4": 300}.get(args.gate, 0)
@@ -337,7 +346,7 @@ def main(argv=None) -> int:
     GATES_DIR.mkdir(parents=True, exist_ok=True)
     report = GATES_DIR / f"{args.gate}.md"
     header = [f"# Gate {args.gate.upper()}: {'PASS' if ok else 'FAIL'}", "",
-              f"Run {datetime.now():%Y-%m-%d %H:%M}; rearm={args.rearm}, tap={args.tap_ms} ms, "
+              f"Run {datetime.now():%Y-%m-%d %H:%M}; confirm={args.confirm}, key gap={args.key_gap_ms} ms, rearm={args.rearm}, tap={args.tap_ms} ms, "
               f"settle={args.settle_ms} ms, frames={args.frames}. Evidence: `{s.out}`.",
               "The game is left paused.", ""]
     report.write_text("\n".join(header + lines) + "\n", encoding="utf-8")

@@ -53,6 +53,39 @@ PIXEL_THRESHOLD = 24.0             # grey levels for a pixel to count as changed
 ANIMATED = 12.0                    # brightness range while paused above which a pixel is masked out
 
 
+def foreground_window() -> str:
+    """Title of the window that receives the keys (Windows)."""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        handle = user32.GetForegroundWindow()
+        buffer = ctypes.create_unicode_buffer(user32.GetWindowTextLengthW(handle) + 1)
+        user32.GetWindowTextW(handle, buffer, len(buffer))
+        return buffer.value or "(untitled)"
+    except Exception as exc:  # noqa: BLE001 - diagnostic only
+        return f"(unknown: {exc})"
+
+
+def probe_stall(s: "Session", key: str, keys_held_s: float = 20.0, released_s: float = 10.0) -> list[str]:
+    """After the game stopped responding: keep pressing ``key`` to learn whether the stall ends
+    by itself, and whether releasing the fight keys ends it."""
+    lines = []
+    for phase, seconds in (("keys still held", keys_held_s), ("all keys released", released_s)):
+        if phase == "all keys released":
+            s.keys.release_all()
+        before, t0 = s.frame_counter.value(), time.perf_counter()
+        while time.perf_counter() - t0 < seconds:
+            s.keys.tap(key, hold_s=0.03)
+            moved = s.frame_counter.wait_value(before, timeout_s=1.0)
+            if moved is not None:
+                return lines + [f"- Probe: the game answered {key} again after a further "
+                                f"{time.perf_counter() - t0:.1f} s ({phase}); counter {before} -> {moved}"]
+        lines.append(f"- Probe: no answer to {key} for {seconds:.0f} s more ({phase}); window with focus: "
+                     f"\"{foreground_window()}\"")
+    return lines
+
+
 def grey(image, box=None, scale=1) -> np.ndarray:
     a = np.asarray(image)
     if box is not None:
@@ -76,6 +109,7 @@ class Session:
         self.retries = 0
         self.repairs = 0
         self.events: list[tuple[int, int]] = []  # (retries, repairs) of every step, in order
+        self.lines: list[str] = []  # report lines so far: kept if the gate stops early
         self.mask: np.ndarray | None = None
         self.floor = 0.0
 
@@ -377,7 +411,8 @@ def t3(s: Session) -> tuple[bool, list[str]]:
     fails on a *run* of differing frames, records where each replay first differs and whether a
     retried or repaired press came just before, and saves that frame pair for a human to judge.
     """
-    lines = s.ensure_paused() + s.calibrate()
+    lines = s.lines
+    lines += s.ensure_paused() + s.calibrate()
     rng = random.Random(0)
     n, reps, run_limit = s.args.frames, 5, 10
     keys = sorted(FIGHT_KEYS)
@@ -411,7 +446,7 @@ def t3(s: Session) -> tuple[bool, list[str]]:
             csv.append(f"{rep},{i},{'+'.join(sorted(plan[i]))},{d:.6f},{e1[i][0]},{e1[i][1]},{e2[i][0]},{e2[i][1]}")
         ok &= longest < run_limit and m1 + m2 == 0
         lines.append(f"| {rep} | {sum(bad)}/{n} | {longest} | {start if start is not None else '-'} | {near} |")
-    (s.out / "frames.csv").write_text("\n".join(csv) + "\n", encoding="utf-8")
+        (s.out / "frames.csv").write_text("\n".join(csv) + "\n", encoding="utf-8")
     lines += ["", f"- Pass: no run of {run_limit} or more differing frames in any replay, and no missed press: "
               f"{'PASS' if ok else 'FAIL'}",
               f"- Presses retried: {s.retries}; presses that undid a double landing: {s.repairs}",
@@ -467,17 +502,23 @@ def main(argv=None) -> int:
         print(f"click into the game window... {i}", flush=True)
         time.sleep(1)
     s = Session(args)
+    s.started, s.focus = time.perf_counter(), foreground_window()
     try:
         ok, lines = GATES[args.gate](s)
     except StepError as exc:
         import cv2
 
+        stalled_at = time.perf_counter() - s.started
+        focus = foreground_window()
         image = s.image()
         cv2.imwrite(str(s.out / "step_error_screen.png"), image)
         cv2.imwrite(str(s.out / "step_error_counter.png"), np.asarray(image)[30:72, 680:780])
-        ok, lines = False, [f"- **Stopped: {exc}**",
-                            f"- The screen at that moment: `{s.out / 'step_error_screen.png'}` "
-                            f"(counter crop: `step_error_counter.png`)"]
+        ok, lines = False, s.lines + ["", f"- **Stopped {stalled_at:.0f} s into the gate: {exc}**",
+                                      f"- Window with focus: \"{focus}\" (at the start: \"{s.focus}\")",
+                                      f"- The screen at that moment: `{s.out / 'step_error_screen.png'}` "
+                                      f"(counter crop: `step_error_counter.png`)"]
+        if exc.key is not None:
+            lines += probe_stall(s, exc.key)
     finally:
         s.keys.release_all()
     return write_report(args, ok, lines, s.out, "The game is left paused.")

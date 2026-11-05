@@ -30,6 +30,10 @@ class Timing:
 class StepError(RuntimeError):
     """The game did not respond to a frame step or rewind, even after retries."""
 
+    def __init__(self, message: str, key: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.key = key  # the key the game ignored, if that is what happened
+
 
 class Clock(Protocol):
     frame: int
@@ -157,7 +161,7 @@ class SteppedClock:
                 break
         else:
             raise StepError(f"the game ignored {key} {self.max_retries + 1} times "
-                            f"(frame {self.frame}, keys held: {sorted(held) or 'none'})")
+                            f"(frame {self.frame}, keys held: {sorted(held) or 'none'})", key=key)
         if key == STEP:
             self.keys_at[goal] = held
         self.frame = goal

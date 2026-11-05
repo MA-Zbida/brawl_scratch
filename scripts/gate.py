@@ -1,22 +1,25 @@
 """Run one Stage 0 gate against the live game and write results/gates/<gate>.md.
 
-Start Brawlhalla in training mode (Wu Shang vs a Mordex bot, Brawlhaven), unpaused, with no menu
-open. Run a gate, then click into the game window during the countdown: the script presses keys
+Start Brawlhalla in training mode (Wu Shang vs a Mordex bot, Brawlhaven) with no menu open, paused
+or not. Run a gate, then click into the game window during the countdown: the script presses keys
 in whatever window has focus.
 
-    python scripts/gate.py t1     # pause, and every fight key reaches the game
-    python scripts/gate.py t2     # N steps then N rewinds return to the start; held vs re-pressed keys
+    python scripts/gate.py t1     # every fight key reaches the game
+    python scripts/gate.py t2     # every F6 advances and every F5 rewinds exactly one frame
     python scripts/gate.py t3     # rewind and replay give identical frames
     python scripts/gate.py t4     # steps and rewind frames per second
-    python scripts/gate.py t5     # difficulty macro (saves screenshots for you to confirm)
 
-How frames are compared. Parts of the screen keep animating while the game is paused (smoke, the
-respawn ring, menus). Each gate first watches the paused screen for one second and keeps only the
-pixels that stay still (the *static mask*). Two frames "differ" by the fraction of static pixels
-whose brightness changed by more than PIXEL_THRESHOLD. The *noise floor* is that fraction between
-two captures of the same paused frame. Evidence images go to runs/gates/<gate>/.
+Ground truth is the game's own **frame counter**, shown in the training toolbar while paused
+(between "F5 Prev" and "F6 Next"). A step or rewind counts only if the counter changed. Pause is a
+toggle, so each gate first finds out whether the game is paused (the toolbar box is only there
+when it is) instead of assuming.
 
-Options: --rearm, --tap-ms (key hold time), --settle-ms (wait after a step before capturing).
+Fighter comparisons use a *static mask*: parts of the screen animate while paused (smoke, the
+respawn ring), so each gate watches the paused screen for a second and compares only the pixels
+that stay still. Evidence images go to runs/gates/<gate>/.
+
+The difficulty macro (former t5) needs menu navigation and is not automated yet: switch the bot's
+level by hand for now.
 """
 from __future__ import annotations
 
@@ -34,19 +37,25 @@ from datetime import datetime  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-from brawl.game.clock import SteppedClock, change_difficulty  # noqa: E402
-from brawl.game.keys import FIGHT_KEYS, RIGHT, DirectInput, Keys  # noqa: E402
+from brawl.game.clock import SteppedClock  # noqa: E402
+from brawl.game.keys import FIGHT_KEYS, PAUSE, RIGHT, DirectInput, Keys  # noqa: E402
 from brawl.paths import RESULTS, RUNS  # noqa: E402
 
 GATES_DIR = RESULTS / "gates"
 NO_KEYS: frozenset[str] = frozenset()
-SCALE = 4               # compare at 480 x 270
-PIXEL_THRESHOLD = 24.0  # grey levels (0-255) for a pixel to count as changed
-ANIMATED = 12.0         # a pixel whose brightness ranges more than this while paused is masked out
+COUNTER_BOX = (700, 40, 760, 62)   # x0, y0, x1, y1 of the frame counter at 1920 x 1080
+TOOLBAR_BOX = (600, 40, 900, 62)   # dark toolbar box (paused) or sky (running)
+SCALE = 4                          # fighter comparisons at 480 x 270
+PIXEL_THRESHOLD = 24.0             # grey levels for a pixel to count as changed
+ANIMATED = 12.0                    # brightness range while paused above which a pixel is masked out
 
 
-def grey(image) -> np.ndarray:
-    return np.asarray(image, dtype=np.float32).mean(axis=2)[::SCALE, ::SCALE]
+def grey(image, box=None, scale=1) -> np.ndarray:
+    a = np.asarray(image)
+    if box is not None:
+        x0, y0, x1, y1 = box
+        a = a[y0:y1, x0:x1]
+    return a.astype(np.float32).mean(axis=2)[::scale, ::scale]
 
 
 class Session:
@@ -60,180 +69,195 @@ class Session:
         self.mask: np.ndarray | None = None
         self.floor = 0.0
 
-    def shot(self) -> np.ndarray:
-        return grey(self.screen.grab(fresh=False).image)
+    def image(self):
+        return self.screen.grab(fresh=False).image
 
-    def step(self, frame_keys=NO_KEYS) -> np.ndarray:
+    # -- pause and the frame counter -------------------------------------------------------
+    def toolbar_brightness(self) -> float:
+        return float(grey(self.image(), TOOLBAR_BOX).mean())
+
+    def ensure_paused(self) -> list[str]:
+        """Pause is a toggle: press it, and press again if that made things worse."""
+        before = self.toolbar_brightness()
+        self.keys.tap(PAUSE)
+        time.sleep(0.4)
+        after = self.toolbar_brightness()
+        if after > before:  # the toolbar box disappeared: it was paused and we just resumed
+            self.keys.tap(PAUSE)
+            time.sleep(0.4)
+            after = self.toolbar_brightness()
+        self.clock.paused = True
+        return [f"- Pause found by the toolbar box (brightness {max(before, after):.0f} running/other, "
+                f"{min(before, after):.0f} paused)"]
+
+    def counter(self) -> np.ndarray:
+        return grey(self.image(), COUNTER_BOX)
+
+    @staticmethod
+    def counter_changed(a: np.ndarray, b: np.ndarray) -> bool:
+        """The counter is static UI text: any digit change moves dozens of pixels by ~50 grey
+        levels, while an unchanged counter moves none. Six pixels is a safe margin."""
+        return int((np.abs(a - b) > 20).sum()) >= 6
+
+    def step(self, frame_keys=NO_KEYS) -> tuple[np.ndarray, bool]:
+        """One frame step; returns the frame and whether the counter moved."""
+        before = self.counter()
         self.clock.advance([frame_keys])
-        return self.shot()
+        image = self.image()
+        return image, self.counter_changed(before, grey(image, COUNTER_BOX))
 
-    def play(self, plan) -> list[np.ndarray]:
-        return [self.step(k) for k in plan]
+    def rewind_one(self) -> bool:
+        before = self.counter()
+        self.clock.rewind(1)
+        return self.counter_changed(before, self.counter())
 
+    def play(self, plan) -> tuple[list[np.ndarray], int]:
+        frames, missed = [], 0
+        for frame_keys in plan:
+            image, moved = self.step(frame_keys)
+            frames.append(grey(image, scale=SCALE))
+            missed += int(not moved)
+        return frames, missed
+
+    def rewind(self, n: int) -> int:
+        return sum(int(not self.rewind_one()) for _ in range(n))
+
+    # -- fighter comparisons ----------------------------------------------------------------
     def calibrate(self, seconds: float = 1.0, n: int = 20) -> list[str]:
-        """Watch the paused screen: build the static mask and the noise floor."""
         shots = []
         for _ in range(n):
-            shots.append(self.shot())
+            shots.append(grey(self.image(), scale=SCALE))
             time.sleep(seconds / n)
         stack = np.stack(shots)
         self.mask = (stack.max(0) - stack.min(0)) <= ANIMATED
         self.floor = max(self.differ(a, b) for a, b in zip(shots, shots[1:]))
-        self.save_mask(shots[0])
-        return [f"- Static mask: {self.mask.mean():.1%} of the screen stays still while paused "
-                f"(the rest animates and is ignored); noise floor {self.floor:.4%}"]
+        self.save(shots[0], None, "static_mask")
+        return [f"- Static mask: {self.mask.mean():.1%} of the screen stays still while paused; "
+                f"noise floor {self.floor:.4%}"]
 
     def differ(self, a: np.ndarray, b: np.ndarray) -> float:
         changed = np.abs(a - b) > PIXEL_THRESHOLD
         return float(changed[self.mask].mean()) if self.mask is not None else float(changed.mean())
 
-    def different(self, a, b) -> bool:
-        """Clearly different: above three times the noise floor and above 0.02% of static pixels."""
-        return self.differ(a, b) > max(3 * self.floor, 2e-4)
+    def different(self, a, b, noise: float = 0.0) -> bool:
+        return self.differ(a, b) > max(3 * self.floor, 3 * noise, 2e-4)
 
-    def save_diff(self, name: str, a: np.ndarray, b: np.ndarray) -> None:
+    def save(self, a: np.ndarray, b: np.ndarray | None, name: str) -> None:
         import cv2
 
-        changed = (np.abs(a - b) > PIXEL_THRESHOLD) & self.mask
         view = np.dstack([a, a, a]).astype(np.uint8)
-        view[changed] = (0, 0, 255)
+        if b is not None:
+            view[(np.abs(a - b) > PIXEL_THRESHOLD) & self.mask] = (0, 0, 255)
         view[~self.mask] = (view[~self.mask] * 0.3).astype(np.uint8)
         cv2.imwrite(str(self.out / f"{name}.png"), view)
 
-    def save_mask(self, frame: np.ndarray) -> None:
-        import cv2
-
-        view = np.dstack([frame, frame, frame]).astype(np.uint8)
-        view[~self.mask] = (view[~self.mask] * 0.3).astype(np.uint8)
-        cv2.imwrite(str(self.out / "static_mask.png"), view)
-
 
 def t1(s: Session) -> tuple[bool, list[str]]:
-    lines, ok = [], True
-    s.screen.grab(fresh=False)
-    running_a = s.shot()
-    time.sleep(1.0)
-    running_b = s.shot()
-    s.clock.start()
-    time.sleep(0.5)
-    lines += s.calibrate()
-    paused_a = s.shot()
-    time.sleep(1.0)
-    paused_b = s.shot()
-    moving, still = s.differ(running_a, running_b), s.differ(paused_a, paused_b)
-    paused = still <= max(3 * s.floor, 2e-4) and moving > still
-    lines.append(f"- F7 pause: {'PASS' if paused else 'FAIL'} (static pixels changing over 1 s: "
-                 f"{moving:.3%} running, {still:.4%} paused)")
-    ok &= paused
+    lines = s.ensure_paused() + s.calibrate()
     n = 12
-    baseline = s.play([NO_KEYS] * n)[-1]
-    s.clock.rewind(n)
-    again = s.play([NO_KEYS] * n)[-1]
-    s.clock.rewind(n)
-    replay_noise = s.differ(baseline, again)
-    lines.append(f"- Replaying the same {n} frames twice differs by {replay_noise:.4%} (keys must beat this)")
-    lines += ["", f"| Key | Static pixels changed after {n} frames vs no key | Reached the game |", "|---|---|---|"]
+    baseline, m1 = s.play([NO_KEYS] * n)
+    r1 = s.rewind(n)
+    again, m2 = s.play([NO_KEYS] * n)
+    r2 = s.rewind(n)
+    noise = s.differ(baseline[-1], again[-1])
+    lines.append(f"- Replaying the same {n} frames twice differs by {noise:.4%}; missed steps {m1 + m2}, "
+                 f"missed rewinds {r1 + r2}")
+    lines += ["", f"| Key | Static pixels changed after {n} frames vs no key | Missed steps | Reached the game |",
+              "|---|---|---|---|"]
+    ok = m1 + m2 + r1 + r2 == 0
     for key in sorted(FIGHT_KEYS):
-        image = s.play([frozenset({key})] * n)[-1]
-        s.clock.rewind(n)
-        d = s.differ(image, baseline)
-        reached = d > max(3 * replay_noise, 3 * s.floor, 2e-4)
-        ok &= reached
-        s.save_diff(f"key_{key}", image, baseline)
-        lines.append(f"| `{key}` | {d:.3%} | {'yes' if reached else 'NO'} |")
+        frames, missed = s.play([frozenset({key})] * n)
+        missed += s.rewind(n)
+        d = s.differ(frames[-1], baseline[-1])
+        reached = d > max(3 * noise, 3 * s.floor, 2e-4)
+        ok &= reached and missed == 0
+        s.save(frames[-1], baseline[-1], f"key_{key}")
+        lines.append(f"| `{key}` | {d:.3%} | {missed} | {'yes' if reached else 'NO'} |")
     return ok, lines
 
 
 def t2(s: Session) -> tuple[bool, list[str]]:
-    s.clock.start()
-    time.sleep(0.5)
-    lines = s.calibrate()
+    lines = s.ensure_paused()
     n = s.args.frames
-    start = s.shot()
-    s.play([frozenset({RIGHT}) if i % 30 < 15 else NO_KEYS for i in range(n)])
-    moved = s.shot()
-    s.clock.rewind(n)
-    back = s.shot()
-    returned = not s.different(start, back)
-    s.save_diff("after_steps_vs_start", moved, start)
-    s.save_diff("after_rewind_vs_start", back, start)
-    lines.append(f"- {n} steps then {n} rewinds return to the start: {'PASS' if returned else 'FAIL'} "
-                 f"(difference {s.differ(start, back):.4%}; the steps themselves changed {s.differ(start, moved):.3%})")
-    # Held keys vs keys re-pressed with every F6: if they differ, only re-pressing works.
+    taps = [float(t) for t in s.args.sweep_tap.split(",")] if s.args.sweep_tap else [s.args.tap_ms]
+    lines += ["", f"| Key hold (ms) | Missed F6 of {n} | Missed F5 of {n} | Back at the start frame | ms per step |",
+              "|---|---|---|---|---|"]
+    best_ok = False
+    for tap_ms in taps:
+        s.keys.tap_s = tap_ms / 1000
+        start = s.counter()
+        t0 = time.perf_counter()
+        missed_f6 = sum(int(not s.step(frozenset({RIGHT}) if i % 30 < 15 else NO_KEYS)[1]) for i in range(n))
+        per_step = (time.perf_counter() - t0) / n
+        missed_f5 = s.rewind(n)
+        back = not s.counter_changed(start, s.counter())
+        ok = missed_f6 == 0 and missed_f5 == 0 and back
+        best_ok |= ok
+        lines.append(f"| {tap_ms:g} | {missed_f6} | {missed_f5} | {'yes' if back else 'NO'} | {per_step * 1000:.0f} |")
+    if best_ok:
+        lines.append("\nUse the shortest key hold with no misses (`--tap-ms`).")
+    # Held keys vs keys re-pressed with every F6, compared on exact, counter-checked frames.
+    s.keys.tap_s = s.args.tap_ms / 1000
+    lines += [""] + s.calibrate()
     m = 30
-    held = SteppedClock(s.keys, settle_s=s.clock.settle_s, frame=s.clock.frame)
-    rearm = SteppedClock(s.keys, rearm_each_frame=True, settle_s=s.clock.settle_s, frame=s.clock.frame)
-    held.paused = rearm.paused = True
-    held.advance([frozenset({RIGHT})] * m)
-    a = s.shot()
-    held.rewind(m)
-    rearm.advance([frozenset({RIGHT})] * m)
-    b = s.shot()
-    rearm.rewind(m)
-    s.save_diff("held_vs_rearmed", a, b)
-    same = not s.different(a, b)
-    lines.append(f"- Holding RIGHT for {m} frames, held vs re-pressed differ by {s.differ(a, b):.4%}: "
-                 + ("held keys carry over, re-pressing not needed" if same else "they differ: inspect held_vs_rearmed.png"))
-    return returned, lines
+    s.clock.rearm_each_frame = False
+    held, mh = s.play([frozenset({RIGHT})] * m)
+    s.rewind(m)
+    s.clock.rearm_each_frame = True
+    rearmed, mr = s.play([frozenset({RIGHT})] * m)
+    s.rewind(m)
+    s.clock.rearm_each_frame = s.args.rearm
+    s.save(held[-1], rearmed[-1], "held_vs_rearmed")
+    same = not s.different(held[-1], rearmed[-1])
+    lines.append(f"- Holding RIGHT for {m} frames, held vs re-pressed differ by {s.differ(held[-1], rearmed[-1]):.4%} "
+                 f"(missed steps {mh + mr}): " + ("held keys carry over" if same else "they differ: see held_vs_rearmed.png"))
+    return best_ok, lines
 
 
 def t3(s: Session) -> tuple[bool, list[str]]:
-    s.clock.start()
-    time.sleep(0.5)
-    lines = s.calibrate()
+    lines = s.ensure_paused() + s.calibrate()
     rng = random.Random(0)
     n, reps = s.args.frames, 5
     keys = sorted(FIGHT_KEYS)
-    worst, worst_pair, mismatches = 0.0, None, 0
+    worst, worst_pair, mismatches, missed = 0.0, None, 0, 0
     for _ in range(reps):
         plan = [frozenset(rng.sample(keys, rng.randint(0, 2))) for _ in range(n)]
-        first = s.play(plan)
-        s.clock.rewind(n)
-        second = s.play(plan)
-        s.clock.rewind(n)
+        first, m1 = s.play(plan)
+        missed += m1 + s.rewind(n)
+        second, m2 = s.play(plan)
+        missed += m2 + s.rewind(n)
         for a, b in zip(first, second):
             d = s.differ(a, b)
             mismatches += int(s.different(a, b))
             if d > worst:
                 worst, worst_pair = d, (a, b)
     if worst_pair is not None:
-        s.save_diff("worst_replay_pair", *worst_pair)
-    ok = mismatches == 0
+        s.save(*worst_pair, "worst_replay_pair")
+    ok = mismatches == 0 and missed == 0
     lines.append(f"- {reps} replays of {n} random frames: {mismatches}/{reps * n} frames differ beyond the noise "
-                 f"floor; worst {worst:.4%} {'PASS' if ok else 'FAIL'} (see worst_replay_pair.png)")
+                 f"floor (worst {worst:.4%}); missed steps or rewinds: {missed} {'PASS' if ok else 'FAIL'}")
     return ok, lines
 
 
 def t4(s: Session) -> tuple[bool, list[str]]:
-    s.clock.start()
+    lines = s.ensure_paused()
     n = s.args.frames
     t0 = time.perf_counter()
-    s.play([frozenset({RIGHT}) if i % 20 < 10 else NO_KEYS for i in range(n)])
+    for i in range(n):  # what the environment will do: step, then grab one frame
+        s.clock.advance([frozenset({RIGHT}) if i % 20 < 10 else NO_KEYS])
+        s.screen.grab(fresh=False)
     step_s = (time.perf_counter() - t0) / n
     t0 = time.perf_counter()
     s.clock.rewind(n)
     rewind_s = (time.perf_counter() - t0) / n
-    return True, [f"- Step + capture: {step_s * 1000:.1f} ms per frame ({1 / step_s:.1f} frames/s; "
-                  f"{1 / (3 * step_s):.1f} decisions/s at k = 3, i.e. {20 * 3 * step_s:.2f} s of wall time per game second)",
-                  f"- Rewind: {rewind_s * 1000:.1f} ms per frame",
-                  f"- Settings: tap {s.args.tap_ms} ms, settle {s.args.settle_ms} ms"]
+    return True, lines + [
+        f"- Step + capture: {step_s * 1000:.1f} ms per frame ({1 / step_s:.1f} frames/s; "
+        f"{1 / (3 * step_s):.1f} decisions/s at k = 3)",
+        f"- Rewind: {rewind_s * 1000:.1f} ms per frame",
+        f"- Settings: tap {s.args.tap_ms} ms, settle {s.args.settle_ms} ms"]
 
 
-def t5(s: Session) -> tuple[bool, list[str]]:
-    import cv2
-
-    reps = 10
-    for i in range(reps):
-        for direction, steps in (("up", 1), ("down", -1)):
-            change_difficulty(s.clock, steps, settle_s=0.0)
-            for delay in (0.5, 1.5):
-                time.sleep(delay if delay == 0.5 else 1.0)
-                cv2.imwrite(str(s.out / f"{i:02d}_{direction}_{delay:.1f}s.png"), s.screen.grab(fresh=False).image)
-    return True, [f"- {2 * reps} switches done; screenshots at 0.5 s and 1.5 s after each in `{s.out}`.",
-                  "- Check that each shows the expected level and that the menu has closed by 1.5 s."]
-
-
-GATES = {"t1": t1, "t2": t2, "t3": t3, "t4": t4, "t5": t5}
+GATES = {"t1": t1, "t2": t2, "t3": t3, "t4": t4}
 
 
 def main(argv=None) -> int:
@@ -243,9 +267,10 @@ def main(argv=None) -> int:
     p.add_argument("--rearm", action="store_true", help="re-press keys together with every F6")
     p.add_argument("--tap-ms", type=float, default=20.0)
     p.add_argument("--settle-ms", type=float, default=34.0, help="wait after a step before capturing")
+    p.add_argument("--sweep-tap", default="10,20,35,50", help="t2: key hold times to compare (ms)")
     p.add_argument("--countdown", type=int, default=5)
     args = p.parse_args(argv)
-    args.frames = args.frames or {"t2": 1000, "t3": 120, "t4": 300}.get(args.gate, 0)
+    args.frames = args.frames or {"t2": 300, "t3": 120, "t4": 300}.get(args.gate, 0)
     print(capture.status())
     for i in range(args.countdown, 0, -1):
         print(f"click into the game window... {i}", flush=True)
@@ -260,7 +285,7 @@ def main(argv=None) -> int:
     header = [f"# Gate {args.gate.upper()}: {'PASS' if ok else 'FAIL'}", "",
               f"Run {datetime.now():%Y-%m-%d %H:%M}; rearm={args.rearm}, tap={args.tap_ms} ms, "
               f"settle={args.settle_ms} ms, frames={args.frames}. Evidence: `{s.out}`.",
-              "The game was left paused (press F7 to resume).", ""]
+              "The game is left paused.", ""]
     report.write_text("\n".join(header + lines) + "\n", encoding="utf-8")
     print("\n".join(header + lines))
     print(f"written: {report}")

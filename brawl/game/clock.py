@@ -106,12 +106,14 @@ class SteppedClock:
         before = self.counter.read()
         held = self.keys.held
         for attempt in range(self.max_retries + 1):
-            if attempt >= 2 and held:
-                # Repeated drops with keys held: release them, then press them again before the step.
-                self.keys.release_all()
+            if attempt >= 2:
+                # Repeated drops: the game may have missed a key release and think a key is still
+                # down, which blocks stepping. Release every fight key, then restore the intended ones.
+                self.keys.force_release()
                 self.sleep(self.key_gap_s)
-                self.keys.hold(held)
-                self.sleep(self.key_gap_s)
+                if held:
+                    self.keys.hold(held)
+                    self.sleep(self.key_gap_s)
             self.keys.tap(key)
             if self.counter.wait_change(before):
                 return attempt
@@ -127,7 +129,9 @@ class SteppedClock:
             raise ValueError(f"cannot rewind {frames} frames from frame {self.frame}")
         timing = Timing(frames=-frames)
         t0 = self.now()
-        self.keys.release_all()
+        if self.keys.held:
+            self.keys.release_all()
+            self.sleep(self.key_gap_s)  # a release right before F5 is dropped like a press before F6
         for _ in range(frames):
             timing.retries += self._press(REWIND)
             self.frame -= 1

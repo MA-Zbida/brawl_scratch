@@ -135,6 +135,16 @@ def test_confirmed_steps_retry_dropped_presses_and_stay_exact():
     assert (clock.frame, game.frame, game.x) == (0, 0, 0)
 
 
+def test_a_dropped_key_release_that_blocks_rewind_is_recovered():
+    # The game misses the release of RIGHT and, believing it still held, refuses to rewind.
+    game = FakeGame(drop_release_of={RIGHT}, rewind_blocked_while_held=True)
+    clock = counted(game)
+    clock.advance([frozenset({RIGHT})] * 3)
+    timing = clock.rewind(3)
+    assert (clock.frame, game.frame, game.x) == (0, 0, 0)
+    assert timing.retries == 2 and RIGHT not in game.held
+
+
 def test_a_game_that_never_responds_raises():
     game = FakeGame(drop_presses=set(range(100)))
     clock = counted(game, max_retries=2)

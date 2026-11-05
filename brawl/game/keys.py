@@ -89,3 +89,10 @@ class Keys:
 
     def release_all(self) -> None:
         self.hold(())
+
+    def force_release(self, keys: Iterable[str] = FIGHT_KEYS) -> None:
+        """Send a release for every key, held or not. The game can drop a release like it drops a
+        press, and then believes a key is still down (which blocks frame stepping)."""
+        for key in sorted(keys):
+            self.backend.key_up(key)
+        self.held = frozenset()

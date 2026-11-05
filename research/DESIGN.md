@@ -82,51 +82,80 @@ step(action)
 Episodes are only windows. `terminated` is always false; `truncated` marks a window end or a
 rewind, so value targets keep bootstrapping.
 
-## 5. Observation
+## 5. Observation: hybrid (structured state + fighter vision)
 
-Designed from game mechanics. Each feature names its sensor, and each must pass a probe or an
-ablation (Gate S1) to stay.
+The policy sees two things each decision: a **structured vector** of quantities we can measure
+reliably, and **stacked images around each fighter** for what only pixels show. Both are fused
+inside one network.
 
-**Per fighter (agent and opponent), from perception:**
+### 5.1 What the literature says, and what follows for us
 
-| Feature | Sensor |
+| Finding | Source | Consequence here |
+|---|---|---|
+| The strongest fighting-game agents use true game state, not pixels: Melee (positions, velocities and the **action state**, i.e. which animation is playing, read from memory), Blade & Soul (game-state features), FightingICE (about 165 simulator features) | Firoiu et al. 2017; Oh et al. 2019/2022; Kim et al. 2020 | We cannot read memory. The structured vector covers what we can measure; the one field we cannot measure, the **action state**, is what the image branch must recover |
+| Pixels alone learn much more slowly than state, though they can match it eventually | Yarats et al. (SAC+AE); Google Research Football (Kurach et al. 2019) | Never pixels alone at our budget: images complement the vector, they do not replace it |
+| Large game agents fuse a vector branch with an image-like branch: scalar + entity + spatial encoders concatenated (AlphaStar); vector features + image-like features (Honor of Kings); visual input plus game features speeds up learning (Doom) | Vinyals et al. 2019; Ye et al. 2020; Lample & Chaplot 2017 | Late fusion by concatenation is the standard, proven design. We use it |
+| Adding images to proprioceptive state improves sample efficiency in robot learning | Multimodal information bottleneck (2024); others | Hybrid is the right default; whether it helps *here* is measured (5.4) |
+| A small CNN trained from scratch with random-shift augmentation matches frozen pretrained encoders (R3M, MVP, PVR) | Hansen et al. 2023 (DrQ-v2 baseline) | No pretrained ResNet: a small CNN with augmentation, which also fits the time budget |
+| Predicting the future in representation space is what makes pixel RL data-efficient (Atari 100k); BBF builds on it | Schwarzer et al. 2021 (SPR); 2023 (BBF) | The image branch gets an auxiliary prediction loss, not reward alone (5.3) |
+| Reaction delay hurts sharply; a predictive model of the opponent offsets it | Firoiu et al. 2018 ("At Human Speed") | The image branch's auxiliary target is the opponent's next option |
+| A critic may see privileged state the actor does not | Pinto et al. 2018 (asymmetric actor-critic) | Available if overlays must be removed from the actor later; not used by default |
+
+The structured-plus-vision design you proposed is the standard one for game agents. What has to
+be adapted is the image branch: Brawlhalla's fighters are small (roughly 60-90 pixels tall at 1080p in your screenshots), so
+the usual full-screen 84 x 84 Atari frame would shrink a fighter to about 4 pixels and lose the
+animation. We look at the fighters instead.
+
+### 5.2 Structured vector (measured quantities only)
+
+Every entry must pass its accuracy gate (P1, R1). "True" means measured and validated, not assumed.
+
+| Feature, per fighter (agent and opponent) | Sensor |
 |---|---|
-| Position (hurtbox centre), velocity over the last `k` frames | Hurtbox overlay or detector |
-| Facing direction | Detector or sprite crop |
-| Grounded, airborne, offstage; signed distance to each ledge and blast zone | Position + fixed stage geometry (one map) |
+| Position (hurtbox centre) and velocity over the decision period | Hurtbox overlay or detector |
+| Facing direction | Detector |
+| Grounded, airborne, offstage; signed distance to each ledge and blast zone | Position + fixed stage geometry |
 | Damage (0-1), stocks | HUD ring colour and digit |
 | Weapon held: none, or which of the legend's two weapons | Detector classes |
 | In hitstun | Stun flash overlay |
 | Active hitbox: present, position relative to the other fighter | Hitbox overlay |
 
-**World:** nearest ground weapon (relative position, present or not).
+Plus: nearest ground weapon (relative position, present or not); the last `H = 4` actions (jumps
+left and dodge cooldown are not observable, so the action history stands in for them).
+Positions are relative to the stage centre; mirroring is an ablation, off by default.
 
-**Fighter crops (the policy's own vision).** Boxes and positions cannot show what a fighter is
-*starting* to do: the first frames of an attack, a jump squat, a dodge. Hitbox overlays appear
-only once an attack is already active, which is too late to react to. So the policy also sees two
-small crops per decision: a window around each fighter (default 64 x 64, grey, the current and
-previous decision frame), encoded by a small CNN that is part of the policy.
+### 5.3 Fighter vision (the missing action state)
 
-That encoder gets a training signal beyond reward. Every recorded frame is labelled by its own
-future, at no cost: within the next `f` frames, did the opponent attack (a hitbox appeared), jump
-(vertical velocity reversed), dodge, or hit the agent (a damage event)? An auxiliary head learns
-to predict these from the crops. Rewind makes this a controlled measurement: from one paused
-frame, we can see what the bot does next under different agent actions.
+- **Crops:** a window of about 160 x 160 screen pixels centred on each fighter (from the
+  structured position), downscaled to 64 x 64 grey; the exact size is fixed from the labelled frames; one context view of the whole screen at 96 x 54 for items and
+  weapons on the ground.
+- **Stack:** the last 4 decisions (at `k = 3`, 12 game frames, 0.2 s), the window over which
+  move startups and jump squats show.
+- **Encoder:** a small CNN shared by both fighter crops (Nature-DQN size), trained from scratch with
+  random-shift augmentation.
+- **Auxiliary loss:** each recorded frame is labelled by its own future, for free: within the next
+  `f` frames, did the opponent attack (a hitbox appeared), jump, dodge, or hit the agent (a damage
+  event)? A prediction head trained on these labels gives the encoder a dense signal; an SPR-style
+  latent prediction loss is the alternative if explicit labels prove too coarse.
+- **Fusion:** CNN embeddings concatenated with an MLP embedding of the structured vector, then a
+  shared MLP to policy and value heads.
 
-What does not need vision: jumps and airborne state follow from exact velocities (frames are
-stepped, so velocities are exact); hitstun comes from the stun overlay; landed hits come from the
-HUD. Gate S2 decides whether the crops earn their place: the probe "agent is hit within `f`
-frames" must be predicted measurably better with crops than with positions and overlays alone.
+### 5.4 Benchmark it offline, not with RL runs
 
-**Memory:** the last `H` observations and actions (default `H = 4`), stacked. Jumps left and dodge
-cooldown are not observable; instead of the old estimates, the action history lets the policy
-infer them. A recurrent policy is a later ablation.
+Choosing the representation does not need weeks of live play. All candidates are compared on
+**recorded data** (your demonstrations plus agent play) by supervised probes, in hours of compute:
 
-**Frame of reference:** positions relative to the stage centre; mirroring (flip so the agent
-faces right) is an ablation, off by default.
+1. **Information:** predict the future-labelled events (agent hit within `f` frames; opponent
+   attack, jump, dodge) and your next action (behaviour cloning accuracy).
+2. **Candidates:** structured only; structured + crops; structured + crops + context view;
+   crops only. Stack depth 1, 2 or 4.
+3. **Cost:** inference time per decision, which must fit the deployment budget (D1).
 
-**Raw pixels:** the captured frame is recorded every step (downscaled), so a pixel or crop encoder
-can be tried later without new data.
+The cheapest candidate within noise of the best is chosen (Gate S2). Only that one goes to RL,
+plus one RL ablation (structured only vs hybrid) in Stage 2 to confirm the probe's choice.
+
+**Raw frames** are recorded every step (downscaled), so all of this can be redone later without
+new data.
 
 ## 6. Action
 
@@ -204,7 +233,7 @@ learner is written only if Stage 2 shows SB3's options are not enough.
 | R1 | Reward | Damage and KO events agree with the damage overlay and hand counts |
 | A1 | Actions | Every move in the target list is reproducible |
 | S1 | Observation | Each feature is justified by a probe or an ablation |
-| S2 | Fighter crops | Crops predict "agent is hit within `f` frames" measurably better than positions and overlays alone |
+| S2 | Representation | Offline probes (section 5.4) pick the cheapest candidate within noise of the best, within the time budget |
 | L1 | Loop | Each part runs once per step (counted); per-step timing logged |
 | D1 | Deployment | Perception + inference fit within `k / 60` s at the deployment `k` |
 | N1 | Noise floor | Variance of virtual-match outcomes for a fixed policy, giving matches per evaluation and seeds per arm |

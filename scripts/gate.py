@@ -38,7 +38,7 @@ from datetime import datetime  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-from brawl.game.clock import SteppedClock  # noqa: E402
+from brawl.game.clock import StepError, SteppedClock  # noqa: E402
 from brawl.game.counter import FrameCounter, counter_changed  # noqa: E402
 from brawl.game.keys import FIGHT_KEYS, PAUSE, RIGHT, DirectInput, Keys  # noqa: E402
 from brawl.paths import RESULTS, RUNS  # noqa: E402
@@ -218,6 +218,7 @@ def t1(s: Session) -> tuple[bool, list[str]]:
     again, m2 = s.play([NO_KEYS] * n)
     r2 = s.rewind(n)
     noise = s.differ(baseline[-1], again[-1])
+    s.save(baseline[-1], again[-1], "replay_noise")
     lines.append(f"- Replaying the same {n} frames twice differs by {noise:.4%}; missed steps {m1 + m2}, "
                  f"missed rewinds {r1 + r2}")
     lines += ["", f"| Key | Static pixels changed after {n} frames vs no key | Missed steps | Reached the game |",
@@ -345,6 +346,15 @@ def main(argv=None) -> int:
     s = Session(args)
     try:
         ok, lines = GATES[args.gate](s)
+    except StepError as exc:
+        import cv2
+
+        image = s.image()
+        cv2.imwrite(str(s.out / "step_error_screen.png"), image)
+        cv2.imwrite(str(s.out / "step_error_counter.png"), np.asarray(image)[30:72, 680:780])
+        ok, lines = False, [f"- **Stopped: {exc}**",
+                            f"- The screen at that moment: `{s.out / 'step_error_screen.png'}` "
+                            f"(counter crop: `step_error_counter.png`)"]
     finally:
         s.keys.release_all()
     GATES_DIR.mkdir(parents=True, exist_ok=True)

@@ -57,7 +57,7 @@ class SteppedClock:
     keys: Keys
     counter: Optional[Any] = None
     key_gap_s: float = 0.0
-    max_retries: int = 3
+    max_retries: int = 5
     rearm_each_frame: bool = False
     settle_s: float = 0.0
     now: Callable[[], float] = time.perf_counter
@@ -104,11 +104,19 @@ class SteppedClock:
             self.keys.tap(key)
             return 0
         before = self.counter.read()
+        held = self.keys.held
         for attempt in range(self.max_retries + 1):
+            if attempt >= 2 and held:
+                # Repeated drops with keys held: release them, then press them again before the step.
+                self.keys.release_all()
+                self.sleep(self.key_gap_s)
+                self.keys.hold(held)
+                self.sleep(self.key_gap_s)
             self.keys.tap(key)
             if self.counter.wait_change(before):
                 return attempt
-        raise StepError(f"the game ignored {key} {self.max_retries + 1} times (frame {self.frame})")
+        raise StepError(f"the game ignored {key} {self.max_retries + 1} times "
+                        f"(frame {self.frame}, keys held: {sorted(held) or 'none'})")
 
     def rewind(self, frames: int) -> Timing:
         """Step back ``frames`` frames. The game is deterministic, so replaying the same keys from

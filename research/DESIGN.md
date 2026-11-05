@@ -111,7 +111,7 @@ inside one network.
 | A small CNN trained from scratch with random-shift augmentation matches frozen pretrained encoders (R3M, MVP, PVR) | Hansen et al. 2023 (DrQ-v2 baseline) | No pretrained ResNet: a small CNN with augmentation, which also fits the time budget |
 | Predicting the future in representation space is what makes pixel RL data-efficient (Atari 100k); BBF builds on it | Schwarzer et al. 2021 (SPR); 2023 (BBF) | The image branch gets an auxiliary prediction loss, not reward alone (5.3) |
 | Reaction delay hurts sharply; a predictive model of the opponent offsets it | Firoiu et al. 2018 ("At Human Speed") | The image branch's auxiliary target is the opponent's next option |
-| A critic may see privileged state the actor does not | Pinto et al. 2018 (asymmetric actor-critic) | Available if overlays must be removed from the actor later; not used by default |
+| A critic may see privileged state the actor does not | Pinto et al. 2018 (asymmetric actor-critic) | Available if overlays are tried later (critic only); not used by default |
 
 The structured-plus-vision design you proposed is the standard one for game agents. What has to
 be adapted is the image branch: Brawlhalla's fighters are small (roughly 60-90 pixels tall at 1080p in your screenshots), so
@@ -124,13 +124,11 @@ Every entry must pass its accuracy gate (P1, R1). "True" means measured and vali
 
 | Feature, per fighter (agent and opponent) | Sensor |
 |---|---|
-| Position (hurtbox centre) and velocity over the decision period | Hurtbox overlay or detector |
+| Position (body box centre) and velocity over the decision period | Detector |
 | Facing direction | Detector |
 | Grounded, airborne, offstage; signed distance to each ledge and blast zone | Position + fixed stage geometry |
 | Damage (0-1), stocks | HUD ring colour and digit |
 | Weapon held: none, or which of the legend's two weapons | Detector classes |
-| In hitstun | Stun flash overlay |
-| Active hitbox: present, position relative to the other fighter | Hitbox overlay |
 
 Plus: nearest ground weapon (relative position, present or not); the last `H = 4` actions (jumps
 left and dodge cooldown are not observable, so the action history stands in for them).
@@ -248,7 +246,7 @@ the observation and data design.
 | T4 | Throughput | Steps per second in `stepped` mode, and cost of a rewind per frame |
 | T5 | Operator | The difficulty macro switches level 50 of 50 times, confirmed on screen |
 | P1 | Perception | Position error, identity and weapon accuracy on the labelled frames, for each candidate |
-| P2 | Overlays | Hitbox, hurtbox and stun detection accuracy on the labelled frames; and whether overlays hurt detection |
+| P2 | Overlays (optional) | Only if overlays are tried: hitbox, hurtbox and stun detection accuracy, and whether overlays hurt fighter detection |
 | R1 | Reward | Damage and KO events agree with the damage overlay and hand counts |
 | A1 | Actions | Every move in the target list is reproducible |
 | S1 | Observation | Each feature is justified by a probe or an ablation |
@@ -326,7 +324,10 @@ Each step ends with its gates passing:
 1. `k = 3` (20 decisions per game second) as the default decision period.
 2. `MultiDiscrete([9, 6])` actions, button pressed for 1 frame.
 3. Reward `(dealt - taken) / 100 + 1.0 * (KO scored - KO lost)`, gamma 0.995.
-4. Overlays on during play: hurtboxes, hitboxes, stun; damage numbers only for validating the HUD
+4. **No overlays during play** (revised 2026-11-05): the existing labelled data and detector have none, the
+   fighter crops are meant to recover the action state from the animation, and "what any player sees" is the
+   cleaner claim. Hitbox, hurtbox and stun overlays become an optional experiment if the offline benchmark
+   (S2) shows the vision missing attacks. Damage numbers only for validating the HUD
    reader (they clutter the screen).
 5. `realtime` is the target setting and the headline; `stepped` with rewind is the oracle and an
    alternative training route.

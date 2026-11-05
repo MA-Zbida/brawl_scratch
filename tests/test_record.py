@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -125,23 +126,6 @@ def test_the_recorder_keeps_its_schedule_and_records_keys(tmp_path):
     assert len(rec.stills()) == stats["stills"] == 3          # at 0, 0.5 and 1.0 s
 
 
-# -- the label store ------------------------------------------------------------------------------
-def test_labels_are_complete_only_when_both_fighters_are_resolved(tmp_path):
-    label = script("label")
-    labels = label.Labels(tmp_path)
-    labels.set_box("a.png", "wu_shang", (50, 80, 10, 20))
-    assert labels.data["a.png"]["wu_shang"]["box"] == [10, 20, 50, 80]
-    assert not labels.complete("a.png")
-    labels.cycle("a.png", "wu_shang", "facing")
-    labels.cycle("a.png", "wu_shang", "weapon")
-    labels.toggle_absent("a.png", "mordex")
-    assert labels.complete("a.png")
-    assert labels.data["a.png"]["wu_shang"] == {"box": [10, 20, 50, 80], "facing": "right", "weapon": "spear"}
-    labels.save()
-    assert json.loads((tmp_path / "labels.json").read_text())["a.png"]["mordex"] == {"absent": True}
-    assert label.Labels(tmp_path).complete("a.png")
-
-
 def test_a_still_that_cannot_be_written_is_retried_then_counted(tmp_path, monkeypatch):
     import cv2
 
@@ -156,11 +140,16 @@ def test_a_still_that_cannot_be_written_is_retried_then_counted(tmp_path, monkey
     assert (meta["stills"], meta["still_failures"]) == (1, 1)
 
 
-def test_a_frame_that_is_not_gameplay_is_complete_and_has_no_fighters(tmp_path):
-    label = script("label")
-    labels = label.Labels(tmp_path)
-    labels.set_box("menu.png", "wu_shang", (0, 0, 10, 10))
-    labels.toggle_unusable("menu.png")
-    assert labels.complete("menu.png") and labels.data["menu.png"] == {"unusable": True}
-    labels.toggle_unusable("menu.png")
-    assert not labels.complete("menu.png")
+
+# -- drafts for Roboflow ---------------------------------------------------------------------
+def test_the_character_under_the_indicator_is_wu_shang():
+    prelabel = script("prelabel")
+    mordex, wu = [1185, 545, 1250, 615, 0.3], [1289, 586, 1346, 658, 0.7]
+    named = prelabel.assign([mordex, wu], [[1310, 567, 1333, 591, 0.9]])
+    assert dict((c, b[0]) for c, b in named) == {"mordex": 1185, "wu_shang": 1289}
+    assert prelabel.assign([mordex], []) == [("mordex", mordex)]  # no triangle: never guessed as the agent
+    duplicate = [1190, 550, 1240, 600, 0.12]
+    assert len(prelabel.assign([mordex, duplicate, wu], [[1310, 567, 1333, 591, 0.9]])) == 2
+    line = prelabel.yolo_line("wu_shang", [0, 0, 192, 108], 1920, 1080)
+    assert line == "0 0.050000 0.050000 0.100000 0.100000"
+    assert [p.name for p in prelabel.pick([Path(f"{i}.png") for i in range(10)], 3)] == ["0.png", "4.png", "9.png"]

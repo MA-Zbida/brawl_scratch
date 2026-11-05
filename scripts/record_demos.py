@@ -6,6 +6,11 @@ Press **F10** to stop (or wait for --minutes).
 
     python scripts/record_demos.py --difficulty easy --minutes 10
 
+Overlays are part of the frames, so every session uses the same ones: by default hitboxes,
+hurtboxes and stun on, damage numbers, combo counter, force and Power Viewer off. Name any other
+setting with --overlays (e.g. ``--overlays hitbox,hurtbox,stun,damage`` for the HUD check, or
+``--overlays none`` for the ablation); it is kept in meta.json.
+
 Every 1/60 s it records the screen (half resolution, JPEG), the fight keys you hold, and the fight
 keys you pressed since the previous frame (a jump or an attack starts on the press). Every 2 s it
 also keeps a full-resolution lossless still, for labelling (scripts/label.py). The keyboard is
@@ -106,6 +111,9 @@ def main(argv=None) -> int:
     p.add_argument("--minutes", type=float, default=10.0)
     p.add_argument("--rate", type=float, default=60.0, help="rows per second")
     p.add_argument("--still-every", type=float, default=2.0, help="seconds between full-resolution stills")
+    p.add_argument("--overlays", default="hitbox,hurtbox,stun",
+                   help="training-mode overlays shown while recording, comma separated (none for no overlays); "
+                        "keep the same in every session: they are part of the frames")
     p.add_argument("--note", default="", help="free text kept in meta.json")
     p.add_argument("--countdown", type=int, default=5)
     args = p.parse_args(argv)
@@ -114,7 +122,8 @@ def main(argv=None) -> int:
     out = DATA / "demos" / datetime.now().strftime("%Y%m%d_%H%M%S")
     meta = {"source": "human", "regime": "realtime", "started": datetime.now().isoformat(timespec="seconds"),
             "setting": {"map": "Brawlhaven (small)", "agent": "Wu Shang", "opponent": "Mordex",
-                        "difficulty": args.difficulty, "mode": "training"},
+                        "difficulty": args.difficulty, "mode": "training",
+                        "overlays": sorted(o for o in args.overlays.split(",") if o and o != "none")},
             "rate_hz": args.rate, "still_every_s": args.still_every, "key_order": list(KEY_ORDER),
             "columns_doc": {"t": "seconds since the first row", "keys": "fight keys held (bitmask over key_order)",
                             "pressed": "fight keys pressed since the previous row (bitmask)",

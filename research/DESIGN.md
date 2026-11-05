@@ -101,6 +101,23 @@ ablation (Gate S1) to stay.
 
 **World:** nearest ground weapon (relative position, present or not).
 
+**Fighter crops (the policy's own vision).** Boxes and positions cannot show what a fighter is
+*starting* to do: the first frames of an attack, a jump squat, a dodge. Hitbox overlays appear
+only once an attack is already active, which is too late to react to. So the policy also sees two
+small crops per decision: a window around each fighter (default 64 x 64, grey, the current and
+previous decision frame), encoded by a small CNN that is part of the policy.
+
+That encoder gets a training signal beyond reward. Every recorded frame is labelled by its own
+future, at no cost: within the next `f` frames, did the opponent attack (a hitbox appeared), jump
+(vertical velocity reversed), dodge, or hit the agent (a damage event)? An auxiliary head learns
+to predict these from the crops. Rewind makes this a controlled measurement: from one paused
+frame, we can see what the bot does next under different agent actions.
+
+What does not need vision: jumps and airborne state follow from exact velocities (frames are
+stepped, so velocities are exact); hitstun comes from the stun overlay; landed hits come from the
+HUD. Gate S2 decides whether the crops earn their place: the probe "agent is hit within `f`
+frames" must be predicted measurably better with crops than with positions and overlays alone.
+
 **Memory:** the last `H` observations and actions (default `H = 4`), stacked. Jumps left and dodge
 cooldown are not observable; instead of the old estimates, the action history lets the policy
 infer them. A recurrent policy is a later ablation.
@@ -187,6 +204,7 @@ learner is written only if Stage 2 shows SB3's options are not enough.
 | R1 | Reward | Damage and KO events agree with the damage overlay and hand counts |
 | A1 | Actions | Every move in the target list is reproducible |
 | S1 | Observation | Each feature is justified by a probe or an ablation |
+| S2 | Fighter crops | Crops predict "agent is hit within `f` frames" measurably better than positions and overlays alone |
 | L1 | Loop | Each part runs once per step (counted); per-step timing logged |
 | D1 | Deployment | Perception + inference fit within `k / 60` s at the deployment `k` |
 | N1 | Noise floor | Variance of virtual-match outcomes for a fixed policy, giving matches per evaluation and seeds per arm |

@@ -48,7 +48,9 @@ class SteppedClock:
 
     keys: Keys
     rearm_each_frame: bool = False
+    settle_s: float = 0.0  # wait after the last step of a plan so the game has drawn that frame
     now: Callable[[], float] = time.perf_counter
+    sleep: Callable[[float], None] = time.sleep
     frame: int = 0
     paused: bool = field(default=False, init=False)
 
@@ -76,6 +78,7 @@ class SteppedClock:
             self.keys.hold(frame_keys)
             self.keys.tap(STEP)
             self.frame += 1
+        self.sleep(self.settle_s)
         return Timing(frames=len(plan), wall_s=self.now() - t0)
 
     def rewind(self, frames: int) -> Timing:
@@ -90,6 +93,7 @@ class SteppedClock:
         for _ in range(frames):
             self.keys.tap(REWIND)
         self.frame -= frames
+        self.sleep(self.settle_s)
         return Timing(frames=-frames, wall_s=self.now() - t0)
 
 

@@ -75,6 +75,7 @@ class Session:
                                   settle_s=0.0 if args.confirm else args.settle_ms / 1000)
         self.retries = 0
         self.repairs = 0
+        self.events: list[tuple[int, int]] = []  # (retries, repairs) of every step, in order
         self.mask: np.ndarray | None = None
         self.floor = 0.0
 
@@ -114,6 +115,7 @@ class Session:
         timing = self.clock.advance([frame_keys])
         self.retries += timing.retries
         self.repairs += timing.repairs
+        self.events.append((timing.retries, timing.repairs))
         moved = True if self.args.confirm else self.frame_counter.wait_change(before)
         return self.image(), moved
 
@@ -368,46 +370,74 @@ def t2(s: Session) -> tuple[bool, list[str]]:
 
 
 def t3(s: Session) -> tuple[bool, list[str]]:
+    """Replay determinism: play random keys, rewind, play them again, compare frame by frame.
+
+    Cosmetic animations (the floating phantoms, weapon spawns) replay differently (T1), so single
+    frames can differ; a fighter that diverges makes every later frame differ. The gate therefore
+    fails on a *run* of differing frames, records where each replay first differs and whether a
+    retried or repaired press came just before, and saves that frame pair for a human to judge.
+    """
     lines = s.ensure_paused() + s.calibrate()
     rng = random.Random(0)
-    n, reps = s.args.frames, 5
+    n, reps, run_limit = s.args.frames, 5, 10
     keys = sorted(FIGHT_KEYS)
-    worst, worst_pair, mismatches, missed = 0.0, None, 0, 0
-    for _ in range(reps):
+    csv = ["rep,frame,keys,diff,retries_1,repairs_1,retries_2,repairs_2"]
+    lines += ["", "| Replay | Frames differing | Longest run | First differs at | Retry/repair in the 3 frames before it (pass 1 / pass 2) |",
+              "|---|---|---|---|---|"]
+    ok = True
+    for rep in range(reps):
         plan = [frozenset(rng.sample(keys, rng.randint(0, 2))) for _ in range(n)]
+        s.events = []
         first, m1 = s.play(plan)
-        missed += m1 + s.rewind(n)
+        e1 = s.events
+        m1 += s.rewind(n)
+        s.events = []
         second, m2 = s.play(plan)
-        missed += m2 + s.rewind(n)
-        for a, b in zip(first, second):
-            d = s.differ(a, b)
-            mismatches += int(s.different(a, b))
-            if d > worst:
-                worst, worst_pair = d, (a, b)
-    if worst_pair is not None:
-        s.save(*worst_pair, "worst_replay_pair")
-    ok = mismatches == 0 and missed == 0
-    lines.append(f"- {reps} replays of {n} random frames: {mismatches}/{reps * n} frames differ beyond the noise "
-                 f"floor (worst {worst:.4%}); missed steps or rewinds: {missed} {'PASS' if ok else 'FAIL'}")
-    lines.append(f"- Presses retried: {s.retries}; presses that undid a double landing: {s.repairs}")
+        e2 = s.events
+        m2 += s.rewind(n)
+        diffs = [s.differ(a, b) for a, b in zip(first, second)]
+        bad = [s.different(a, b) for a, b in zip(first, second)]
+        longest = run = 0
+        for flag in bad:
+            run = run + 1 if flag else 0
+            longest = max(longest, run)
+        start = bad.index(True) if any(bad) else None
+        near = "-"
+        if start is not None:
+            window = range(max(0, start - 3), start + 1)
+            near = (f"{sum(sum(e1[i]) for i in window)} / {sum(sum(e2[i]) for i in window)}")
+            s.save(first[start], second[start], f"replay{rep}_first_difference_frame{start}")
+        for i, d in enumerate(diffs):
+            csv.append(f"{rep},{i},{'+'.join(sorted(plan[i]))},{d:.6f},{e1[i][0]},{e1[i][1]},{e2[i][0]},{e2[i][1]}")
+        ok &= longest < run_limit and m1 + m2 == 0
+        lines.append(f"| {rep} | {sum(bad)}/{n} | {longest} | {start if start is not None else '-'} | {near} |")
+    (s.out / "frames.csv").write_text("\n".join(csv) + "\n", encoding="utf-8")
+    lines += ["", f"- Pass: no run of {run_limit} or more differing frames in any replay, and no missed press: "
+              f"{'PASS' if ok else 'FAIL'}",
+              f"- Presses retried: {s.retries}; presses that undid a double landing: {s.repairs}",
+              f"- Per frame: `{s.out / 'frames.csv'}`; first differing pairs: `replay*_first_difference_*.png`"]
     return ok, lines
 
 
 def t4(s: Session) -> tuple[bool, list[str]]:
     lines = s.ensure_paused()
     n = s.args.frames
+    retries = repairs = 0
     t0 = time.perf_counter()
     for i in range(n):  # what the environment will do: step, then grab one frame
-        s.clock.advance([frozenset({RIGHT}) if i % 20 < 10 else NO_KEYS])
+        timing = s.clock.advance([frozenset({RIGHT}) if i % 20 < 10 else NO_KEYS])
+        retries, repairs = retries + timing.retries, repairs + timing.repairs
         s.screen.grab(fresh=False)
     step_s = (time.perf_counter() - t0) / n
     t0 = time.perf_counter()
-    s.clock.rewind(n)
+    timing = s.clock.rewind(n)
     rewind_s = (time.perf_counter() - t0) / n
+    retries, repairs = retries + timing.retries, repairs + timing.repairs
     return True, lines + [
         f"- Step + capture: {step_s * 1000:.1f} ms per frame ({1 / step_s:.1f} frames/s; "
         f"{1 / (3 * step_s):.1f} decisions/s at k = 3)",
         f"- Rewind: {rewind_s * 1000:.1f} ms per frame",
+        f"- Presses retried: {retries}; presses that undid a double landing: {repairs}",
         f"- Settings: tap {s.args.tap_ms} ms, settle {s.args.settle_ms} ms"]
 
 

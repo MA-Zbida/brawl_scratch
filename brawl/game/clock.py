@@ -146,14 +146,8 @@ class SteppedClock:
             return 0
         goal, held = self.frame + step, self.keys.held
         for attempt in range(self.max_retries + 1):
-            if attempt >= 2:
-                # Repeated drops: the game may have missed a key release and think a key is still
-                # down. Release every fight key, then restore the intended ones.
-                self.keys.force_release()
-                self.sleep(self.key_gap_s)
-                if held:
-                    self.keys.hold(held)
-                    self.sleep(self.key_gap_s)
+            # Only the step key is pressed again: releasing and re-pressing a fight key would be a
+            # new press (a second jump, a new attack) that the frame did not have.
             # Each retry holds the key longer and waits longer: the game can be slow to respond,
             # and pressing again too early is what makes a press land twice.
             self.keys.tap(key, hold_s=self.keys.tap_s * (1 + attempt))

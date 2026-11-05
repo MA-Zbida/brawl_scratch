@@ -134,14 +134,13 @@ def test_confirmed_steps_retry_dropped_presses_and_stay_exact():
     assert (clock.frame, game.frame, game.x) == (0, 0, 0)
 
 
-def test_a_dropped_key_release_that_blocks_rewind_is_recovered():
-    # The game misses the release of RIGHT and, believing it still held, refuses to rewind.
-    game = FakeGame(drop_release_of={RIGHT}, rewind_blocked_while_held=True)
+def test_retries_press_only_the_step_key_never_the_fight_keys():
+    # Re-pressing a fight key would be a new press (a second jump) the frame never had.
+    game = FakeGame(drop_presses={1, 2, 3})
     clock = counted(game)
-    clock.advance([frozenset({RIGHT})] * 3)
-    timing = clock.rewind(3)
-    assert (clock.frame, game.frame, game.x) == (0, 0, 0)
-    assert timing.retries == 2 and RIGHT not in game.held
+    clock.advance([frozenset({JUMP})] * 2)
+    fight_events = [e for e in game.log if e[1] == JUMP]
+    assert fight_events == [("down", JUMP)] and game.frame == 2
 
 
 def test_a_late_step_that_lands_with_its_retry_is_undone():

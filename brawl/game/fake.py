@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from brawl.game.keys import DIFFICULTY_DOWN, DIFFICULTY_UP, FIGHT_KEYS, LEFT, MENU, PAUSE, REWIND, RIGHT, STEP
+from brawl.game.keys import DIFFICULTY_DOWN, DIFFICULTY_UP, LEFT, MENU, PAUSE, REWIND, RIGHT, STEP
 
 LEVELS = ("easy", "medium", "hard", "extreme", "chosen", "evasive")
 
@@ -22,8 +22,6 @@ class FakeGame:
     needs_rearm: bool = False  # True: the game only applies keys pressed since the last step
     drop_presses: set[int] = field(default_factory=set)  # indices of F5/F6 presses to ignore, like the real game
     late_presses: set[int] = field(default_factory=set)  # indices of F5/F6 presses applied only with the next one
-    drop_release_of: set[str] = field(default_factory=set)  # keys whose first release is ignored
-    rewind_blocked_while_held: bool = False  # F5 does nothing while a fight key is (believed) down
     paused: bool = False
     frame: int = 0
     x: int = 0
@@ -65,9 +63,6 @@ class FakeGame:
 
     def key_up(self, key: str) -> None:
         self.log.append(("up", key))
-        if key in self.drop_release_of:
-            self.drop_release_of.discard(key)
-            return
         self.held.discard(key)
 
     # -- game ------------------------------------------------------------------------------
@@ -75,8 +70,6 @@ class FakeGame:
         if key == STEP:
             keys = self.held & self._since_step if self.needs_rearm else set(self.held)
             self._advance(keys)
-        elif self.rewind_blocked_while_held and self.held & FIGHT_KEYS:
-            return
         elif self.frame > 0:
             self.frame -= 1
             self.x, self.bot = self._history[self.frame]

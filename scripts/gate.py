@@ -4,6 +4,7 @@ Start Brawlhalla in training mode (Wu Shang vs a Mordex bot, Brawlhaven) with no
 or not. Run a gate, then click into the game window during the countdown: the script presses keys
 in whatever window has focus.
 
+    python scripts/gate.py t0     # witness: you read the frame counter, the script compares
     python scripts/gate.py t1     # every fight key reaches the game
     python scripts/gate.py t2     # every F6 advances and every F5 rewinds exactly one frame
     python scripts/gate.py t3     # rewind and replay give identical frames
@@ -152,6 +153,59 @@ class Session:
         cv2.imwrite(str(self.out / f"{name}.png"), view)
 
 
+def t0(s: Session) -> tuple[bool, list[str]]:
+    """Witness test: you read the frame counter; the script compares it with what it detected.
+
+    Two phases (no keys held; random keys held). In each: 200 F6 presses, then 200 F5 presses.
+    Before, between and after, you read the counter in the toolbar and type it in this terminal.
+    """
+    lines = s.ensure_paused()
+    rng = random.Random(1)
+    keys = sorted(FIGHT_KEYS)
+    n = s.args.frames or 200
+    ok = True
+
+    def read(prompt: str) -> int:
+        while True:
+            text = input(f"\n{prompt}\n  Click this terminal, type the frame counter shown in the game's toolbar, press Enter: ")
+            try:
+                return int(text.strip())
+            except ValueError:
+                print("  numbers only, please")
+
+    def back_to_game() -> None:
+        for i in range(3, 0, -1):
+            print(f"  click into the game window... {i}", flush=True)
+            time.sleep(1)
+
+    lines += ["", "| Phase | Presses | Counter moved (you read) | Counter moved (script detected) | Misses (by you) | Keys held at detected misses |",
+              "|---|---|---|---|---|---|"]
+    for phase in ("no keys", "random keys"):
+        plan = [NO_KEYS if phase == "no keys" else frozenset(rng.sample(keys, rng.randint(1, 2))) for _ in range(n)]
+        v0 = read(f"[{phase}] before {n} steps")
+        back_to_game()
+        missed_keys: dict[str, int] = {}
+        missed_f6 = 0
+        for frame_keys in plan:
+            if not s.step(frame_keys)[1]:
+                missed_f6 += 1
+                for key in frame_keys:
+                    missed_keys[key] = missed_keys.get(key, 0) + 1
+        v1 = read(f"[{phase}] after {n} steps")
+        back_to_game()
+        missed_f5 = s.rewind(n)
+        v2 = read(f"[{phase}] after {n} rewinds")
+        back_to_game()
+        human_f6, human_f5 = v1 - v0, v1 - v2
+        held = ", ".join(f"`{k}` {c}" for k, c in sorted(missed_keys.items(), key=lambda kv: -kv[1])) or "-"
+        lines.append(f"| {phase}: F6 | {n} | {human_f6} | {n - missed_f6} | {n - human_f6} | {held} |")
+        lines.append(f"| {phase}: F5 | {n} | {human_f5} | {n - missed_f5} | {n - human_f5} | - |")
+        ok &= human_f6 == n and human_f5 == n
+    lines.append("\nIf 'you read' equals the presses, the game applied every press and any detected misses are "
+                 "the script's detector. If 'you read' is lower, the game really skipped presses.")
+    return ok, lines
+
+
 def t1(s: Session) -> tuple[bool, list[str]]:
     lines = s.ensure_paused() + s.calibrate()
     n = 12
@@ -257,7 +311,7 @@ def t4(s: Session) -> tuple[bool, list[str]]:
         f"- Settings: tap {s.args.tap_ms} ms, settle {s.args.settle_ms} ms"]
 
 
-GATES = {"t1": t1, "t2": t2, "t3": t3, "t4": t4}
+GATES = {"t0": t0, "t1": t1, "t2": t2, "t3": t3, "t4": t4}
 
 
 def main(argv=None) -> int:

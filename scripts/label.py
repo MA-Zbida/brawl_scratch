@@ -10,6 +10,20 @@ Perception is then measured against these labels.
 Labels are saved to labels.json in that folder after every frame; running again resumes at the
 first unfinished frame.
 
+Rules (the same in every session; perception is scored against them):
+
+- Box: the fighter's body, head to feet, as tight as you can. Leave out the overlay circles,
+  hit effects, dust, the weapon's swing or trail. A weapon held against the body at rest is part
+  of the body. Partly off screen: box the visible part. Overlapping fighters: box each one's own
+  body, even if the boxes overlap.
+- Facing: where the body points (right, left), not where it moves.
+- Weapon: what the fighter holds now (Wu Shang: none, spear, gauntlets; Mordex: none, scythe,
+  gauntlets). Weapons lying on the ground are not labelled.
+- Absent (x): the fighter cannot be seen at all (KO'd, waiting to respawn, beyond the screen).
+  If you can see it, even blinking while it respawns, box it.
+- Not gameplay (u): a menu or the pause toolbar's settings are open, or the screen is loading.
+- Unsure (blurred mid-dodge, hidden behind an effect): box your best estimate. Never skip.
+
 Mouse: drag a box for the selected fighter.
 Keys:  1 / 2  select Wu Shang / Mordex     f  facing (right, left)     w  weapon (cycles)
        x      not on screen (toggle)       u  not gameplay: menu, loading (toggle, skips the frame)

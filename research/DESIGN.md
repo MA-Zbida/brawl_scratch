@@ -48,7 +48,12 @@ selected by configuration:
 presses, mostly when fight keys change on the same step (gate T0: 166/200 applied unconfirmed). With
 every press confirmed against the counter, 800 of 800 presses landed exactly, as read by a human
 (T0). A 10 ms gap between a key change and the following F6 reduces drops; confirmation removes
-them. The clock's frame index and the game's frame number therefore cannot disagree.
+them. The game also lands some presses late (T3: a press arriving after its retry moved the game
+two frames), so the clock reads the counter's **number** (template-matched digits, calibrated once
+by `gate.py counter`). The counter restarts at 0 on every pause and goes negative below it. The
+clock's `frame` is that number. Retries wait longer each time, and a double landing is undone
+exactly: F5 back, or F6 forward with the keys recorded for that frame (`keys_at`). Rewinding across
+weapon throws works (witnessed).
 
 **Decision period.** The agent decides every `k` game frames (config, default `k = 3`, i.e. 20
 decisions per game second). The same `k` is used in both regimes, so a policy trained in `stepped`

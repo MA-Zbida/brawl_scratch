@@ -21,6 +21,7 @@ LEVELS = ("easy", "medium", "hard", "extreme", "chosen", "evasive")
 class FakeGame:
     needs_rearm: bool = False  # True: the game only applies keys pressed since the last step
     drop_presses: set[int] = field(default_factory=set)  # indices of F5/F6 presses to ignore, like the real game
+    late_presses: set[int] = field(default_factory=set)  # indices of F5/F6 presses applied only with the next one
     drop_release_of: set[str] = field(default_factory=set)  # keys whose first release is ignored
     rewind_blocked_while_held: bool = False  # F5 does nothing while a fight key is (believed) down
     paused: bool = False
@@ -34,6 +35,7 @@ class FakeGame:
     _history: list[tuple[int, int]] = field(default_factory=list)
     _new_frame: bool = True
     _presses: int = 0
+    _pending: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self._history = [(self.x, self.bot)]
@@ -43,19 +45,18 @@ class FakeGame:
         self.log.append(("down", key))
         if key in (STEP, REWIND) and self.paused:
             self._presses += 1
-            if self._presses - 1 in self.drop_presses:
+            index = self._presses - 1
+            if index in self.drop_presses:
                 return
-        if key == PAUSE:
+            if index in self.late_presses:  # lands together with the next press
+                self._pending.append(key)
+                return
+            for late in self._pending:
+                self._frame_key(late)
+            self._pending.clear()
+            self._frame_key(key)
+        elif key == PAUSE:
             self.paused = not self.paused
-        elif key == STEP and self.paused:
-            keys = self.held & self._since_step if self.needs_rearm else set(self.held)
-            self._advance(keys)
-        elif key == REWIND and self.paused and self.rewind_blocked_while_held and self.held & FIGHT_KEYS:
-            return
-        elif key == REWIND and self.paused and self.frame > 0:
-            self.frame -= 1
-            self.x, self.bot = self._history[self.frame]
-            self._new_frame = True
         elif key in (DIFFICULTY_UP, DIFFICULTY_DOWN) and MENU in self.held:
             self.difficulty = min(len(LEVELS) - 1, max(0, self.difficulty + (1 if key == DIFFICULTY_UP else -1)))
         else:
@@ -70,6 +71,17 @@ class FakeGame:
         self.held.discard(key)
 
     # -- game ------------------------------------------------------------------------------
+    def _frame_key(self, key: str) -> None:
+        if key == STEP:
+            keys = self.held & self._since_step if self.needs_rearm else set(self.held)
+            self._advance(keys)
+        elif self.rewind_blocked_while_held and self.held & FIGHT_KEYS:
+            return
+        elif self.frame > 0:
+            self.frame -= 1
+            self.x, self.bot = self._history[self.frame]
+            self._new_frame = True
+
     def _advance(self, keys: set[str]) -> None:
         self.x += (RIGHT in keys) - (LEFT in keys)
         self.bot = (self.bot * 31 + self.x + 17) % 1009

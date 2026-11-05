@@ -68,12 +68,13 @@ class Keys:
             self.backend.key_down(key)
         self.held = target
 
-    def tap(self, key: str) -> None:
-        """Press and release one key that is not held, keeping it down for ``tap_s``."""
+    def tap(self, key: str, hold_s: float | None = None) -> None:
+        """Press and release one key that is not held, keeping it down for ``hold_s`` (default
+        ``tap_s``)."""
         if key in self.held:
             raise ValueError(f"{key!r} is held; release it before tapping")
         self.backend.key_down(key)
-        self.sleep(self.tap_s)
+        self.sleep(self.tap_s if hold_s is None else hold_s)
         self.backend.key_up(key)
 
     def chord(self, keys: Iterable[str]) -> None:

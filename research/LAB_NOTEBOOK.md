@@ -229,3 +229,37 @@ evaluation and determinism all rely on.
 
 **Decision:** confirmation is the default (`--no-confirm` to disable); key gap 10 ms. Next: T1
 (keys) and T3 (determinism) with confirmation, and T4 re-measured.
+
+---
+
+## 2026-11-05: T3 stops, and a clock that reads the counter's number
+
+**Command:** `python scripts/gate.py t3` (twice), plus a human witness test.
+
+**Result:**
+
+- **Run 1** stopped on the first rewind after 120 random frames: F5 was ignored 6 times at frame
+  120, and the counter read 120. Suspected cause: a dropped key release blocking stepping. Fix
+  (`8734497`): force-release every fight key on repeated drops.
+- **Run 2** stopped after 67 good rewinds: F5 was ignored 6 times. The clock said frame 53, but
+  the counter read **51**. A thrown gauntlet was in flight, so a throw was suspected.
+- **Witness test** (pause, 10 steps, throw, 25 steps, then F5): rewinding through the throw works,
+  and replay is identical. **The counter restarts at 0 on every pause and goes negative** when F5
+  goes back past the pause, into the earlier session.
+
+**Reading:** the throw is not the cause. The 2-frame offset shows that twice, a press landed after
+the clock had stopped waiting for it, so the retry moved the game a second frame. The final stop
+fits a stretch of about 1 s in which the game did not respond, longer than all the retries combined
+(each waited 0.15 s). A clock that only sees "the counter changed" cannot detect or undo either
+case.
+
+**Decision:**
+
+- The clock reads the counter's **number**:
+  - Digit templates are fitted once by `gate.py counter`. It re-pauses (counter 0), steps up 110,
+    rewinds to -15, labels every crop, and the human confirms the final number.
+  - The clock's `frame` is the game's number.
+  - Retries hold the key longer and wait twice as long each time, up to 2 s.
+  - Before every press, and after every press, a mismatch is repaired exactly: F5 back, or F6
+    forward with the keys recorded for that frame.
+- FakeGame gained late presses, and tests cover forward and rewind double landings.

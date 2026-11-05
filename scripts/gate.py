@@ -4,6 +4,7 @@ Start Brawlhalla in training mode (Wu Shang vs a Mordex bot, Brawlhaven) with no
 or not. Run a gate, then click into the game window during the countdown: the script presses keys
 in whatever window has focus.
 
+    python scripts/gate.py counter  # once, first: teach the script the counter's digits
     python scripts/gate.py t0     # witness: you read the frame counter, the script compares
     python scripts/gate.py t1     # every fight key reaches the game
     python scripts/gate.py t2     # every F6 advances and every F5 rewinds exactly one frame
@@ -11,7 +12,8 @@ in whatever window has focus.
     python scripts/gate.py t4     # steps and rewind frames per second
 
 Ground truth is the game's own **frame counter**, shown in the training toolbar while paused
-(between "F5 Prev" and "F6 Next"). A step or rewind counts only if the counter changed. Pause is a
+(between "F5 Prev" and "F6 Next"). It restarts at 0 on every pause. With confirmation (the
+default) the clock reads its number before and after every press. Pause is a
 toggle, so each gate first finds out whether the game is paused (the toolbar box is only there
 when it is) instead of assuming.
 
@@ -39,8 +41,8 @@ from datetime import datetime  # noqa: E402
 import numpy as np  # noqa: E402
 
 from brawl.game.clock import StepError, SteppedClock  # noqa: E402
-from brawl.game.counter import FrameCounter, counter_changed  # noqa: E402
-from brawl.game.keys import FIGHT_KEYS, PAUSE, RIGHT, DirectInput, Keys  # noqa: E402
+from brawl.game.counter import GLYPHS_PATH, Digits, FrameCounter, counter_changed, held_out_accuracy  # noqa: E402
+from brawl.game.keys import FIGHT_KEYS, PAUSE, REWIND, RIGHT, STEP, DirectInput, Keys  # noqa: E402
 from brawl.paths import RESULTS, RUNS  # noqa: E402
 
 GATES_DIR = RESULTS / "gates"
@@ -72,6 +74,7 @@ class Session:
                                   key_gap_s=args.key_gap_ms / 1000, rearm_each_frame=args.rearm,
                                   settle_s=0.0 if args.confirm else args.settle_ms / 1000)
         self.retries = 0
+        self.repairs = 0
         self.mask: np.ndarray | None = None
         self.floor = 0.0
 
@@ -93,8 +96,12 @@ class Session:
             time.sleep(0.4)
             after = self.toolbar_brightness()
         self.clock.paused = True
-        return [f"- Pause found by the toolbar box (brightness {max(before, after):.0f} running/other, "
-                f"{min(before, after):.0f} paused)"]
+        lines = [f"- Pause found by the toolbar box (brightness {max(before, after):.0f} running/other, "
+                 f"{min(before, after):.0f} paused)"]
+        if self.clock.counter is not None:
+            self.clock.sync()
+            lines.append(f"- The frame counter reads {self.clock.frame}")
+        return lines
 
     def counter(self) -> np.ndarray:
         return self.frame_counter.read()
@@ -106,6 +113,7 @@ class Session:
         before = self.counter()
         timing = self.clock.advance([frame_keys])
         self.retries += timing.retries
+        self.repairs += timing.repairs
         moved = True if self.args.confirm else self.frame_counter.wait_change(before)
         return self.image(), moved
 
@@ -113,6 +121,7 @@ class Session:
         before = self.counter()
         timing = self.clock.rewind(1)
         self.retries += timing.retries
+        self.repairs += timing.repairs
         return True if self.args.confirm else self.frame_counter.wait_change(before)
 
     def play(self, plan) -> tuple[list[np.ndarray], int]:
@@ -156,6 +165,91 @@ class Session:
         cv2.imwrite(str(self.out / f"{name}.png"), view)
 
 
+def read_counter_by_eye(prompt: str) -> int:
+    while True:
+        text = input(f"\n{prompt}\n  Click this terminal, type the frame counter shown in the game's toolbar, press Enter: ")
+        try:
+            return int(text.strip())
+        except ValueError:
+            print("  numbers only, please")
+
+
+def counter(s: Session) -> tuple[bool, list[str]]:
+    """Teach the script the counter's digits (run once; writes assets/counter/glyphs.npz).
+
+    Pausing restarts the counter at 0. The script re-pauses, steps forward ``up`` frames and then
+    rewinds below 0, slowly, waiting for every change, so each crop is labelled with the number it
+    shows; you confirm the final number by eye. ``--refit`` fits again from the saved crops.
+    """
+    s.clock.counter = None
+    lines = s.ensure_paused()
+    up, below = s.args.frames or 110, 15
+    s.keys.tap(PAUSE)  # resume and pause again: the counter restarts at 0
+    time.sleep(0.4)
+    s.keys.tap(PAUSE)
+    time.sleep(0.6)
+    samples, value, retries = [(s.counter(), 0)], 0, 0
+
+    def press(key: str, delta: int) -> None:
+        nonlocal value, retries
+        before = s.counter()
+        for attempt in range(4):
+            s.keys.tap(key, hold_s=0.03)
+            if s.frame_counter.wait_change(before, timeout_s=1.0):
+                break
+            retries += 1
+        else:
+            raise StepError(f"the game ignored {key} 4 times while calibrating (counter {value})")
+        time.sleep(0.15)
+        after = s.counter()
+        time.sleep(0.15)
+        if s.counter_changed(after, s.counter()):
+            raise StepError(f"a press landed twice while calibrating (counter {value}): run again")
+        value += delta
+        samples.append((after, value))
+
+    for _ in range(up):
+        press(STEP, +1)
+    for _ in range(up + below):
+        press(REWIND, -1)
+    seen = read_counter_by_eye(f"The script expects the counter to read {value}.")
+    if seen != value:
+        return False, lines + [f"- **The counter reads {seen}, the script counted {value}**: labels are off "
+                               f"(did the counter start at 0?). Nothing saved."]
+    np.savez_compressed(s.out / "samples.npz", crops=np.stack([c for c, _ in samples]),
+                        labels=np.array([v for _, v in samples]))
+    ok, fitted = fit_counter(samples)
+    return ok, lines + [f"- {len(samples)} labelled crops ({up} steps from 0, then down to {value}); "
+                        f"you confirmed {seen}; {retries} presses retried"] + fitted
+
+
+COUNTER_SAMPLES = RUNS / "gates" / "counter" / "samples.npz"
+
+
+def fit_counter(samples: list[tuple[np.ndarray, int]]) -> tuple[bool, list[str]]:
+    """Fit the reader on labelled crops, check it, and save it if every check passes."""
+    held, n_held = held_out_accuracy(samples)
+    digits, skipped = Digits.fit(samples)
+    correct = sum(digits.read(c) == v for c, v in samples)
+    ok = skipped == 0 and held == n_held and correct == len(samples)
+    if ok:
+        digits.save(GLYPHS_PATH)
+    chars = "".join(sorted(set(digits.chars.tolist())))
+    return ok, [
+        f"- Characters seen: `{chars}`; {len(digits.exemplars)} distinct renderings; crops skipped "
+        f"(glyph count off): {skipped}",
+        f"- Numbers never seen in fitting (every third, fitted on the rest): {held}/{n_held} read correctly",
+        f"- All crops read back: {correct}/{len(samples)} " + (f"PASS: saved `{GLYPHS_PATH}`" if ok else "FAIL: not saved")]
+
+
+def refit_counter() -> tuple[bool, list[str]]:
+    """``counter --refit``: fit again from the crops saved by the last calibration (no game)."""
+    z = np.load(COUNTER_SAMPLES)
+    samples = list(zip(z["crops"], z["labels"].tolist()))
+    ok, lines = fit_counter(samples)
+    return ok, [f"- Refitted from `{COUNTER_SAMPLES}` ({len(samples)} labelled crops)"] + lines
+
+
 def t0(s: Session) -> tuple[bool, list[str]]:
     """Witness test: you read the frame counter; the script compares it with what it detected.
 
@@ -168,13 +262,7 @@ def t0(s: Session) -> tuple[bool, list[str]]:
     n = s.args.frames or 200
     ok = True
 
-    def read(prompt: str) -> int:
-        while True:
-            text = input(f"\n{prompt}\n  Click this terminal, type the frame counter shown in the game's toolbar, press Enter: ")
-            try:
-                return int(text.strip())
-            except ValueError:
-                print("  numbers only, please")
+    read = read_counter_by_eye
 
     def back_to_game() -> None:
         for i in range(3, 0, -1):
@@ -301,6 +389,7 @@ def t3(s: Session) -> tuple[bool, list[str]]:
     ok = mismatches == 0 and missed == 0
     lines.append(f"- {reps} replays of {n} random frames: {mismatches}/{reps * n} frames differ beyond the noise "
                  f"floor (worst {worst:.4%}); missed steps or rewinds: {missed} {'PASS' if ok else 'FAIL'}")
+    lines.append(f"- Presses retried: {s.retries}; presses that undid a double landing: {s.repairs}")
     return ok, lines
 
 
@@ -322,7 +411,7 @@ def t4(s: Session) -> tuple[bool, list[str]]:
         f"- Settings: tap {s.args.tap_ms} ms, settle {s.args.settle_ms} ms"]
 
 
-GATES = {"t0": t0, "t1": t1, "t2": t2, "t3": t3, "t4": t4}
+GATES = {"counter": counter, "t0": t0, "t1": t1, "t2": t2, "t3": t3, "t4": t4}
 
 
 def main(argv=None) -> int:
@@ -337,8 +426,12 @@ def main(argv=None) -> int:
                    help="do not confirm presses on the frame counter (t2 always measures without)")
     p.add_argument("--sweep-gap", default="0,5,10,20,35", help="t2: key gaps to compare (ms)")
     p.add_argument("--countdown", type=int, default=5)
+    p.add_argument("--refit", action="store_true", help="counter: fit again from the saved crops, without the game")
     args = p.parse_args(argv)
     args.frames = args.frames or {"t2": 300, "t3": 120, "t4": 300}.get(args.gate, 0)
+    if args.gate == "counter" and args.refit:
+        ok, lines = refit_counter()
+        return write_report(args, ok, lines, COUNTER_SAMPLES.parent, "Fitted offline; the game was not touched.")
     print(capture.status())
     for i in range(args.countdown, 0, -1):
         print(f"click into the game window... {i}", flush=True)
@@ -357,12 +450,16 @@ def main(argv=None) -> int:
                             f"(counter crop: `step_error_counter.png`)"]
     finally:
         s.keys.release_all()
+    return write_report(args, ok, lines, s.out, "The game is left paused.")
+
+
+def write_report(args, ok: bool, lines: list[str], out: Path, note: str) -> int:
     GATES_DIR.mkdir(parents=True, exist_ok=True)
     report = GATES_DIR / f"{args.gate}.md"
     header = [f"# Gate {args.gate.upper()}: {'PASS' if ok else 'FAIL'}", "",
               f"Run {datetime.now():%Y-%m-%d %H:%M}; confirm={args.confirm}, key gap={args.key_gap_ms} ms, rearm={args.rearm}, tap={args.tap_ms} ms, "
-              f"settle={args.settle_ms} ms, frames={args.frames}. Evidence: `{s.out}`.",
-              "The game is left paused.", ""]
+              f"settle={args.settle_ms} ms, frames={args.frames}. Evidence: `{out}`.",
+              note, ""]
     report.write_text("\n".join(header + lines) + "\n", encoding="utf-8")
     print("\n".join(header + lines))
     print(f"written: {report}")

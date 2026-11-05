@@ -24,6 +24,7 @@ class Timing:
     wall_s: float = 0.0
     late_frames: int = 0  # realtime only: frames whose keys were set after the frame began
     retries: int = 0      # stepped only: presses the game dropped and that were pressed again
+    repairs: int = 0      # stepped only: presses made to undo a press that landed twice
 
 
 class StepError(RuntimeError):
@@ -46,10 +47,13 @@ class Clock(Protocol):
 class SteppedClock:
     """The game stays paused; it advances one frame per F6 press, with the plan's keys held.
 
-    ``counter``: the toolbar's frame counter (``brawl.game.counter.FrameCounter``). With it, every
-    F6 and F5 is confirmed: the clock waits for the counter to change and presses again if the
-    game dropped the press. The game drops F6 when fight keys change at the same moment (gate
-    T0), so ``key_gap_s`` separates a key change from the F6 that follows it.
+    ``counter``: the toolbar's frame counter (``brawl.game.counter.FrameCounter``). With it, the
+    clock's ``frame`` is the game's own frame number, and every F6 and F5 is confirmed by reading
+    that number. A dropped press is pressed again, waiting longer each time; a press that landed
+    late, together with its retry, is undone: rewinding is exact, and so is replaying a frame with
+    the keys that first produced it (``keys_at``), because the game is deterministic.
+    The game drops F6 when fight keys change at the same moment (gate T0), so ``key_gap_s``
+    separates a key change from the F6 that follows it.
     ``rearm_each_frame``: release and re-press the frame's keys with every F6.
     ``settle_s``: a fixed wait after a plan, for use without a counter.
     """
@@ -58,12 +62,15 @@ class SteppedClock:
     counter: Optional[Any] = None
     key_gap_s: float = 0.0
     max_retries: int = 5
+    max_wait_s: float = 2.0
     rearm_each_frame: bool = False
     settle_s: float = 0.0
     now: Callable[[], float] = time.perf_counter
     sleep: Callable[[float], None] = time.sleep
     frame: int = 0
     paused: bool = field(default=False, init=False)
+    keys_at: dict[int, frozenset[str]] = field(default_factory=dict, init=False)
+    repairs: int = field(default=0, init=False)
 
     def start(self) -> None:
         """Pause the game (assumed running when the session starts)."""
@@ -71,6 +78,7 @@ class SteppedClock:
             self.keys.release_all()
             self.keys.tap(PAUSE)
             self.paused = True
+        self.sync()
 
     def stop(self) -> None:
         """Release everything and let the game run again."""
@@ -79,12 +87,23 @@ class SteppedClock:
             self.keys.tap(PAUSE)
             self.paused = False
 
+    def sync(self) -> None:
+        """Adopt the game's frame number (with a counter). Frames before it have unknown keys."""
+        if self.counter is None:
+            return
+        value = self.counter.value()
+        if value is None:
+            raise StepError("cannot read the frame counter (is the game paused, with no menu open?)")
+        self.frame = value
+        self.keys_at.clear()
+
     def advance(self, plan: Plan) -> Timing:
         if not self.paused:
             raise RuntimeError("SteppedClock.advance needs a paused game: call start() first")
         timing = Timing(frames=len(plan))
-        t0 = self.now()
+        t0, repairs = self.now(), self.repairs
         for frame_keys in plan:
+            self._check()
             if self.rearm_each_frame:
                 self.keys.release_all()
             keys_changed = frozenset(frame_keys) != self.keys.held
@@ -92,52 +111,105 @@ class SteppedClock:
             if keys_changed and self.key_gap_s:
                 self.sleep(self.key_gap_s)
             timing.retries += self._press(STEP)
-            self.frame += 1
         self.sleep(self.settle_s)
         timing.wall_s = self.now() - t0
+        timing.repairs = self.repairs - repairs
         return timing
-
-    def _press(self, key: str) -> int:
-        """Tap ``key``; with a counter, confirm it moved and retry if the game dropped the press.
-        Returns the number of retries."""
-        if self.counter is None:
-            self.keys.tap(key)
-            return 0
-        before = self.counter.read()
-        held = self.keys.held
-        for attempt in range(self.max_retries + 1):
-            if attempt >= 2:
-                # Repeated drops: the game may have missed a key release and think a key is still
-                # down, which blocks stepping. Release every fight key, then restore the intended ones.
-                self.keys.force_release()
-                self.sleep(self.key_gap_s)
-                if held:
-                    self.keys.hold(held)
-                    self.sleep(self.key_gap_s)
-            self.keys.tap(key)
-            if self.counter.wait_change(before):
-                return attempt
-        raise StepError(f"the game ignored {key} {self.max_retries + 1} times "
-                        f"(frame {self.frame}, keys held: {sorted(held) or 'none'})")
 
     def rewind(self, frames: int) -> Timing:
         """Step back ``frames`` frames. The game is deterministic, so replaying the same keys from
         there reproduces the same frames; different keys change the past."""
         if not self.paused:
             raise RuntimeError("rewind needs a paused game")
-        if frames > self.frame:
+        if self.counter is None and frames > self.frame:
             raise ValueError(f"cannot rewind {frames} frames from frame {self.frame}")
         timing = Timing(frames=-frames)
-        t0 = self.now()
+        t0, repairs = self.now(), self.repairs
         if self.keys.held:
             self.keys.release_all()
             self.sleep(self.key_gap_s)  # a release right before F5 is dropped like a press before F6
         for _ in range(frames):
+            self._check()
             timing.retries += self._press(REWIND)
-            self.frame -= 1
         self.sleep(self.settle_s)
         timing.wall_s = self.now() - t0
+        timing.repairs = self.repairs - repairs
         return timing
+
+    def _press(self, key: str) -> int:
+        """Move one frame with ``key`` (F6 forward, F5 back). With a counter, confirm it on the
+        counter's number and retry dropped presses. Returns the number of retries."""
+        step = 1 if key == STEP else -1
+        if self.counter is None:
+            self.keys.tap(key)
+            self.frame += step
+            return 0
+        goal, held = self.frame + step, self.keys.held
+        for attempt in range(self.max_retries + 1):
+            if attempt >= 2:
+                # Repeated drops: the game may have missed a key release and think a key is still
+                # down. Release every fight key, then restore the intended ones.
+                self.keys.force_release()
+                self.sleep(self.key_gap_s)
+                if held:
+                    self.keys.hold(held)
+                    self.sleep(self.key_gap_s)
+            # Each retry holds the key longer and waits longer: the game can be slow to respond,
+            # and pressing again too early is what makes a press land twice.
+            self.keys.tap(key, hold_s=self.keys.tap_s * (1 + attempt))
+            wait = min(self.max_wait_s, self.counter.timeout_s * 2 ** attempt)
+            value = self.counter.wait_value(self.frame, timeout_s=wait)
+            if value is not None:
+                break
+        else:
+            raise StepError(f"the game ignored {key} {self.max_retries + 1} times "
+                            f"(frame {self.frame}, keys held: {sorted(held) or 'none'})")
+        if key == STEP:
+            self.keys_at[goal] = held
+        self.frame = goal
+        if value != goal:
+            self._repair(value)
+        return attempt
+
+    def _check(self) -> None:
+        """Before a press: a late press may have landed since the last one. Undo it."""
+        if self.counter is not None:
+            value = self.counter.value()
+            if value != self.frame:
+                self._repair(value)
+
+    def _repair(self, value: Optional[int], max_presses: int = 30) -> None:
+        """Bring the game from frame ``value`` back to ``self.frame``: back with F5, forward with
+        F6 holding the keys that first produced each frame. Restores the held keys afterwards."""
+        held = self.keys.held
+        for _ in range(max_presses):
+            if value is None:
+                value = self.counter.value()
+                if value is None:
+                    raise StepError(f"cannot read the frame counter (clock at frame {self.frame})")
+            if value == self.frame:
+                break
+            self.repairs += 1
+            if value > self.frame:
+                if self.keys.held:
+                    self.keys.release_all()
+                    self.sleep(self.key_gap_s)
+                self.keys.tap(REWIND)
+            else:
+                keys = self.keys_at.get(value + 1)
+                if keys is None:
+                    raise StepError(f"cannot replay frame {value + 1}: its keys are unknown")
+                if keys != self.keys.held:
+                    self.keys.hold(keys)
+                    self.sleep(self.key_gap_s)
+                self.keys.tap(STEP)
+            moved = self.counter.wait_value(value, timeout_s=self.max_wait_s)
+            value = moved if moved is not None else self.counter.value()
+        else:
+            raise StepError(f"could not bring the game back to frame {self.frame} (it shows {value})")
+        if self.keys.held != held:
+            self.keys.hold(held)
+            self.sleep(self.key_gap_s)
 
 
 @dataclass

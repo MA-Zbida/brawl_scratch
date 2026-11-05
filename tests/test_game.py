@@ -112,8 +112,7 @@ def counted(game: FakeGame, **kw) -> SteppedClock:
     """A stepped clock that confirms every press against the fake game's frame number."""
     clock_time = FakeTime()
     screen = Screen(game, timeout_s=0.01, now=clock_time.now, sleep=clock_time.sleep)
-    counter = FrameCounter(screen, extract=lambda img: np.asarray(img)[..., :1].astype(float),
-                           changed=lambda a, b: bool((a != b).any()), now=clock_time.now)
+    counter = FrameCounter(screen, value_of=lambda img: int(np.asarray(img)[0, 0, 0]), now=clock_time.now)
     clock = SteppedClock(keys_for(game), counter=counter, sleep=clock_time.sleep, **kw)
     clock.start()
     return clock
@@ -143,6 +142,37 @@ def test_a_dropped_key_release_that_blocks_rewind_is_recovered():
     timing = clock.rewind(3)
     assert (clock.frame, game.frame, game.x) == (0, 0, 0)
     assert timing.retries == 2 and RIGHT not in game.held
+
+
+def test_a_late_step_that_lands_with_its_retry_is_undone():
+    game = FakeGame(late_presses={2})  # the third F6 lands only when the clock presses again
+    clock = counted(game)
+    timing = clock.advance([frozenset({RIGHT})] * 5)
+    assert (clock.frame, game.frame, game.x) == (5, 5, 5)
+    assert timing.retries == 1 and timing.repairs == 1
+
+
+def test_a_late_rewind_is_undone_by_replaying_the_recorded_keys():
+    plan = [frozenset({RIGHT}), frozenset({RIGHT}), frozenset({LEFT}), NO_KEYS, frozenset({RIGHT})]
+    reference = FakeGame()
+    stepped(reference).advance(plan[:2])
+    game = FakeGame(late_presses={6})  # presses 0-4 step; the second rewind lands with its retry
+    clock = counted(game)
+    clock.advance(plan)
+    timing = clock.rewind(3)
+    assert (clock.frame, game.frame) == (2, 2)
+    assert (game.x, game.bot) == (reference.x, reference.bot)
+    assert timing.repairs == 1 and game.held == set()
+
+
+def test_the_clock_adopts_the_games_frame_number():
+    game = FakeGame()
+    stepped(game).advance([NO_KEYS] * 4)  # the game is at frame 4 before the counted clock starts
+    game.paused = False
+    clock = counted(game)
+    assert clock.frame == 4
+    clock.advance([NO_KEYS])
+    assert (clock.frame, game.frame) == (5, 5)
 
 
 def test_a_game_that_never_responds_raises():
@@ -218,3 +248,52 @@ def test_grab_waits_for_a_new_frame_and_reports_stale_ones():
     clock.advance([frozenset({RIGHT})])
     frame = screen.grab()
     assert frame.fresh and frame.image[0, 0, 0] == 1
+
+
+# -- reading the counter's number -----------------------------------------------------------
+def synthetic_font():
+    rng = np.random.default_rng(3)
+    font = {}
+    for ch in "-0123456789":
+        w = 3 if ch == "1" else 5 if ch == "-" else 6
+        glyph = (rng.random((10, w)) > 0.4) * 230.0 + 25.0
+        glyph[:, 0] = glyph[:, -1] = 255.0  # ink in the edge columns, as the real font has
+        if ch == "-":
+            glyph[:] = 33.0
+            glyph[5, :] = 255.0
+        font[ch] = glyph
+    return font
+
+
+def render(text, font, shift=0):
+    from brawl.game.counter import CELL_COLUMNS
+    crop = np.full((22, 60), 33.0, dtype=np.float32)
+    width = sum(font[c].shape[1] for c in text) + len(text) - 1
+    x = CELL_COLUMNS[0] + (CELL_COLUMNS[1] - CELL_COLUMNS[0] - width) // 2 + shift
+    for c in text:
+        g = font[c]
+        crop[8:18, x:x + g.shape[1]] = g
+        x += g.shape[1] + 1
+    return crop
+
+
+def test_digits_fitted_from_labelled_crops_read_every_number():
+    from brawl.game.counter import Digits, held_out_accuracy
+    font = synthetic_font()
+    labelled = [(render(str(v), font), v) for v in range(-15, 121)]
+    digits, skipped = Digits.fit(labelled)
+    assert skipped == 0
+    assert all(digits.read(crop) == v for crop, v in labelled)
+    assert held_out_accuracy(labelled) == (46, 46)
+    assert digits.read(render("1544", font, shift=1)) == 1544
+    assert digits.read(np.full((22, 60), 33.0, dtype=np.float32)) is None  # no number
+
+
+def test_digits_round_trip_through_a_file(tmp_path):
+    from brawl.game.counter import Digits
+    font = synthetic_font()
+    digits, _ = Digits.fit([(render(str(v), font), v) for v in range(-12, 30)])
+    assert len(digits.exemplars) == 11  # one rendering per character: duplicates dropped
+    digits.save(tmp_path / "glyphs.npz")
+    loaded = Digits.load(tmp_path / "glyphs.npz")
+    assert list(loaded.chars) == list(digits.chars) and loaded.read(render("-7", font)) == -7

@@ -263,3 +263,39 @@ case.
   - Before every press, and after every press, a mismatch is repaired exactly: F5 back, or F6
     forward with the keys recorded for that frame.
 - FakeGame gained late presses, and tests cover forward and rewind double landings.
+
+---
+
+## 2026-11-05: T3 passes, accepted by witness; the game layer is done
+
+**Command:** `python scripts/gate.py t3` (three more runs). The report is in
+[../results/gates/t3.md](../results/gates/t3.md), and the per-frame data is in
+`runs/gates/t3/frames.csv`.
+
+**Result:**
+
+- **Stepping is exact.** With the clock reading the counter's number, every run kept the clock and
+  the game on the same frame: 1,200 presses per run, about 55 retried, about 14 double landings
+  undone.
+- **A retry hazard was removed:** retries released and re-pressed the fight keys. For jumps and
+  attacks a re-press is a new press, so retries now press only F6 or F5.
+- **One run stopped:** the game ignored F6 for about 6 s with the clock in sync (counter 61). The
+  later runs did not stop. The gate now records which window has focus and keeps probing for
+  30 s, so a recurrence will show whether the stall clears by itself or the game lost focus.
+- **Replays differ from frame 0, and the difference fades.** For example, in replay 3 the
+  20-frame block means were 1.458, 0.296, 0.155, 0.071, 0.020 and 0.028%. The human saw the
+  red only on the KO animation, the stock icons and a weapon spawn, plus the phantoms. These
+  animations run on their own clock and are not rewound. A diverged fighter would make the
+  difference persist or grow instead.
+
+**Reading:** the fighters are deterministic under rewind and replay with random keys. Every
+difference is cosmetic. The "run of 10 differing frames" rule was wrong, because a KO explosion
+is cosmetic but lasts many frames.
+
+**Decision:**
+
+- **New pass rule:** in each replay, the last 20 frames differ by less than T1's cosmetic level
+  (0.18%). The run above passes it (last-20 means 0.054, 0.052, 0.022, 0.028, 0.104%).
+- **T3 is accepted by witness.** Pixels cannot tell a fighter from an effect, so the hard check
+  (fighter positions equal to the pixel) comes with perception.
+- **The game layer (T0-T4) is done.** Next is Stage 0, step 2: recording and labelling.

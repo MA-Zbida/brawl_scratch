@@ -406,19 +406,23 @@ def t2(s: Session) -> tuple[bool, list[str]]:
 def t3(s: Session) -> tuple[bool, list[str]]:
     """Replay determinism: play random keys, rewind, play them again, compare frame by frame.
 
-    Cosmetic animations (the floating phantoms, weapon spawns) replay differently (T1), so single
-    frames can differ; a fighter that diverges makes every later frame differ. The gate therefore
-    fails on a *run* of differing frames, records where each replay first differs and whether a
-    retried or repaired press came just before, and saves that frame pair for a human to judge.
+    Cosmetic animations (phantoms, weapon spawns, the KO explosion and stock icons) run on their
+    own clock and are not rewound, so replays differ from the first frame, most right after a KO,
+    and the difference fades as those animations end. A fighter that diverges does the opposite:
+    the replays stay apart, so the difference persists to the end. The gate therefore compares
+    the last 20 frames with the cosmetic level measured by T1 (0.18%), shows the difference per
+    20-frame block, and saves each replay's first differing pair for a human to judge. Pixels
+    cannot tell a fighter from an effect: this is provisional until perception gives positions.
     """
     lines = s.lines
     lines += s.ensure_paused() + s.calibrate()
     rng = random.Random(0)
-    n, reps, run_limit = s.args.frames, 5, 10
+    n, reps, tail, cosmetic = s.args.frames, 5, 20, 0.0018
     keys = sorted(FIGHT_KEYS)
     csv = ["rep,frame,keys,diff,retries_1,repairs_1,retries_2,repairs_2"]
-    lines += ["", "| Replay | Frames differing | Longest run | First differs at | Retry/repair in the 3 frames before it (pass 1 / pass 2) |",
-              "|---|---|---|---|---|"]
+    lines += ["", "| Replay | Frames differing | Mean difference per 20-frame block | Last 20 frames | "
+              "First differs at | Retry/repair in the 3 frames before it (pass 1 / pass 2) |",
+              "|---|---|---|---|---|---|"]
     ok = True
     for rep in range(reps):
         plan = [frozenset(rng.sample(keys, rng.randint(0, 2))) for _ in range(n)]
@@ -432,10 +436,8 @@ def t3(s: Session) -> tuple[bool, list[str]]:
         m2 += s.rewind(n)
         diffs = [s.differ(a, b) for a, b in zip(first, second)]
         bad = [s.different(a, b) for a, b in zip(first, second)]
-        longest = run = 0
-        for flag in bad:
-            run = run + 1 if flag else 0
-            longest = max(longest, run)
+        blocks = " ".join(f"{np.mean(diffs[i:i + 20]):.3%}" for i in range(0, n, 20))
+        last = float(np.mean(diffs[-tail:]))
         start = bad.index(True) if any(bad) else None
         near = "-"
         if start is not None:
@@ -444,11 +446,11 @@ def t3(s: Session) -> tuple[bool, list[str]]:
             s.save(first[start], second[start], f"replay{rep}_first_difference_frame{start}")
         for i, d in enumerate(diffs):
             csv.append(f"{rep},{i},{'+'.join(sorted(plan[i]))},{d:.6f},{e1[i][0]},{e1[i][1]},{e2[i][0]},{e2[i][1]}")
-        ok &= longest < run_limit and m1 + m2 == 0
-        lines.append(f"| {rep} | {sum(bad)}/{n} | {longest} | {start if start is not None else '-'} | {near} |")
+        ok &= last < cosmetic and m1 + m2 == 0
+        lines.append(f"| {rep} | {sum(bad)}/{n} | {blocks} | {last:.3%} | {start if start is not None else '-'} | {near} |")
         (s.out / "frames.csv").write_text("\n".join(csv) + "\n", encoding="utf-8")
-    lines += ["", f"- Pass: no run of {run_limit} or more differing frames in any replay, and no missed press: "
-              f"{'PASS' if ok else 'FAIL'}",
+    lines += ["", f"- Pass: in every replay the last {tail} frames differ by less than the cosmetic level "
+              f"({cosmetic:.2%}), and no press was missed: {'PASS' if ok else 'FAIL'}",
               f"- Presses retried: {s.retries}; presses that undid a double landing: {s.repairs}",
               f"- Per frame: `{s.out / 'frames.csv'}`; first differing pairs: `replay*_first_difference_*.png`"]
     return ok, lines

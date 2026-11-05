@@ -14,7 +14,12 @@ Options: --rearm (press keys together with every F6), --tap-ms (key hold time), 
 """
 from __future__ import annotations
 
-import brawl.game.capture as capture  # first: the screen duplicator must exist before torch loads
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # sys and pathlib do not load torch
+
+import brawl.game.capture as capture  # noqa: E402  first: the screen duplicator must exist before torch loads
 
 import argparse
 import random

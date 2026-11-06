@@ -153,3 +153,6 @@ def test_the_character_under_the_indicator_is_wu_shang():
     line = prelabel.yolo_line("wu_shang", [0, 0, 192, 108], 1920, 1080)
     assert line == "0 0.050000 0.050000 0.100000 0.100000"
     assert [p.name for p in prelabel.pick([Path(f"{i}.png") for i in range(10)], 3)] == ["0.png", "4.png", "9.png"]
+    held, lying = [1300, 600, 1330, 640], [900, 600, 960, 630]
+    assert prelabel.free_weapons([held, lying], [wu]) == [lying]  # a held weapon is not labelled
+    assert prelabel.yolo_line("weapon", [0, 0, 192, 108], 1920, 1080).startswith("2 ")

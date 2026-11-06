@@ -125,13 +125,14 @@ Every entry must pass its accuracy gate (P1, R1). "True" means measured and vali
 | Feature, per fighter (agent and opponent) | Sensor |
 |---|---|
 | Position (body box centre) and velocity over the decision period | Detector |
-| Facing direction | Detector |
 | Grounded, airborne, offstage; signed distance to each ledge and blast zone | Position + fixed stage geometry |
 | Damage (0-1), stocks | HUD ring colour and digit |
-| Weapon held: none, or which of the legend's two weapons | Detector classes |
 
-Plus: nearest ground weapon (relative position, present or not); the last `H = 4` actions (jumps
-left and dodge cooldown are not observable, so the action history stands in for them).
+Plus: the nearest free weapon (on the ground or thrown: relative position, present or not); the
+last `H = 4` actions (jumps left and dodge cooldown are not observable, so the action history
+stands in for them). Facing, the held weapon and attack or stun states are not structured
+features: the fighter crops show them (5.3). The detector's classes and the labels that measure
+it are fixed in [../docs/labelling.md](../docs/labelling.md).
 Positions are relative to the stage centre; mirroring is an ablation, off by default.
 
 ### 5.3 Fighter vision (the missing action state)

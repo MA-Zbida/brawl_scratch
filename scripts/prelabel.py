@@ -1,21 +1,18 @@
-"""Draft fighter boxes for labelling in Roboflow (research/DESIGN.md section 9, gate P1).
+"""Draft boxes for the ground-truth set, to be corrected in Roboflow (docs/labelling.md).
 
-The ground truth is two boxes per frame, ``wu_shang`` and ``mordex``. Drawing them from nothing
-is slow, so this runs the old detector (assets/yolo/best.pt: classes character, indicator_self,
-weapon) on full-resolution stills and writes its boxes as drafts. The character under the
-``indicator_self`` triangle is Wu Shang; any other character is Mordex. You upload the folder to
-Roboflow, correct the drafts there (zoom, shortcuts), and export the result (YOLO format, no
-augmentation, no resize) for perception to be measured against.
-
-    python scripts/prelabel.py data/demos/<recording> --count 150
-
-Writes <recording>/roboflow/{images,labels}/ and data.yaml: drag that folder into a new Roboflow
-object-detection project. Drafts are deliberately generous (low confidence): deleting a wrong box
+The ground truth has three classes: ``wu_shang``, ``mordex`` (body boxes) and ``weapon`` (weapons
+not held by a fighter). Drawing them from nothing is slow, so this runs the old detector
+(assets/yolo/best.pt: character, indicator_self, weapon) on full-resolution stills and writes its
+boxes as drafts. The character under the ``indicator_self`` triangle is Wu Shang; the most
+confident other character is Mordex. Drafts are generous (low confidence): deleting a wrong box
 is quicker than drawing a missing one.
 
-Box rule when correcting: the fighter's body, head to feet, tight; no effects or weapon swing;
-partly off screen, box the visible part; not visible at all, no box; a menu on screen, delete the
-image.
+    python scripts/prelabel.py data/demos/<easy recording> data/demos/<hard recording> --count 75
+
+Writes data/labelling/<date_time>/ with images/, labels/ and data.yaml: upload that whole folder
+to a Roboflow object-detection project, correct every image by the rules in docs/labelling.md,
+export YOLO with no preprocessing and no augmentation, and unzip the export there as export/.
+Images are named <recording>__<row>.png, so each label traces back to its recording and row.
 """
 from __future__ import annotations
 
@@ -28,9 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np  # noqa: E402
 
-from brawl.paths import ASSETS  # noqa: E402
+from brawl.paths import ASSETS, DATA  # noqa: E402
 
-CLASSES = ("wu_shang", "mordex")
+CLASSES = ("wu_shang", "mordex", "weapon")
 
 
 def assign(characters: list[list[float]], indicators: list[list[float]]) -> list[tuple[str, list[float]]]:
@@ -68,21 +65,36 @@ def pick(files: list[Path], count: int) -> list[Path]:
     return [files[i] for i in np.linspace(0, len(files) - 1, count).round().astype(int)]
 
 
+def free_weapons(weapons: list[list[float]], fighters: list[list[float]]) -> list[list[float]]:
+    """Weapon detections whose centre is not inside a fighter box (a held weapon is not labelled)."""
+    def inside(w: list[float], f: list[float]) -> bool:
+        cx, cy = (w[0] + w[2]) / 2, (w[1] + w[3]) / 2
+        return f[0] <= cx <= f[2] and f[1] <= cy <= f[3]
+
+    return [w for w in weapons if not any(inside(w, f) for f in fighters)]
+
+
 def main(argv=None) -> int:
+    from datetime import datetime
+
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("recording", type=Path, help="a recording folder (uses its stills/) or a folder of PNGs")
-    p.add_argument("--count", type=int, default=150, help="frames to draft, spread over the recording (0 = all)")
+    p.add_argument("recordings", type=Path, nargs="+", help="recording folders (their stills/ are used)")
+    p.add_argument("--count", type=int, default=75, help="frames per recording, spread evenly in time (0 = all)")
     p.add_argument("--conf", type=float, default=0.10, help="detector confidence for drafts")
     p.add_argument("--model", type=Path, default=ASSETS / "yolo" / "best.pt")
+    p.add_argument("--out", type=Path, default=None, help="default: data/labelling/<date_time>")
     args = p.parse_args(argv)
-    source = args.recording / "stills" if (args.recording / "stills").is_dir() else args.recording
-    files = pick(sorted(source.glob("*.png")), args.count)
-    if not files:
-        print(f"no PNG frames in {source}")
-        return 1
-    out = args.recording / "roboflow"
-    (out / "images").mkdir(parents=True, exist_ok=True)
-    (out / "labels").mkdir(parents=True, exist_ok=True)
+    chosen: list[tuple[str, Path]] = []
+    for recording in args.recordings:
+        source = recording / "stills" if (recording / "stills").is_dir() else recording
+        files = pick(sorted(source.glob("*.png")), args.count)
+        if not files:
+            print(f"no PNG stills in {source}")
+            return 1
+        chosen += [(f"{recording.name}__{f.stem}", f) for f in files]
+    out = args.out or DATA / "labelling" / datetime.now().strftime("%Y%m%d_%H%M%S")
+    (out / "images").mkdir(parents=True, exist_ok=False)
+    (out / "labels").mkdir(parents=True)
 
     import os
 
@@ -91,29 +103,32 @@ def main(argv=None) -> int:
     from ultralytics import YOLO
 
     model = YOLO(str(args.model), task="detect")
-    counts = {0: 0, 1: 0, 2: 0, "more": 0, "no_indicator": 0}
-    for i, path in enumerate(files):
+    counts = {"fighters": [0, 0, 0], "no_indicator": 0, "weapons": 0}
+    for i, (name, path) in enumerate(chosen):
         image = cv2.imread(str(path))
         h, w = image.shape[:2]
         result = model.predict(image, imgsz=960, conf=args.conf, verbose=False, device="cpu")[0]
         boxes = [[*b, s] for b, s in zip(result.boxes.xyxy.tolist(), result.boxes.conf.tolist())]
         classes = [model.names[int(c)] for c in result.boxes.cls.tolist()]
-        characters = [b for b, c in zip(boxes, classes) if c == "character"]
-        indicators = [b for b, c in zip(boxes, classes) if c == "indicator_self"]
-        named = assign(characters, indicators)
-        counts[len(named) if len(named) <= 2 else "more"] += 1
-        counts["no_indicator"] += int(not indicators)
-        shutil.copy2(path, out / "images" / path.name)
-        (out / "labels" / f"{path.stem}.txt").write_text(
+        of = {k: [b for b, c in zip(boxes, classes) if c == k] for k in ("character", "indicator_self", "weapon")}
+        named = assign(of["character"], of["indicator_self"])
+        named += [("weapon", b) for b in free_weapons(of["weapon"], [b for _, b in named])]
+        fighters = sum(c != "weapon" for c, _ in named)
+        counts["fighters"][fighters] += 1
+        counts["no_indicator"] += int(not of["indicator_self"])
+        counts["weapons"] += len(named) - fighters
+        shutil.copy2(path, out / "images" / f"{name}.png")
+        (out / "labels" / f"{name}.txt").write_text(
             "".join(yolo_line(c, b, w, h) + "\n" for c, b in named), encoding="utf-8")
-        print(f"\r{i + 1}/{len(files)}", end="", flush=True)
+        print(f"\r{i + 1}/{len(chosen)}", end="", flush=True)
     (out / "data.yaml").write_text(f"names: {list(CLASSES)}\nnc: {len(CLASSES)}\n"
                                    "train: images\nval: images\n", encoding="utf-8")
-    print(f"\n{len(files)} frames -> {out}")
-    print(f"drafts with 0 / 1 / 2 / more fighters: {counts[0]} / {counts[1]} / {counts[2]} / {counts['more']}; "
-          f"no indicator found: {counts['no_indicator']}")
-    print("Next: Roboflow > new object-detection project > Upload > drag this folder; correct; "
-          "export as YOLO (no augmentation, no resize).")
+    f0, f1, f2 = counts["fighters"]
+    print(f"\n{len(chosen)} frames -> {out}")
+    print(f"drafts with 0 / 1 / 2 fighters: {f0} / {f1} / {f2}; no indicator found: {counts['no_indicator']}; "
+          f"free weapons drafted: {counts['weapons']}")
+    print("Next (docs/labelling.md): Roboflow object-detection project with classes wu_shang, mordex, weapon; "
+          "upload this folder; correct every image; export YOLO, no preprocessing, no augmentation, into export/.")
     return 0
 
 

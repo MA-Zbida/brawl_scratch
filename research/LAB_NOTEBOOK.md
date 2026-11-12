@@ -951,3 +951,141 @@ Disk: Windows' page file grew to 19.7 GB under memory pressure (8 GB of RAM); 9.
   the spread between blocks, the standard error, and the difference in reward per minute that two
   policies need to differ beyond chance; virtual matches (first to 3 stocks) over the run; a JSON
   record in runs/play/. The loop is tested against a scripted environment, not yet in the game.
+
+## 2026-11-12: committed; the RL loop (Stage 1 baseline)
+
+Work since ce30e6a committed in five commits on restructure/package-layout (not pushed).
+
+**Config system** (brawl/config.py, from PADP's config_io): configs/base.yaml holds every default;
+an experiment file adds overrides, a grid and seeds; a key that base.yaml lacks is rejected.
+configs/experiments/s1_ppo.yaml is Stage 1 (H1, H2): regime (realtime, oracle) x start (scratch,
+bc), 5 seeds, one hour of game time each. configs/experiments/smoke.yaml: five minutes from medium_v4.
+
+**scripts/train.py + brawl/learn.py `train_ppo`:** Stable-Baselines3 PPO on BrawlEnv, on the CPU,
+with the cloned policy's weights when `train.init` is set (same network; the value head starts
+untrained). Settings: rollouts of 1,200 decisions (one minute), 5 epochs, batch 300, learning rate
+3e-4, gamma 0.995: the standard recipe, on purpose. What a live game needed:
+
+- **The update stalls the agent, the game goes on.** Before the update the keys are released;
+  after it `BrawlEnv.resume` counts the frames that passed (`RealtimeClock.resync`), follows the
+  fighters afresh, advances the timers, and observes again. Damage and stocks lost during the
+  stall are logged apart and are no action's reward. The stall's length is logged per rollout.
+- **No windows:** the task continues; PPO bootstraps from the value of the last observation.
+- **Focus:** every 20 decisions the window with the keyboard is checked; if it is not the game,
+  the keys are released and training waits.
+- **F10** stops cleanly (policy_stopped.zip). A run is never resumed: a stopped one is kept as
+  seed<k>_attempt<n>.
+- progress.csv per rollout: steps, game frames, wall time, stocks, damage, reward, the stall and
+  its cost, late frames, perception time, decisions over the budget, pauses. Checkpoints load in
+  scripts/play.py.
+
+Not built yet: the oracle arm's use of rewind, evaluation of checkpoints over blocks, sweep and
+analyze scripts, and the asynchronous learner of H3.
+
+## 2026-11-12: noise floor (gate N1), first measurement
+
+`play.py runs/bc/medium_v4/policy.zip --difficulty medium --minutes 5 --blocks 6`
+(results/play/medium_v4_medium_realtime_x6.md): 30 minutes, real time, sampled actions.
+
+- **medium_v4 is level with the Medium bot:** stocks 16 - 17, damage 3,210 / 3,191, virtual matches
+  3 - 4, reward per minute -0.03. The human in the recordings it was cloned from: 166 - 36 stocks
+  in 110 minutes, about +3 reward per minute.
+- **Between 5-minute blocks** the reward per minute has a spread of 0.58 (blocks: -1.19, 0.24, 0.32,
+  0.17, 0.32, -0.02); net stocks per minute 0.29. Standard error of the 30-minute mean: 0.24.
+- **So:** two policies played 30 minutes each are told apart when they differ by more than about
+  0.67 reward per minute; one 5-minute block (as used for medium_v1 and medium_v2) tells nothing
+  below about 1.6. Halving the detectable difference takes four times the play.
+- Timing over 36,014 decisions: 26.5 ms median, 32.8 ms p95, 0.17% over the budget, one decision of
+  1.2 s. Each part ran once per step.
+- Six consecutive blocks of one run are not six independent runs; seeds and sessions on other days
+  are still to be added to this estimate.
+
+The PPO trainer's test passes (47 tests in the new modules); not yet run in the game.
+
+## 2026-11-12: gate A1, second run; the trainer's first run in the game
+
+**Gate A1** (bot away from Wu Shang, Wu Shang unarmed and facing left). The run printed its whole
+table, then crashed while saving the strips (sequences of 12 decisions are wider than those of 6:
+my fault), so no report file was written. Read from the printed table:
+
+- **Same both times:** 54 of 58 sequences by both measures. The other four are the dashes to the
+  facing side (left, down, up-left, down-left + dodge: 170 px): identical by pixels (2.0-2.2%
+  against 4.3%), with the detected torso 14-18 px apart between the two plays, a tenth of the way
+  travelled. Read as detector spread on dash frames, not as a different move.
+- **Every action acts** except up+none and down+none on the ground, as expected: walking 16-19 px,
+  jump 110 px, lights 13-93 px, dash 122 px against the facing and 170 px with it, heavies 11-18 px
+  with 4% of the window changed, throw 12-20 px (unarmed: a pickup attempt).
+- **Charging:** a heavy held for 6 decisions ends 12 px below the start, still charging; one held
+  for 1 or 2 decisions ends 10-11 px above it, already struck.
+- **Pressing again:** a second jump pressed 4 decisions after the first adds height (227 px against
+  141); pressed 2 decisions after (one decision released) it adds none (141 = 141). T2 showed that
+  each frame's keys reach the game, so this is most likely the game refusing an aerial jump that
+  early, not a lost press; not proven.
+- Gate fixed: strips padded to one width; the numbers written to sequences.json before anything
+  else; the torso spread allowed up to 12% of the way travelled; "acts" at twice the idle
+  difference; a second jump 3 decisions after added. A clean run is still needed for the report.
+
+**Trainer smoke** (configs/experiments/smoke.yaml, 5 rollouts from medium_v4, real time, Medium):
+ran to the end. Stocks 3 - 3, damage 601 / 588; reward per minute by rollout 0.12, -1.31, 1.11,
+-1.30, 1.50 (one-minute noise, as expected from N1). The update stalls the agent for 0.29-0.41 s
+(17-24 game frames); 15.8 damage was taken during one of the four stalls. Perception 25-26 ms,
+at most 0.3% of decisions over the budget; each part once per step (6,000 steps, 6,005 perceptions:
+one at the start and one after each update). Too short to say anything about learning.
+
+## 2026-11-12: the long probe run (gates S1, S2)
+
+Kaggle T4 x2, 9 Medium sessions (131,599 decisions, 110 minutes), 3 folds x 2 seeds, every input
+trained until its stop score stopped improving; 36 runs, none cut by the time limit
+(results/probes/vision.md, runs/probes/vision/). Difference from `vector` (112 entries, with
+timers) in the same fold and seed, mean ± spread over 6 runs:
+
+| Input | Hit within 0.5 s: AUC | Mordex in 0.5 s (px) | Action NLL when the human changes | Action NLL |
+|---|---|---|---|---|
+| vector (reference) | 0.761 | 131.3 | 2.361 | 0.985 |
+| vector, no timers | -0.027 ± 0.012 | +1.7 ± 0.5 | +0.026 ± 0.033 | +0.006 ± 0.010 |
+| vector, GRU | +0.009 ± 0.016 | -2.4 ± 1.1 | -0.106 ± 0.048 | -0.039 ± 0.010 |
+| both crops, 1 frame | +0.005 ± 0.015 | -6.3 ± 0.6 | +0.094 ± 0.051 | +0.041 ± 0.012 |
+| both crops, 4 decisions | -0.006 ± 0.014 | -4.1 ± 1.6 | +0.131 ± 0.042 | +0.050 ± 0.011 |
+| both crops, 1 frame, GRU | +0.007 ± 0.011 | -6.7 ± 0.9 | -0.012 ± 0.040 | +0.004 ± 0.009 |
+
+- **Timers: confirmed** on the hit prediction (all 6 runs), as in the first memory probe.
+- **A recurrent layer: confirmed** on imitation: all 6 runs better where the human changes action
+  (-0.04 to -0.17), and better on Mordex's position in 5 of 6.
+- **Pictures predict Mordex's position 5% better, in all 6 runs (-5.4 to -7.3 px), and nothing else.**
+  No gain on the coming hit (round 1's +0.03 came from an undertrained baseline, as suspected), and
+  the action prediction is worse in 5 of 6 runs. Stacking 4 decisions is worse than one frame on
+  every measure. With the recurrent layer, pictures cancel its imitation gain.
+- Picture inputs reach their best epoch early (26-44 against 78 for the vector): with 110 minutes
+  the CNN overfits before it helps the action head. One stop score covers the three targets, so a
+  target that overfits early ends the run for the others too.
+- What this does not show: whether pictures help a policy that learns from far more data (RL
+  produces 72,000 decisions per hour), or whether another view (one crop of the pair) would.
+
+**Decision (proposed):** the policy's input stays the vector with timers. Pictures are set aside
+until there is RL-scale data; the recurrent layer is the next addition worth an arm.
+
+## 2026-11-12: Stage 1, first run: PPO from the clone, real time (H2)
+
+`train.py --config configs/experiments/s1_ppo.yaml --variant realtime-bc --seed 0`: standard PPO
+(configs/base.yaml) from medium_v4, against Medium, 60 one-minute rollouts (results/s1_ppo/summary.md).
+
+| | Reward per minute (mean, standard error) | Stocks per 30 minutes |
+|---|---|---|
+| medium_v4 alone (N1 run, 6 x 5 min) | -0.03 (0.24) | 16 - 17 |
+| PPO from medium_v4, whole hour | -0.60 (0.14) | 11 - 21 |
+| PPO, first 10 minutes | -0.30 | |
+| PPO, minutes 10-60 | -0.66 (0.15) | |
+
+- In 5-minute blocks the PPO run is below the clone by 0.57 reward per minute: 2.1 standard errors;
+  Mann-Whitney one-sided p = 0.012 (12 blocks against 6). It stays down, with no recovery within
+  the hour (10-minute blocks: -0.30, -0.92, -0.87, -0.32, -0.46, -0.72).
+- **First evidence for H2** (PPO degrades the cloned policy in real time), one seed of the five the
+  prediction asks for. Caveats: the clone was measured in another session the same day; one seed.
+- Mechanics held: updates stall the agent 0.30 s each (0.5% of the hour); 37 damage taken during
+  them, no stock; 0.09% of decisions over the time budget; no lost focus.
+- A likely cause to check, not yet measured: the clone brings a policy but no value function, so
+  the first updates follow advantages from an untrained critic. progress.csv now records each
+  update's approx_kl, clip fraction, entropy, value loss and explained variance, to see it.
+
+Added: scripts/analyze.py (blocks, standard errors, change beyond noise), scripts/sweep.py (seeds
+back to back, unattended).

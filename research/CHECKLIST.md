@@ -16,14 +16,14 @@ pause-and-rewind oracle a learner can close.
 Nothing is trained on a part until that part's gate passes. A wrong input fails every agent
 built on it, and no RL result can show where the fault was.
 
-## Your next steps (2026-11-12)
+## Your next steps (2026-11-12, evening)
 
-Run everything in the `brawl312` environment. Camera mode: Fixed. The long probe run is on Kaggle.
+Run everything in the `brawl312` environment. Camera mode: Fixed.
 
-1. Noise floor (gate N1), 30 minutes, unattended: bot on Medium, game not paused, then
-   `python scripts/play.py runs/bc/medium_v4/policy.zip --difficulty medium --minutes 5 --blocks 6`
-2. Once, with the bot well away from Wu Shang: `python scripts/gate.py a1` (recalibrated, about 5 minutes).
-3. When Kaggle finishes: download the notebook output and say where it is.
+1. Four more seeds of the same arm, about four hours unattended, bot on Medium, game not paused:
+   `python scripts/sweep.py --config configs/experiments/s1_ppo.yaml --variant realtime-bc --seeds 1 2 3 4`
+2. Then: `python scripts/analyze.py s1_ppo`.
+3. When convenient, for the report file: `python scripts/gate.py a1` (bot away from Wu Shang).
 
 ## Stage 0: gates (DESIGN section 9)
 
@@ -36,10 +36,10 @@ Run everything in the `brawl312` environment. Camera mode: Fixed. The long probe
 | T5 | Difficulty macro | Not built |
 | P1 | Perception: position, identity, held weapon, free weapons | Passed with the tracker (2026-11-11, 960 px TensorRT engine, 11 ms per frame): found 1.00 / 0.99, torso p95 13.6 / 15.3 px (pass at 20), held 0.96 / 0.95, spawn 0.97 / 0.97, thrown 0.81 / 0.81. Weak spots, known: Mordex held weapon is on the threshold and reads 0.76 on the Easy validation frames; thrown weapons 0.40 / 0.67 there (5 labels) |
 | R1 | Damage and KO events (HUD reader) | Passed on recordings (2026-11-10): KOs reproduce the final scores of 4 sessions; 10 overlay hits within 1.9 damage. Live check on lossless frames comes with the env |
-| A1 | Every move in the action list is reproducible | First run 2026-11-11: the moves work by the strips and the torso path, and charging works; the gate's thresholds were wrong and are corrected. Open: a second jump one decision after the first did nothing; walking differed 7-10 px between plays. To be run again |
-| S1, S2 | Observation features justified; representation chosen offline | Timers added to the vector (112 entries) after the memory probe: they improve the hit prediction in every run. Pictures: open. Round 1 (results/probes/vision_round1.md) compared undertrained models; the long run on Kaggle (scripts/pack_probes.py) decides |
+| A1 | Every move in the action list is reproducible | Passes by the printed table of the second run (2026-11-12): 54 of 58 sequences identical by pixels and torso, the 4 others are dashes with the detected torso 14-18 px apart; every action acts; charging works; a second jump works 4 decisions after the first, not 2. The run crashed while saving its strips, so the report file still needs one clean run (gate fixed) |
+| S1, S2 | Observation features justified; representation chosen offline | Long run done (2026-11-12, results/probes/vision.md): timers and a recurrent layer earn their place; fighter crops improve only the prediction of Mordex's position (5%) and worsen imitation at 110 minutes of data. Input: the vector with timers; pictures set aside until RL-scale data |
 | L1, D1 | Loop runs each part once per step; fits the time budget | Passed in the live game (2026-11-11, two 5-minute runs): each part once per step; perception + policy 26 ms median, 34 ms p95, of 50 ms; 0.13% of decisions over |
-| N1 | Noise floor: matches per evaluation, seeds per arm | Tool ready (`scripts/play.py --blocks 6`: blocks, their spread, virtual matches to 3 stocks); not yet run |
+| N1 | Noise floor: matches per evaluation, seeds per arm | First measurement 2026-11-12 (medium_v4 against Medium, 6 x 5 min): reward per minute -0.03, spread between blocks 0.58; 30 minutes per policy tell apart differences above 0.67. Still to add: other seeds and days |
 
 ## Build order (DESIGN section 12)
 
@@ -82,10 +82,13 @@ Run everything in the `brawl312` environment. Camera mode: Fixed. The long probe
    - [x] Demonstrations against Medium: 70 minutes (6 sessions); learning curve still rising, slowly.
    - [x] Vision probes (S2), first round: pictures of both fighters improve Mordex's position 0.25-0.5 s ahead and the hit prediction in every fold; not yet the imitation (results/probes/vision_round1.md).
    - [x] Memory probe: 13 timers in the vector (results/probes/memory.md); a recurrent layer helps imitation and is an arm of the long run.
-   - [ ] Long probe run on Kaggle: do pictures add to a fully trained vector, with and without a recurrent layer?
-   - [ ] Then the policy's input is fixed, cloned, and compared live with the vector-only clone.
+   - [x] Long probe run on Kaggle: pictures add 5% on Mordex's position, nothing on defence, and cost imitation; the recurrent layer helps imitation.
+   - [ ] Recurrent policy as an arm (cloning and RecurrentPPO), after the Stage 1 baseline.
    - [x] First cloned policies played in the game: 4 - 3 against Easy, 1 - 4 against Medium in 5 minutes.
    - [ ] Noise floor (N1): the same policy over several 5-minute runs.
+   - [x] Config system (brawl/config.py, configs/base.yaml, configs/experiments/) and the PPO trainer (scripts/train.py): tested against a drawn game.
+   - [x] Smoke run in the game (2026-11-12): 5 rollouts, update stall 0.3-0.4 s, timing within budget.
+   - [ ] Stage 1 runs (configs/experiments/s1_ppo.yaml): realtime-bc seed 0 done (2026-11-12): below the clone by 0.57 reward per minute (2.1 standard errors). Seeds 1-4 next (`scripts/sweep.py`).
 
 ## Open decisions
 

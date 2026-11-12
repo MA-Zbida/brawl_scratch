@@ -299,3 +299,655 @@ is cosmetic but lasts many frames.
 - **T3 is accepted by witness.** Pixels cannot tell a fighter from an effect, so the hard check
   (fighter positions equal to the pixel) comes with perception.
 - **The game layer (T0-T4) is done.** Next is Stage 0, step 2: recording and labelling.
+
+## 2026-11-06: The old detector dataset, audited; the detector is retrained
+
+**Question:** can the old YOLO dataset (Roboflow `temporal-yolo` v15) train or stand in for the
+new detector?
+
+**Found** (contact sheets of the valid split):
+
+- 822 unique frames, not about 1,500: train holds 3 augmented copies of each of its 519 frames
+  (rotation of up to 15 degrees), and every image is stretched to 960 x 960.
+- **Fighter boxes include the held weapon.** A spear doubles the box width.
+- **`weapon` boxes only spawn markers.** Lying and thrown weapons are unlabelled.
+- Identity comes only from a separate `indicator_self` class.
+
+**Decision:** body-only positions need new boxes on nearly every frame, so new drafts from our
+own recordings are labelled instead.
+
+| Set | Sessions | Frames |
+|---|---|---|
+| Test | 1 Easy, 1 Hard | 150 |
+| Train | 2 Easy, 2 Hard | about 400 |
+
+The two sets never share a session. The old detector makes the drafts, and its P1 score is the
+baseline. Spawn markers are boxed whole; items are not labelled. Rules are in docs/labelling.md.
+
+### Detector classes, final (same day)
+
+**Classes:**
+
+| Kind | Classes |
+|---|---|
+| Fighters, by identity and held weapon | `wu_shang_{unarmed,spear,gauntlets}`, `mordex_{unarmed,scythe,gauntlets}` |
+| Free weapons | `weapon_spawn`, `weapon_thrown` |
+| Off the screen | `offscreen` |
+
+**Rules:**
+
+- Boxes are **body only, with no weapon ever** (gauntlets included), so the position never moves
+  with a weapon.
+- The held weapon is **a class**, not left to the crops. It decides the opponent's moves and reach,
+  and as a class it costs one click per box and is measured by P1.
+- The old resnet18 armed/unarmed classifier is retired. Its replacement reads the new 256 px
+  crop. Revised later the same day: the armed state is in the labels, and by default it is read by
+  a crop classifier, not by the detector's class. The human objected that a body-only box gives
+  the detector little of the weapon to classify. P1 compares the two.
+- Only the thrower can pick up a thrown weapon (the human's game knowledge), so ownership matters.
+  It is tracked from the armed-to-unarmed change and is not labelled.
+
+**Measured:**
+
+- The camera is fixed: the stage region is identical across stills of both sessions.
+- The old fighter+weapon boxes reach at most 151 x 174 px. The crop is therefore 256 px centred on
+  the body (DESIGN 5.3), not 160 px.
+
+**Recording problem:** the Hard demo (20261106_155225) lost about 60 s in minutes 1-6, at 43-48
+rows/s with gaps up to 0.56 s. The game repeated frames too, so the machine was overloaded.
+
+## 2026-11-09: Labels exported; P1 scorer built; old YOLO baseline
+
+**Labels:** Roboflow project `brawlhalla-s04p0` v1, 645 images, 8 classes (`offscreen` unused).
+
+| Split | Frames | Source |
+|---|---|---|
+| Test | 149 | Nov 6 Easy and Hard sessions |
+| Train + valid | 496 | Every still of one 16.5-minute Easy session (20261109_184230) |
+
+The test set shares no session with training. `brawl/sense/truth.py` maps each label back to its
+lossless still. A bare row name is resolved by pixels when several recordings share it.
+
+**Gate P1, scorer:** `scripts/gate_p1.py`. A fighter is found when the predicted box of that
+identity has its centre inside the labelled box; the error is the distance between centres.
+Thresholds are provisional.
+
+**Old YOLO (results/gates/p1_old_yolo.md): FAIL.**
+
+| Fighter | Found | Swaps |
+|---|---|---|
+| Wu Shang | 145/148 | 0 |
+| Mordex | 126/142 | 1 |
+
+- Missed Mordex: far away, overlapped, or behind effects.
+- Spawn recall 0.915; thrown weapons 0/9.
+
+Position error by what the fighter holds (median / p95 px):
+
+| Held | Wu Shang | Mordex |
+|---|---|---|
+| Unarmed | 0.2 / 8.4 | 0.2 / 10.9 |
+| Gauntlets | 5.5 / 20.9 | 3.9 / 13.4 |
+| Spear / scythe | 17.8 / 26.1 | 16.9 / 22.0 |
+
+**Reading:** the old weapon-inclusive boxes move the position by about 17 px whenever a long weapon
+is held, as predicted.
+
+**Caveat:** the unarmed agreement is optimistic, because the labels started from this model's
+drafts. Where the draft was already right it was kept, so a model trained on these labels is not
+disadvantaged by the old convention.
+
+## 2026-11-10: First trained detectors on P1; the labels disagree with each other
+
+**Trained:** YOLO11s at 1280 px on Kaggle, from the pack. Two variants: identity classes, and the
+armed (nine-class) classes. Both FAIL P1:
+
+| | Identity variant | Armed variant |
+|---|---|---|
+| Fighters found (Wu Shang / Mordex) | 0.986 / 0.944 | 0.959 / 0.958 |
+| Centre error p95 | 20-24 px | 20-24 px |
+| Held-weapon accuracy | n/a | about 0.62 |
+| `weapon_spawn` precision | about 0.66 | about 0.66 |
+| `weapon_thrown` precision | about 0.14 | about 0.14 |
+
+**Audit:** crops of every disagreement between the armed model and the test labels.
+
+- **Held weapon:** 104 disagreements. The test fighters left at the draft class `*_unarmed` visibly
+  hold spears, gauntlets and scythes, so the model is right in the cases examined.
+- **Thrown weapons:** of 28 predictions without a label, the ones examined are real lying gauntlets
+  and flying spears that are missing from the labels.
+- **Spawn markers:** extra predictions on phantoms and on red swirl effects. These are real model
+  errors.
+
+**Boxes follow two conventions.**
+
+| Class | Train labels: median width | Test labels, corrected: median width |
+|---|---|---|
+| Spear | 139 px | 69 px |
+| Scythe | 106 px | 56 px |
+| Gauntlets | 76-80 px | 41-47 px |
+| Unarmed | about 75 px | about 75 px |
+
+- **Train labels include the held weapon.** The AI-assisted training labels did not follow rule 1.
+- **The test labels mix two conventions.** Corrected boxes are body-only, while uncorrected drafts
+  keep the old detector's weapon-inclusive box and the `unarmed` class.
+
+**Reading:** P1 cannot be measured until both sets follow one box convention, and the test set is
+complete (held classes, thrown weapons). The models already beat the labels on held weapons and
+thrown weapons.
+
+### Box rule revised: weapon included, position from a torso point (same day)
+
+**What failed:** body-only boxes cannot be drawn consistently. When a weapon covers the body (the
+human, relabelling), the visible body shrinks to the head and the box is a guess.
+
+**New rule:** each fighter label has three parts.
+
+| Part | Rule |
+|---|---|
+| Box | The whole fighter, including the held weapon |
+| Class | Identity + weapon |
+| Point | `torso`, the centre of the torso |
+
+- The detector becomes a one-keypoint pose model, so box, class and point come from one pass.
+- The weapon is inside the box, so the class is read from the box's own pixels.
+- The point gives the position and centres the crop.
+- The training labels' boxes already follow this rule. The fix is classes, points, and the test
+  set's body-only boxes.
+
+`scripts/to_keypoints.py` converts the detection export into a keypoint import, with points
+pre-placed at box centres. Rules: docs/labelling.md.
+
+## 2026-11-10: the keypoint export, and what the box centre costs
+
+Exported the Roboflow keypoint project (BrawlhallaRL v1, YOLOv8 keypoint) to
+<BRAWL_DATA>/labelling/export_kp: 396 train, 99 valid, 149 test frames, every box with one visible
+point, all points inside their boxes. The `offscreen` class has no label yet.
+
+- **Test:** boxes now include the weapon, as in train (spear median width 134 px test, 137 train).
+  The torso is far from the box centre only when the weapon sticks out: spear 17.7 px median
+  (p95 34), scythe 19.7 (p95 31); gauntlets 0.2-2.8 (p95 9-12); unarmed 0 (p95 2).
+- **Train/valid:** 21 of about 1,700 points moved; the rest sit at the box centre, wrong for spear and
+  scythe by the amount above. Those 289 points (train 224, valid 65) must be dragged before training.
+- **Old detector, rescored on torso points:** p95 26 px (Wu Shang), 22 px (Mordex); fails the 12 px
+  threshold. That is what a box centre costs as a position.
+- Code: Box carries the point (`position`), the reader reads pose labels, P1 error is torso to
+  torso, the trained detector returns its points, train_detector trains a one-keypoint pose model
+  and writes every non-fighter point at its box centre (29 test spawn points had drifted when
+  their boxes were resized).
+- Roboflow refused to train ("skeleton must have at least one keypoint"): the project's skeleton
+  definition, not the labels. Not needed: training is on Kaggle.
+
+## 2026-11-10: gate R1, the HUD reader and the ledger
+
+Built brawl/sense/hud.py and brawl/ledger.py and replayed all four recordings (139,242 frames)
+through them (scripts/gate_r1.py, results/gates/r1.md): pass.
+
+- **The HUD slots swap sides** when the lead changes (the higher score is on the left). The reader
+  identifies each portrait every frame on a patch under the face that the badges never cover, so
+  the earlier workaround (dying until the order could not change) is not needed.
+- **The number is a score:** -1 for a lost stock, +2 to the fighter credited, -3 for a
+  self-destruct (nobody credited). With that rule the red and cyan badges counted over each
+  recording reproduce its final score exactly, and the ledger's KOs equal the red badges
+  (Mordex / Wu Shang: 17/3, 6/10, 26/5, 6/1).
+- **Damage:** the earlier colour curve (white, yellow, orange, red, darker reds) holds: 10 single
+  hits read from the damage overlay match within 1.9, up to 185 damage.
+- **Found by the gate and fixed:** a badge dropping in tints both rings for 3-4 frames (12-30 from
+  the curve in RGB; clean rings are within 10): the tolerance is now 12 and those frames are
+  unreadable. A ring reset counts as a KO only from real damage (5 or more); below that the badge
+  reports it. Before the fixes the long Easy session showed 50 Mordex KOs for 26.
+- **Limit of the recordings:** JPEG wobbles the dark reds by up to 8 levels, 5 damage above 150
+  (stills vs JPEG: 90% within 2, 99% within 4.6). Lossless frames have one exact ring colour, so
+  live readings do not have it; totals computed from recordings run slightly high there.
+- Unreadable frames 0.5-1.0% (badge drop-ins, swaps, another window captured); skipped without
+  loss, since damage readings are absolute.
+
+## 2026-11-10: first pose detector on P1 (yolo11s-pose, 960 px, export v3)
+
+Kaggle, 101 epochs (best at 61). The 1280 px job died at start: both jobs built the same dataset
+folder (fixed: one folder per run). results/gates/p1_armed_yolo11s-pose_960.md: fail.
+
+- Found: Wu Shang 147/148, Mordex 134/142; no swaps.
+- **The torso point works but is not yet tight:** spear 7.3 px median to the labelled torso (18.2
+  to the box centre), scythe 7.7 (15.2); p95 16-19 px against 12. Gauntlets: the model predicts the
+  box centre, as the train labels say (p95 7-11 px to it), while the test points were moved.
+- **Held weapon 0.91 / 0.87.** 31 disagreements, viewed: most are model errors, unarmed against
+  gauntlets (17 of them Mordex), a fighter holding an item (bomb, mine), a spear just thrown inside the box;
+  two or three are doubtful labels.
+- **weapon_thrown precision 0.31:** 23 of the 24 unmatched detections are horns and mines lying on the
+  stage. The train labels box them as `weapon_thrown` (most of the 88); the test labels follow
+  rule 11 and do not. A label inconsistency, not a model fault.
+- weapon_spawn: recall 1.0; 9 unmatched (smoke, phantoms, an explosion, twice the red swirl).
+
+## 2026-11-11: export v5 (943 frames), audited
+
+Train 695 (Easy 396; Hard 100, Extreme 99, Chosen 100 from 2026-11-10), valid 99 (Easy only), test
+149 (unchanged). Every label has its point, inside its box; every image resolves to its still.
+
+- All 84 train/valid `weapon_thrown` boxes viewed: 13 are items (5 mines, 4 horn boxes on 3 horns,
+  2 spike balls, 1 red blob), all in the Hard and Chosen sessions, plus 3 doubtful boxes on a
+  held spear or the fighter. The Easy part and the Extreme session are clean. The same fault gave
+  thrown precision 0.31 on 2026-11-10, so they go before training.
+- Validation covered one session, and the best epoch is chosen on it: train_detector now gives
+  every session without validation frames every fifth of its own (train 636, valid 158).
+- Gauntlet torso points: moved on 121 of 497 train boxes (new sessions), still at the centre on
+  the Easy session's.
+
+## 2026-11-11: pose detector on export v6 (1280 and 960 px), P1
+
+Five frames with two boxes of one fighter fixed in the local export (3 train, 2 test; listed in
+export_kp_final/LOCAL_FIXES.txt, not yet in Roboflow). Kaggle, both runs on the same 636 / 158
+frames: 1280 px stopped at epoch 83 (best 43), 960 px ran 150 (best 135). The 2026-11-10 model is
+kept as runs/detector/armed_yolo11s-pose_960_v3labels.
+
+| Check (pass at) | 1280 px | 960 px |
+|---|---|---|
+| Found, Wu Shang / Mordex (0.98) | 1.000 / 0.958 | 0.993 / 0.951 |
+| Swaps, false fighter boxes (0.01) | 0 / 0 | 0 / 0 |
+| Torso error p95, px (12) | 16.9 / 15.1 (median 4.7 / 4.0) | 16.1 / 13.5 (median 5.0 / 3.5) |
+| Held weapon (0.95) | 0.953 / 0.949 | 0.939 / 0.926 |
+| weapon_spawn recall / precision (0.95) | 0.986 / 0.890 | 1.000 / 0.925 |
+| weapon_thrown recall / precision (0.80) | 0.867 / 0.722 | 0.800 / 0.750 |
+| Time per frame, PyTorch, RTX 3050 Ti | 33.4 ms | 20.7 ms |
+
+Both fail. Every failing item of the 1280 px run was viewed:
+
+- **Mordex missed, 6 frames:** 4 are hidden (behind a hit flash or behind Wu Shang, or tinted orange
+  while hit); 1 has a box at 0.15, under the 0.25 threshold; 1 is a label on the KO bubble at the
+  top of the screen (not a fighter by the 2026-11-10 offscreen decision).
+- **Torso error:** the three largest Wu Shang errors (31, 21, 21 px) are spear labels whose point
+  was left at the box centre; the model's point is on the torso. Six test spear points are still at
+  the centre, and 15 of 249 train spear and 25 of 159 train scythe points. In the other large
+  errors the two points are 15-25 px apart and neither is clearly wrong: the labels themselves
+  place the torso to within about 15 px in attack poses.
+- **Held weapon:** 15 disagreements, unarmed against gauntlets in 10. On the validation frames
+  (which include Hard, Extreme and Chosen) the 1280 px model reads 0.928 / 0.870: the test value sits
+  on the threshold and does not hold on harder sessions.
+- **weapon_spawn, 9 unmatched:** 3 second boxes when Mordex stands on a spawn, a thrown spear
+  lying across a spawn, smoke, a background bird (both under 0.4), and the red swirl (0.63). The
+  swirl is labelled as a spawn in test frame 17989 and not in 29235: the rule is undecided.
+- **weapon_thrown, 5 unmatched:** a spear flying at the right edge that has no label (the model is
+  right), a raised gauntlet, a spear leaving the hand, two under 0.35.
+- **Thresholds:** fighter boxes at 0.10 instead of 0.25 add no false fighter in 307 frames and
+  recover Mordex on validation (0.960 to 0.980) and test (0.958 to 0.965). Weapon boxes at 0.50:
+  spawn 0.946 / 0.972 and thrown 0.867 / 0.867 on test, spawn 0.937 / 0.963 and thrown 0.636 / 0.700
+  on validation (11 thrown labels there).
+
+## 2026-11-11: test labels corrected; the detector over consecutive frames
+
+**Test labels (5 frames, by hand on gridded crops; listed in export_kp_final/LOCAL_FIXES.txt, not
+yet in Roboflow):** the Mordex box on the KO bubble deleted (155225 row 4931); three spear points
+moved from the box centre to the torso (155225 rows 28278, 2223, 28755); the thrown spear at the
+right edge added (151844 row 20387). Rescored, both still fail: 1280 px found 1.000 / 0.965, torso
+p95 15.3 / 15.1, held 0.953 / 0.949, spawn 0.986 / 0.890, thrown 0.875 / 0.778; 960 px found
+0.993 / 0.958, torso p95 13.6 / 13.5, held 0.939 / 0.926, spawn 1.000 / 0.925, thrown 0.812 / 0.812.
+
+**More epochs will not help:** the 1280 px run stopped by itself 40 epochs after its best (43), and
+the 960 px run's best is at 135 of 150 with validation flat.
+
+**Consecutive frames (960 px model, 3,000 frames, rows 6000-8999 of the Hard session 155225,
+recording frames scaled up to 1920 x 1080):**
+
+- The JPEG frames stand in for lossless ones: on 60 rows that have both, the same fighters are
+  found (56 / 57 against 57 / 57), the class agrees on all but one each, and the torso points are
+  0.5-0.6 px apart at the median (p95 3-3.5).
+- Wu Shang is detected in 96.4% of frames, Mordex in 94.9%. The misses are short: Wu Shang 9 gaps
+  of 8 frames or fewer (19 frames) and one absence of 90; Mordex 29 gaps of 8 or fewer (64 frames),
+  two of 9-30 and one longer (88 frames together).
+- Carrying the last position and velocity for up to 8 frames, and accepting a box of 0.05-0.25
+  when it lies within 60 px of where the fighter should be, leaves Wu Shang without a position in
+  81 frames and Mordex in 61 (2.7% and 2.0%): the long absences, to be checked against KOs.
+- Held weapon changes 79 (Wu Shang) and 124 (Mordex) times frame to frame; 10 and 25 after a
+  5-of-7 vote. The true number is not labelled.
+- Between consecutive detections a fighter moves 4 px at the median and 52-62 px at p99; the
+  largest steps are 330 and 709 px, which no fighter makes in one frame: single wrong boxes that a
+  distance check against the carried position would reject.
+
+## 2026-11-11: TensorRT engine (960 px) and the tracker on P1
+
+**Engine.** scripts/export_detector.py builds runs/detector/armed_yolo11s-pose_960/weights/best.engine:
+half precision, fixed 544 x 960 input, TensorRT 10.13 (build 8 minutes). Installed without
+dependencies so that nothing existing changed: tensorrt_cu11 10.13.0.35 with its libs and bindings,
+nvidia-cuda-runtime-cu11 11.8.89, onnx 1.18.0 (onnx 1.17 has no build for Python 3.13 and fails to
+compile; a plain install would have raised sympy above torch's pin).
+
+- Time per frame on 80 test stills, RTX 3050 Ti: 11.3 ms median (p95 13.4, max 15.1) against 23.9
+  (p95 40.9, max 80.9) for the .pt. Of the 11 ms, the network is 4.3; preparing the image on the
+  CPU is 4.0 and the box filtering 1.8.
+- Same answers: on 151 fighters the class never differs and the torso points are 0.06 px apart at
+  the median (4.7 at most); P1 on single frames is unchanged (results/gates/p1_armed_yolo11s-pose_960_trt.md).
+
+**Tracker.** brawl/sense/track.py (constants set once from the 3,000-frame run above, not tuned on
+test scores). `gate_p1.py --track 30` lets it follow the 30 recording frames before each test
+frame, then scores its fighters on the test labels (results/gates/p1_armed_yolo11s-pose_960_trt_track30.md):
+
+| Check (pass at) | Single frames | Tracked |
+|---|---|---|
+| Found, Wu Shang / Mordex (0.98) | 0.993 / 0.958 | 1.000 / 0.986 |
+| Swaps, false Mordex (0.01) | 0 / 0 | 0.007 / 0.007 (one frame each) |
+| Torso error p95, px (12) | 13.6 / 13.6 | 13.6 / 15.3 |
+| Held weapon (0.95) | 0.939 / 0.926 | 0.959 / 0.950 |
+
+- Four fighters on test frames were carried without a box. Weapons are untouched by the tracker
+  (spawn precision 0.925 still fails).
+- The swap (151844 row 27707): Mordex is half transparent in a dodge; a 0.17 box around him was
+  taken and its point fell inside Wu Shang's box. The miss (151844 row 34067): the detector puts
+  Mordex at 0.93 on the hit effect while he is flying off to the left. The false Mordex is not
+  examined yet.
+- Mordex held weapon is exactly on the threshold (133 of 140): passing, not robust.
+
+## 2026-11-11: P1 passes with the tracker
+
+Three changes, then `gate_p1.py best.engine --track 30` passes every check
+(results/gates/p1_armed_yolo11s-pose_960_trt_track30.md):
+
+- **Torso threshold 20 px** instead of 12 (reviewed with the user): hand-placed points agree to about
+  15 px in attack poses. Measured p95 13.6 / 15.3.
+- **Spawn markers in the tracker:** one box per marker, reported when seen in 2 of the last 3 frames.
+  A first version also carried a marker for 3 frames without a box; 5 of its 10 false markers were
+  carried ones (the weapon just picked up, or expired in a puff of smoke), so nothing is carried.
+- **The red swirl is `weapon_spawn`:** 60 of the 470 train spawn boxes are the swirl, fireball or
+  falling flame before the marker, and the model reads the swirl at 0.94. Two test frames had it
+  unlabelled (155225 rows 25761, 29235): added. Spawn 0.974 / 0.974.
+
+Weapon score 0.25, 0.4 or 0.5, compared on the validation split (99 Easy frames) with the tracker:
+spawn recall 0.951 / 0.939 / 0.939 at precision 0.963, so 0.25 stays.
+
+**Known weak spots (same run, validation split):** Mordex held weapon 0.764 (Wu Shang 0.959);
+thrown weapons 0.40 / 0.67 on 5 labels. On the test frames Mordex held weapon is 0.950, exactly the
+threshold. The opponent's weapon is the least reliable feature in the observation.
+
+## 2026-11-11: action list and stage geometry
+
+- **brawl/actions.py:** MultiDiscrete([9, 6]) as a key plan per decision, mirroring, and recorded
+  keys read back as actions. On the 57 minutes of human play recorded so far (68,653 decisions at
+  k = 3): 53 of the 54 actions are used; 5.3% of the 7,002 button presses do not fit (a second
+  button inside one decision); the direction changes inside 14% of decisions (the one held longest
+  is kept); 34% of decisions are no keys at all.
+- **Charged heavies:** 29% of heavy presses are held 10 frames or more (median 7, p90 22); light
+  presses 9%. A button pressed for one frame cannot charge a signature. Open decision for A1.
+- **brawl/stage.py:** ledges at x 605 and 1305 (grass edge in the median of 40 stills; grounded
+  torsos span 635-1292), feet at y 617 (571 standing fighters), torso 35 px above.
+- Decision (user): the policy runs on the CPU, the detector on the GPU, as measured before with SB3.
+
+## 2026-11-11: the chain from a frame to a cloned policy
+
+Written and tested without the game (41 tests in the new modules):
+
+- **brawl/sense/perception.py:** one call per decision frame gives a `Sense` (tracked fighters,
+  weapons, damage, events). The environment and the demonstration reader both use it. Half-size
+  recording frames go to the detector as they are; boxes are scaled to 1920 x 1080.
+- **brawl/observation.py:** 99 entries, each named in `FEATURES`: 15 per fighter (position,
+  velocity, present, seen, held weapon, grounded/offstage/below, ledge distances, damage), the
+  opponent relative to the agent, the nearest spawn marker and thrown weapon, the last 4 actions.
+- **brawl/actions.py:** a button is now held for its whole decision and stays held while chosen
+  again (charged signatures); pressing it twice needs one decision in between.
+- **brawl/brawlenv.py:** the step function of DESIGN section 4 (named so because the legacy
+  `brawl/env/` folder still exists). Counts its calls for gate L1.
+- **scripts/prepare_demos.py:** a recording becomes decisions_k3.npz (observation, action, events
+  per decision). About 30 ms per decision, so an hour of play takes about 10 minutes.
+- **brawl/learn.py, scripts/train_bc.py:** behaviour cloning on winning stretches (a recording is
+  cut at each KO; stretches ending in Wu Shang's KO and the unfinished last one are dropped) into
+  SB3's actor-critic MLP. Whole stretches are held out. The report scores the decisions where the
+  human changes action apart, because the action history in the observation makes "repeat the
+  previous action" right most of the time.
+- **scripts/play.py:** a policy plays the live game (realtime or stepped) and reports stocks,
+  damage and the time per decision against k / 60 s.
+- **scripts/gate.py a1:** each of the 54 actions played twice from the same frame and compared
+  with doing nothing; plus charged against tapped heavy, and two jumps against one.
+
+Measured offline: the policy takes 0.4 ms per decision on one CPU core (p99 1.6 ms); the detector
+11 ms on the GPU. The first converted recording reproduces gate R1's count (17 KOs scored, 3 lost).
+
+**The tracker at one frame in three** (what the environment gives it at k = 3; `gate_p1.py --track
+10 --step 3`): found 1.000 / 0.972, 2 Mordex swaps (0.014), held 0.946 / 0.964, spawn 0.961 / 0.948.
+Four checks miss their threshold by one or two frames of 149; with every frame they pass. Not
+tuned on the test frames. If it matters in play, perceive every frame and decide every third.
+
+## 2026-11-11: dry run of behaviour cloning on the existing recordings
+
+Six recordings prepared (64,594 decisions, 54 minutes; the one with the damage overlay skipped),
+14 ms per decision. KOs per recording equal gate R1's. Winning stretches: 37,457 decisions (31
+minutes), of which 27,670 are from the two Easy sessions; against Hard, Extreme and Chosen the
+human won 15 stocks and lost 31, so little of that play is kept.
+
+`train_bc.py --name dryrun_all_levels` (results/bc/dryrun_all_levels.md), held-out stretches:
+
+| Measure | Held out |
+|---|---|
+| Loss | 1.037 (flat from about epoch 45) |
+| Both right, most likely action | 0.704 |
+| Baseline: repeat the previous action | 0.702 |
+| Both right when the human changes action | 0.155 |
+| New button presses predicted | 0.028 |
+
+The pipeline works end to end, and the result is what 31 minutes can give: the policy's most
+likely action is to keep doing what it was doing, and it does not yet predict when the human
+starts something new. Its sampled play has the human's rate of presses, not yet their timing.
+Whether it wins anything is for `scripts/play.py` to say. What should move these numbers: more
+winning play against one level (2-3 hours against Medium), and later what the opponent is doing
+(the fighter crops of DESIGN 5.3), which the vector does not carry.
+
+## 2026-11-11: first live runs (brawl312), and cloning recipes compared
+
+**Environment.** Everything runs in the venv C:\venvs\brawl312 (Python 3.12, torch 2.13 cu126,
+TensorRT 11.2). The engine built earlier with the system Python (TensorRT 10.13) did not load
+there; rebuilt in brawl312 (P1 with the tracker passes; 14.3 ms per frame offline).
+
+**Live play, realtime, 5 minutes each (results/play/):**
+
+| Policy | Bot | Stocks taken - lost | Damage dealt / taken |
+|---|---|---|---|
+| dryrun_all_levels (31 min of winning play, all levels) | Easy | 4 - 3 | 524 / 408 |
+| medium_v1 (9.7 min of winning play against Medium) | Medium | 1 - 4 | 346 / 591 |
+| the human, for scale (session 20261111_183313, 11.4 min) | Medium | 17 - 4 | 3,219 / 703 |
+
+- Gate L1 holds in the game: advance, grab, perceive and build each ran once per step (6,004 steps,
+  plus one at reset).
+- Gate D1 holds: perception + policy 25-27 ms median, 33-34 ms p95, of 50 ms; 0.12-0.13% of
+  decisions over; the policy itself 1 ms on the CPU. A third of the frames have their keys set
+  late: that is the 26 ms, so an action starts one to two frames after the frame it answers.
+- Fighters present 97-99% of decisions.
+
+**Gate A1, first run: FAIL as written, mostly the gate's fault.** Its "does something" threshold
+(5.7% of a 560 x 440 window) was above what a move changes (1-3%). By the strips and the torso
+path the moves work: walking 16-22 px, jump 112 px up, dash 176 px, lights, the tapped heavy, the
+dodge; a heavy held for 6 decisions is still charging where the tapped one has struck. Open: a
+second jump one decision after the first added no height; walking differed by 7-10 px between two
+plays (the bot stood on Wu Shang at the start). The gate now compares a 300 x 300 window and the
+torso path, allows the detector's 12 px, and tests the second jump at two delays over 12 decisions.
+To be run again.
+
+**Cloning recipes, held-out stretches, 3 seeds each (all winning play, 49,046 decisions, unless said):**
+
+| Recipe | Loss when the human changes action | Loss | Changed right | New presses |
+|---|---|---|---|---|
+| Winning stretches, action history (current) | 2.56 +- 0.04 | 1.04 | 0.168 | 0.108 |
+| No action history | 2.81 +- 0.05 | 2.15 | 0.222 | 0.110 |
+| All stretches (64,594 decisions) | 2.46 +- 0.04 | 1.05 | 0.177 | 0.069 |
+| No history, 4 stacked observations | 2.80 +- 0.06 | 2.12 | 0.232 | 0.126 |
+| History, 4 stacked observations | 2.53 +- 0.07 | 1.03 | 0.169 | 0.114 |
+| Network 512 x 512 x 512 | 2.53 +- 0.04 | 1.03 | 0.176 | 0.126 |
+
+(Choosing among the 54 actions at random gives 3.99.) No recipe is clearly better than the
+current one: stacking and a bigger network are within noise, dropping the action history loses,
+and the only gain is from more decisions (all stretches), which is the lever more recordings pull
+without copying lost stocks. The recipe stays; what is missing is data and what the opponent is
+doing.
+
+## 2026-11-11: one hour against Medium; the learning curve; vision probes set up
+
+**Recordings.** Six Medium sessions, 69.7 minutes (83,626 decisions): stocks 106 won, 23 lost;
+damage dealt 19,389, taken 4,517. Winning stretches: 72,806 decisions (60.7 minutes). Recordings
+take about 18 GB an hour (3.9 GB of half-size JPEG frames and 0.7 GB of lossless stills per 15
+minutes); 14 GB are free, so another hour does not fit as recorded today. The stills are kept for
+future labelling (decision of the user).
+
+**Learning curve** (winning stretches, 3 held-out splits of whole stretches):
+
+| Minutes of winning play | Held-out loss | Loss when the human changes action | Changes right | New presses |
+|---|---|---|---|---|
+| 5.9 | 1.163 ± 0.020 | 2.657 ± 0.019 | 0.131 | 0.039 |
+| 11.7 | 1.093 ± 0.026 | 2.544 ± 0.036 | 0.155 | 0.063 |
+| 21.6 | 1.038 ± 0.027 | 2.441 ± 0.047 | 0.175 | 0.083 |
+| 31.7 | 1.008 ± 0.021 | 2.358 ± 0.027 | 0.195 | 0.110 |
+| 42.9 | 0.994 ± 0.019 | 2.326 ± 0.015 | 0.195 | 0.123 |
+
+Each doubling lowers the loss when the human changes action by about 0.11; the share of changes
+predicted right has stopped rising between 32 and 43 minutes. More of the same data helps slowly;
+the user's own observation (2026-11-11): from positions alone it is hard to defend or to see
+Mordex's next move coming. That is the question for the vision probes.
+
+**medium_v2** (all 60.7 minutes, results/bc/medium_v2.md): held out, changes right 0.194 (medium_v1
+0.170), new presses 0.133 (0.114), loss 0.989. Not yet played in the game.
+
+**Vision probes set up (gate S2).** brawl/vision.py cuts a 256 x 256 screen-pixel window around a
+torso point, grey, at 96 px; the same function serves recorded and live frames.
+scripts/prepare_crops.py cuts both fighters, at each decision's frame and the frame before
+(1.5 GB per hour, memory-mapped: the laptop has 8 GB of RAM). scripts/probe_vision.py trains the
+same network on each candidate input and scores, on held-out sessions: hit within 0.5 s, Mordex's
+position 0.25 and 0.5 s ahead against constant velocity, and the human's action where it changes.
+Candidates: vector alone; Mordex 1 frame; both 1 frame; both 2 frames 1/60 s apart; both 4
+decisions (0.2 s); the same at 64 px; crops alone.
+
+## 2026-11-11: vision probes (gate S2, first round)
+
+`scripts/probe_vision.py --epochs 15`, six Medium sessions held out two at a time (3 folds, one
+seed each), results/probes/vision.md. Crops on the GPU (1.6 GB) for the decision-frame
+candidates; the two-frame candidate (3.1 GB) read from disk, since Windows spills GPU memory
+beyond 4 GB into RAM. About 50 minutes in all.
+
+Difference from the vector alone on the same held-out sessions (mean, then folds 0 / 1 / 2;
+negative is better except for AUC):
+
+| Input | Hit within 0.5 s: AUC | Hit log loss (x1000) | Mordex in 0.25 s (px) | Mordex in 0.5 s (px) | Action NLL when the human changes |
+|---|---|---|---|---|---|
+| Mordex, 1 frame | +0.006 (+0.018, +0.003, -0.003) | +0.0 | -6.6 (-5.8, -7.2, -6.8) | -6.9 (-5.1, -7.8, -7.7) | +0.039 (+0.029, +0.031, +0.057) |
+| both, 1 frame | +0.030 (+0.041, +0.033, +0.016) | -1.9 | -7.6 (-8.0, -7.7, -7.0) | -8.5 (-8.6, -8.4, -8.4) | +0.013 (+0.019, +0.016, +0.004) |
+| both, 2 frames 1/60 s apart | +0.030 (+0.030, +0.036, +0.025) | -2.4 | -9.0 (-8.6, -8.2, -10.1) | -10.3 (-9.8, -9.0, -12.1) | -0.013 (+0.014, -0.018, -0.035) |
+| both, 4 decisions (0.2 s) | +0.018 (+0.028, +0.015, +0.011) | -0.3 | -9.0 (-9.3, -7.4, -10.2) | -9.5 (-10.3, -7.5, -10.9) | -0.021 (-0.004, -0.002, -0.058) |
+| both, 4 decisions, 64 px | +0.003 (+0.015, +0.005, -0.011) | +0.5 | -6.6 (-7.8, -5.3, -6.7) | -6.7 (-8.2, -4.6, -7.3) | +0.025 (+0.035, +0.007, +0.033) |
+| crops only, both, 4 decisions | +0.025 (+0.033, +0.022, +0.021) | -2.4 | +14.1 | +45.2 | +0.216 |
+
+The vector alone: hit AUC 0.671, log loss 0.1962 (always saying the 5.0% rate: 0.1978); Mordex
+missed by 81 px at 0.25 s and 140 px at 0.5 s (constant velocity: 117 and 246); action NLL when
+the human changes 2.615.
+
+- **Pictures carry what the vector lacks, in every fold:** Mordex's position 0.25-0.5 s ahead is
+  7-10 px (6-9%) closer, and whether Wu Shang is about to be hit is better ranked (AUC +0.02 to
+  +0.03), with both fighters in view. Seeing Mordex alone helps the position but not the hit:
+  Wu Shang's own state matters for defence.
+- **They do not yet help imitation:** the action at the human's changes is within the spread
+  (-0.06 to +0.06) for every crop input. With an hour of play the network does not learn the
+  human's reactions from pictures; the gain shows where the target is the game, not the human.
+- **Time:** two frames 1/60 s apart and four decisions are within noise of one frame on the hit,
+  and 1-2 px better on the position. 64 px loses most of the gain: 96 stays.
+- **Crops alone** rank hits as well as the hybrid but lose 45 px on the position and 0.22 on the
+  actions: the vector stays.
+- Every candidate used all 15 epochs (none stopped early): all are undertrained, the vector too.
+- Absolute level: an AUC of 0.70 means being hit is still mostly unpredictable half a second ahead
+  from these inputs.
+
+**Decision (proposed):** the policy's input is the vector plus both fighters' crops, one frame,
+96 px (1.1 ms on the CPU). The probe heads (hit within 0.5 s, Mordex's motion) become the image
+branch's auxiliary loss (DESIGN 5.3), since that is where pictures help. Recordings keep only the
+decision frames from now on (`record_demos.py --frame-every 3`, the new default): about 6 GB an
+hour instead of 18. The frame-pair input is then unavailable for new recordings; it was within
+noise of one frame.
+
+## 2026-11-11: an outside critique of the observation design, checked; the memory probe
+
+The user had another model review DESIGN section 5. Its claims, checked against the data:
+
+- **Right, and measured here: memory.** Four stacked decisions span 9 frames (0.15 s), not 12 (DESIGN
+  corrected), and neither they nor the last 4 actions cover a dodge cooldown (60 frames on the
+  ground by patch 2.71; a community guide gives 163 in the air, unconfirmed) or the jumps used.
+  `scripts/probe_memory.py` (results/probes/memory.md), vector only, 3 folds x 2 seeds, trained
+  until early stopping; difference from the vector in the same fold and seed:
+
+  | Input | Hit within 0.5 s: AUC | Mordex in 0.5 s (px) | Action NLL when the human changes |
+  |---|---|---|---|
+  | vector | 0.712 | 133.5 | 2.426 |
+  | + 13 timers | +0.024 ± 0.014 (all 6 runs up) | -1.4 ± 0.9 | -0.033 ± 0.032 |
+  | GRU over the session | -0.005 ± 0.014 | -1.6 ± 0.9 | -0.072 ± 0.046 |
+  | timers + GRU | +0.013 ± 0.020 | -2.8 ± 0.9 | -0.113 ± 0.040 |
+
+  Timers (decisions since each own button press, since ground, hit and respawn for both fighters,
+  jumps since the ground) help the hit prediction; the recurrent layer helps the imitation; together
+  they give the largest imitation gain measured so far, larger than any crop input gave.
+- **Correction to the vision probe above.** Its `vector` baseline stopped at 15 epochs: AUC 0.671,
+  140.2 px, 2.615. Trained until early stopping here, the vector alone reaches 0.712, 133.5 px and
+  2.426: as good as vector + crops did at 15 epochs (0.701, 131.7 px, 2.628). So that run shows the
+  hybrid learning faster, not yet knowing more. Whether crops add to a converged vector is open; the
+  probe must be rerun until early stopping, with the timers in the vector.
+- **Right in principle, already true in the data:** the camera must be the Fixed mode (Classic and
+  Action pan and zoom). In all recordings the stage is in one place (571 standing fighters with feet
+  at y 613-621, the grass edge in the median of 40 stills), but nothing checks it at start.
+- **Already how the code works:** a missed fighter is not called offstage: `present` and `seen` are
+  entries of the vector, and the position is the last one seen (the sentence in DESIGN 5.2 is older
+  than brawl/sense/track.py). Random shifts are the same for every picture of a stack.
+- **Already gated:** the HUD ring as damage (R1: 10 overlay hits within 1.9, KOs exact).
+- **Checked on the labels:** the 256 px window around the torso holds the fighter and its weapon in
+  1,797 of 1,800 labelled boxes (farthest reach 126 px sideways, 144 px up with the spear; 3 boxes
+  exceed 128). Labels do not include swing trails.
+- **Right about the wording, not about what was built:** DESIGN 5.3 words the auxiliary labels as
+  "a hitbox appeared", which needs overlays. The probe targets used are free without them: damage
+  taken (HUD) and Mordex's displacement (tracker).
+- **Not adopted now:** supervised combat-phase labels (startup, active, recovery). They need the
+  overlays; the route exists only in stepped mode (replay the same keys with overlays on), and the
+  free targets have not been shown to fail.
+- **Noted for later:** a strong hit can disarm (the wiki has a Disarming article), so armed to
+  unarmed does not prove a throw; the thrown-weapon owner tracking, when built, needs the projectile.
+
+## 2026-11-11: timers in the observation; the probes made ready for a long run
+
+**Timers (decision of the user).** brawl/observation.py: 13 entries after the 99 (112 in all), kept
+by one `Timers` class that the builder updates each decision. Files prepared earlier got them added
+in place (`prepare_demos.py`, no detector). Check on session 20261111_201232, prepared again from
+its frames: the 99 older entries are identical to the stored ones in all 9,090 decisions (the
+detector, tracker and HUD reader are repeatable), and the timers added in place equal the ones
+built live. Policies cloned before (99 entries) no longer fit the environment.
+
+**medium_v3** (winning Medium play, with timers; results/bc/medium_v3.md), held out against
+medium_v2: loss 0.976 (0.989), changes right 0.208 (0.194), new presses 0.145 (0.133). One seed.
+
+**Camera:** Fixed mode, confirmed by the user for every recording; written into the recorder's
+instructions and each new recording's meta.
+
+**Probes rebuilt for the long run** (scripts/probe_vision.py; scripts/probe_memory.py is removed, its
+arms are now `vector, no timers`, `vector`, `vector, GRU` here). One loop for every input: windows of
+128 decisions, 8 per batch, trained until the last 12% of the training sessions stops improving
+(12 epochs without gain), 2 seeds per fold, runs recorded as they finish. Inputs: the three vector
+arms; both crops 1 frame; both crops 4 decisions; both crops 1 frame with the GRU. Dropped after
+round 1: Mordex alone, 64 px, crops without the vector, and the frame pair (new recordings keep the
+decision frames only). Crops are now one frame per decision (0.8 GB per hour).
+scripts/pack_probes.py packs the code with each session's decisions and crops (1.5 GB for the six
+sessions) and prints the Kaggle cell. Round 1 is kept as results/probes/vision_round1.md.
+
+Disk: Windows' page file grew to 19.7 GB under memory pressure (8 GB of RAM); 9.8 GB free.
+
+## 2026-11-12: the long probe run bounded in time; a pair-region crop discussed
+
+- Medium recordings: 9 sessions, 110 minutes (three new ones with decision frames only).
+- scripts/probe_vision.py: `--hours` stops cleanly (no new run in the last 5 minutes; a run in
+  progress keeps its best epoch and is marked), `--part i/n` shares the vector runs and the picture
+  runs evenly between processes, and runs go seed by seed so that a stop leaves every input with
+  the same runs. The Kaggle cell gives each GPU 9.5 h and kills at 10.25 h (Kaggle ends at 12 h).
+- Idea of the user, not built: one crop of the smallest region holding both fighters. Measured on
+  the 116,631 prepared Medium decisions: the opponent is already inside the agent's 256 px window
+  in 43% of decisions with both present, and in 70% of those followed by a hit within 0.5 s. The
+  smallest square holding both (80 px margin) has a side of 210 / 311 / 584 / 969 px at the 10th /
+  50th / 90th / 99th percentile; at 96 px a fighter is then 34 / 23 / 12 / 7 px tall (28 in the
+  fixed crop). The pair is more than 3 times wider than tall in 23% of decisions.
+
+## 2026-11-12: medium_v4; the noise-floor tool
+
+- **medium_v2 played Medium** (2026-11-11, 5 minutes, 99 entries, 61 minutes of winning play): stocks 3 - 2,
+  damage 558 / 552 (medium_v1, from 10 minutes: 1 - 4, 346 / 591). One block each: no noise floor yet.
+- **medium_v4:** cloned from all 9 Medium sessions with timers (166 stocks won, 36 lost; 113,889
+  decisions kept, 95 of 110 minutes). Held out: loss 0.898, changes right 0.224, new presses
+  0.112 (results/bc/medium_v4.md). Not comparable with medium_v3's held-out numbers: other stretches.
+- **scripts/play.py --blocks n:** n blocks of `--minutes` played without stopping, each reported, with
+  the spread between blocks, the standard error, and the difference in reward per minute that two
+  policies need to differ beyond chance; virtual matches (first to 3 stocks) over the run; a JSON
+  record in runs/play/. The loop is tested against a scripted environment, not yet in the game.

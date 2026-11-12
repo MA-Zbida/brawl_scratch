@@ -124,23 +124,31 @@ Every entry must pass its accuracy gate (P1, R1). "True" means measured and vali
 
 | Feature, per fighter (agent and opponent) | Sensor |
 |---|---|
-| Position (body box centre) and velocity over the decision period | Detector |
-| Grounded, airborne, offstage; signed distance to each ledge and blast zone | Position + fixed stage geometry |
+| Position (the torso point) and velocity over the decision period | Detector (pose: box, class and torso point) |
+| On screen, beyond the edge, or not present (KO'd) | Detector + ledger: not detected and no stock lost = beyond the edge (position held at the last one seen); the edge bubble is not read |
+| Held weapon: unarmed or which of the legend's two (one-hot) | Detector class (the box includes the weapon); a crop classifier is the fallback |
+| Grounded, airborne, offstage; signed distance to each ledge and blast zone | Position + fixed stage geometry (the camera does not move) |
 | Damage (0-1), stocks | HUD ring colour and digit |
 
-Plus: the nearest free weapon (on the ground or thrown: relative position, present or not); the
-last `H = 4` actions (jumps left and dodge cooldown are not observable, so the action history
-stands in for them). Facing, the held weapon and attack or stun states are not structured
-features: the fighter crops show them (5.3). The detector's classes and the labels that measure
-it are fixed in [../docs/labelling.md](../docs/labelling.md).
+Plus the weapons not held: the nearest spawn marker (relative position, present or not); the
+agent's own thrown weapon (relative position, present; only the thrower can pick it up); the
+opponent's thrown weapon (relative position and velocity, present; a projectile). The owner of a
+thrown weapon is tracked, not detected: it appears next to the fighter whose class turns from
+armed to unarmed, and keeps that owner while followed frame to frame (the agent's throws in the
+key log check it). Also the last `H = 4` actions (jumps left and dodge cooldown are not
+observable, so the action history stands in for them). Facing and attack or stun states are not
+structured features: the fighter crops show them (5.3). The detector's classes and the labels
+that measure it are fixed in [../docs/labelling.md](../docs/labelling.md).
 Positions are relative to the stage centre; mirroring is an ablation, off by default.
 
 ### 5.3 Fighter vision (the missing action state)
 
-- **Crops:** a window of about 160 x 160 screen pixels centred on each fighter (from the
-  structured position), downscaled to 64 x 64 grey; the exact size is fixed from the labelled frames; one context view of the whole screen at 96 x 54 for items and
-  weapons on the ground.
-- **Stack:** the last 4 decisions (at `k = 3`, 12 game frames, 0.2 s), the window over which
+- **Crops:** a window of 256 x 256 screen pixels centred on each fighter's torso point (the
+  structured position), so the held weapon and its swing are inside (fighter plus weapon never
+  exceeded 151 x 174 px in the old dataset); downscaled to 64 x 64 or 96 x 96 grey, chosen by the
+  benchmark (5.4). One context view of the whole screen at 96 x 54 for what the detector does not
+  report (items).
+- **Stack:** the last 4 decisions (at `k = 3`, they span 9 game frames, 0.15 s), the window over which
   move startups and jump squats show.
 - **Encoder:** a small CNN shared by both fighter crops (Nature-DQN size), trained from scratch with
   random-shift augmentation.

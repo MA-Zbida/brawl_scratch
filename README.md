@@ -36,6 +36,14 @@ python -m pip install -e .
 python -m pytest            # about 935 tests, 2 minutes; no game needed
 ```
 
+The detector's TensorRT engine also needs the `tensorrt` (CUDA 12 build) and `onnx` packages. An
+engine only loads in the TensorRT version that built it, so build it in the environment that will
+run it, and again after TensorRT or the GPU driver changes:
+
+```powershell
+python scripts/export_detector.py runs/detector/armed_yolo11s-pose_960/weights/best.pt
+```
+
 ## Quickstart
 
 ```powershell

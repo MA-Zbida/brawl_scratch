@@ -1,0 +1,17 @@
+name: s1_ppo
+description: >
+  Stage 1 (research/HYPOTHESIS.md, H1 and H2): standard PPO against the Medium bot, from a new
+  network and from the cloned policy, in real time and in the oracle (frame-stepped, the game
+  waits). One hour of game time per run.
+base: ../base.yaml
+seeds: [0, 1, 2, 3, 4]
+overrides:
+  env: {difficulty: medium}
+grid:
+  - name: regime
+    key: env.regime
+    levels: {realtime: realtime, oracle: stepped}
+  - name: start
+    key: train.init
+    levels: {scratch: null, bc: runs/bc/medium_v4/policy.zip}
+compare: {factor: start, baseline: scratch, treatment: bc}

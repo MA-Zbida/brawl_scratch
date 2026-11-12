@@ -1,0 +1,5 @@
+name: smoke
+description: Five minutes of PPO from the cloned policy, to check that the loop runs in the game.
+base: ../base.yaml
+overrides:
+  train: {init: runs/bc/medium_v4/policy.zip, total_steps: 6000, checkpoint_every: 2}

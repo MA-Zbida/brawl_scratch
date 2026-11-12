@@ -1,0 +1,26 @@
+# Defaults for every run (research/DESIGN.md). An experiment file overrides them; a key that is not
+# here is rejected (brawl/config.py).
+env:
+  regime: realtime      # realtime (the target setting) | stepped (the oracle: the game waits)
+  k: 3                  # game frames per decision
+  difficulty: medium    # the bot's level; set by hand in the game, recorded with the run
+  damage_weight: 0.01   # reward = damage_weight * (dealt - taken) + ko_weight * (stocks taken - lost)
+  ko_weight: 1.0
+  detector: runs/detector/armed_yolo11s-pose_960/weights/best.engine
+train:
+  learner: ppo
+  init: null            # policy.zip of a cloned policy (scripts/train_bc.py), or null for a new network
+  total_steps: 72000    # decisions: one hour of game time at k = 3
+  n_steps: 1200         # decisions per rollout: one minute
+  batch_size: 300
+  n_epochs: 5
+  learning_rate: 3.0e-4
+  gamma: 0.995          # half-life of about 7 s of game time
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  net: [256, 256]       # the same network as behaviour cloning
+  checkpoint_every: 10  # rollouts
+  seed: 0

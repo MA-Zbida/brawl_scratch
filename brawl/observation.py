@@ -61,6 +61,11 @@ class Timers:
             self.jumps += actions.BUTTON_NAMES[button] == "jump"
         self.button = button
 
+    def idle(self, decisions: int) -> None:
+        """``decisions`` passed with no key held and nothing observed."""
+        self.since = {name: min(CLIP, value + decisions) for name, value in self.since.items()}
+        self.button = 0
+
     def update(self, grounded, present, opponent_vy: float, hit) -> list[float]:
         """One decision later. ``grounded``, ``present``, ``hit`` are (agent, opponent); ``hit``:
         took damage during the decision that just ended."""
@@ -111,6 +116,11 @@ class Observation:
         """Tell the builder which action followed the last observation."""
         self.history = (self.history + [(int(action[0]), int(action[1]))])[-HISTORY:]
         self.timers.acted(action)
+
+    def idle(self, decisions: int) -> None:
+        """``decisions`` passed without the agent acting or observing (a stall in real time)."""
+        self.history = (self.history + [(0, 0)] * min(decisions, HISTORY))[-HISTORY:]
+        self.timers.idle(decisions)
 
     def _fighter(self, sense: Sense, who: str) -> list[float]:
         f = sense.fighters.get(who)

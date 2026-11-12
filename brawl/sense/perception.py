@@ -42,6 +42,11 @@ class Perception:
         """Forget everything (a new session, or a jump in time the state cannot follow)."""
         self.tracker, self.ledger = Tracker(self.step), Ledger()
 
+    def lost_track(self) -> None:
+        """The fighters were not followed for a while (a stall): start following them afresh. The
+        ledger keeps its readings, so damage and KOs during the gap are still counted, once."""
+        self.tracker = Tracker(self.step)
+
     def __call__(self, frame: np.ndarray, index: int) -> Sense:
         """``index``: the game frame number, for the ledger's one-KO-per-fighter window."""
         reading = hud.read(frame)

@@ -4,6 +4,10 @@ Each step: the action becomes keys for ``k`` game frames, the clock plays them, 
 captured and perceived once, and that one Sense gives the observation and the reward. The task
 continues without end: ``terminated`` is never true, and ``truncated`` only marks the end of a
 window so that learners keep bootstrapping.
+
+In real time the game does not wait for a learner's update. ``idle`` releases the keys before it,
+and ``resume`` afterwards re-reads the game: the frames that passed are counted, the fighters are
+followed afresh, and what happened meanwhile is returned apart, not as the reward of any action.
 """
 from __future__ import annotations
 
@@ -22,7 +26,7 @@ class BrawlEnv(gym.Env):
                  ko_weight: float = 1.0, now=time.perf_counter) -> None:
         """``clock``: brawl.game.clock (stepped or realtime), already started. ``screen``:
         brawl.game.capture.Screen. ``perception``: brawl.sense.perception.Perception built with
-        the same ``k``. ``window``: decisions per window (1,200 is one minute at k = 3)."""
+        the same ``k``. ``window``: decisions per window (1,200 is one minute at k = 3; 0: no windows)."""
         self.clock, self.screen, self.perception, self.k, self.window = clock, screen, perception, k, window
         self.weights, self.now = (damage_weight, ko_weight), now
         self.builder = observation.Observation()
@@ -63,7 +67,22 @@ class BrawlEnv(gym.Env):
         self.steps += 1
         e = sense.events
         info = {"events": e, "sense": sense, "timing": timing, "sense_s": sense_s, "frame": self.clock.frame}
-        return obs, reward_of(e, *self.weights), False, self.steps % self.window == 0, info
+        return obs, reward_of(e, *self.weights), False, bool(self.window) and self.steps % self.window == 0, info
+
+    def idle(self) -> None:
+        """Release every key: the fighter stands while nothing decides for it."""
+        keys = getattr(self.clock, "keys", None)
+        if keys is not None:
+            keys.release_all()
+
+    def resume(self):
+        """After a stall: (observation now, the events during the stall, game frames that passed)."""
+        resync = getattr(self.clock, "resync", None)
+        skipped = resync() if resync is not None else 0
+        self.perception.lost_track()
+        self.builder.idle(skipped // self.k)
+        obs, sense, _ = self._observe()
+        return obs, sense.events, skipped
 
     def close(self) -> None:
         self.clock.stop()

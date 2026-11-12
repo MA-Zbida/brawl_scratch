@@ -92,6 +92,20 @@ class Keys:
         self.hold(())
 
 
+def focused_window() -> str:
+    """Title of the window that receives the keys (Windows)."""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        handle = user32.GetForegroundWindow()
+        buffer = ctypes.create_unicode_buffer(user32.GetWindowTextLengthW(handle) + 1)
+        user32.GetWindowTextW(handle, buffer, len(buffer))
+        return buffer.value or "(untitled)"
+    except Exception as exc:  # noqa: BLE001 - diagnostic only
+        return f"(unknown: {exc})"
+
+
 # -- the bitmask used in recordings --------------------------------------------------------
 KEY_ORDER: tuple[str, ...] = tuple(sorted(FIGHT_KEYS))  # bit i of a key mask is KEY_ORDER[i]
 

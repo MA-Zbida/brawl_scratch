@@ -247,6 +247,15 @@ class RealtimeClock:
                 self.sleep(remaining)
         return Timing(frames=len(plan), wall_s=self.now() - t0, late_frames=late)
 
+    def resync(self) -> int:
+        """After a stall (a learner's update, a lost window): the game went on. Count the frames
+        that passed and continue the schedule from now. Returns how many were skipped."""
+        if self._origin is None:
+            raise RuntimeError("call start() first")
+        skipped = max(0, int((self.now() - self._origin) * FPS) - self.frame)
+        self.frame += skipped
+        return skipped
+
     def rewind(self, frames: int) -> Timing:
         raise RuntimeError("rewind is only available in the stepped regime")
 

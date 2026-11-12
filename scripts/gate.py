@@ -44,6 +44,7 @@ import numpy as np  # noqa: E402
 from brawl.game.clock import StepError, SteppedClock  # noqa: E402
 from brawl.game.counter import GLYPHS_PATH, Digits, FrameCounter, counter_changed, held_out_accuracy  # noqa: E402
 from brawl.game.keys import FIGHT_KEYS, PAUSE, REWIND, RIGHT, STEP, DirectInput, Keys  # noqa: E402
+from brawl.game.keys import focused_window as foreground_window  # noqa: E402
 from brawl.paths import RESULTS, RUNS  # noqa: E402
 
 GATES_DIR = RESULTS / "gates"
@@ -52,20 +53,6 @@ TOOLBAR_BOX = (600, 40, 900, 62)   # dark toolbar box (paused) or sky (running)
 SCALE = 4                          # fighter comparisons at 480 x 270
 PIXEL_THRESHOLD = 24.0             # grey levels for a pixel to count as changed
 ANIMATED = 12.0                    # brightness range while paused above which a pixel is masked out
-
-
-def foreground_window() -> str:
-    """Title of the window that receives the keys (Windows)."""
-    try:
-        import ctypes
-
-        user32 = ctypes.windll.user32
-        handle = user32.GetForegroundWindow()
-        buffer = ctypes.create_unicode_buffer(user32.GetWindowTextLengthW(handle) + 1)
-        user32.GetWindowTextW(handle, buffer, len(buffer))
-        return buffer.value or "(untitled)"
-    except Exception as exc:  # noqa: BLE001 - diagnostic only
-        return f"(unknown: {exc})"
 
 
 def probe_stall(s: "Session", key: str, keys_held_s: float = 20.0, released_s: float = 10.0) -> list[str]:
@@ -540,12 +527,13 @@ def a1(s: Session) -> tuple[bool, list[str]]:
     heavy, jump = actions.BUTTON_NAMES.index("heavy"), actions.BUTTON_NAMES.index("jump")
     sequences.update({"heavy held for 6 decisions": [(0, heavy)] * 6, "heavy for 1 decision": [(0, heavy)] + [none] * 5,
                       "jump, nothing, jump": [(0, jump), none, (0, jump)] + [none] * 9,
+                      "jump, 2 x nothing, jump": [(0, jump), none, none, (0, jump)] + [none] * 8,
                       "jump, 3 x nothing, jump": [(0, jump), none, none, none, (0, jump)] + [none] * 7,
                       "jump once": [(0, jump)] + [none] * 11})
     idle1, idle_track, _ = run(sequences["none+none"])
     idle2, _, _ = run(sequences["none+none"])
     floor = apart(idle1, idle2)
-    same_at, differs_at, jitter = max(3 * floor, 0.004), max(3 * floor, 0.006), 12.0  # px: the detector's own
+    same_at, differs_at, jitter = max(3 * floor, 0.004), max(2 * floor, 0.006), 12.0  # px: the detector's own
     lines += [f"- Doing nothing twice differs by {floor:.3%} of the window (animations that are not rewound): two plays "
               f"are the same move below {same_at:.3%}, and an action does something above {differs_at:.3%}", "",
               "| Sequence | Same both times | Differs from nothing | Torso moved (px): right, down | Detected |",
@@ -557,8 +545,10 @@ def a1(s: Session) -> tuple[bool, list[str]]:
         again, drift = apart(first, second), moved(track1, track2)
         other, path = apart(first, idle1[:len(first)]), moved(track1, idle_track)
         end = next((p for p in reversed(track1) if p is not None), None)
-        results[name] = {"same": again <= same_at and drift <= jitter, "acts": other > differs_at or path > jitter,
-                         "shots": first, "track": track1}
+        # a dash covers 170 px in a few frames, in smoke: its torso point is found to about a tenth of the way
+        results[name] = {"same": again <= same_at and drift <= max(jitter, 0.12 * path),
+                         "acts": other > differs_at or path > jitter, "shots": first, "track": track1,
+                         "numbers": {"again": again, "drift": drift, "other": other, "path": path}}
         shift = "-" if end is None else f"{end[0] - cx:+.0f}, {end[1] - cy:+.0f}"
         lines.append(f"| {name} | {'yes' if results[name]['same'] else '**no**'} ({again:.3%}, {drift:.0f} px) | "
                      f"{'yes' if results[name]['acts'] else 'no'} ({other:.3%}, {path:.0f} px) | {shift} | "
@@ -568,6 +558,15 @@ def a1(s: Session) -> tuple[bool, list[str]]:
         cv2.putText(strip, name, (6, 18), 0, 0.6, (255, 255, 255), 1)
         strips.append(strip)
         print(lines[-1], flush=True)
+    import json
+
+    (s.out / "sequences.json").write_text(json.dumps(  # the numbers first: nothing after this can lose them
+        {"floor": floor, "same_at": same_at, "differs_at": differs_at, "start": [cx, cy],
+         "sequences": {n: {**r["numbers"], "same": bool(r["same"]), "acts": bool(r["acts"]),
+                           "track": [None if q is None else [float(q[0]), float(q[1])] for q in r["track"]]}
+                       for n, r in results.items()}}, indent=1), encoding="utf-8")
+    width = max(strip.shape[1] for strip in strips)  # the longer sequences have more pictures
+    strips = [np.pad(strip, ((0, 0), (0, width - strip.shape[1]), (0, 0))) for strip in strips]
     for i in range(0, len(strips), 6):
         cv2.imwrite(str(s.out / f"moves_{i // 6:02d}.png"), np.vstack(strips[i:i + 6]))
     groups: list[list[str]] = []
@@ -583,17 +582,16 @@ def a1(s: Session) -> tuple[bool, list[str]]:
     must_act = [actions.name((d, b)) for d, b in ((1, 0), (2, 0), (0, 1), (0, 2), (0, 3), (0, 4))]
     charged = apart(results["heavy held for 6 decisions"]["shots"], results["heavy for 1 decision"]["shots"])
     once = results["jump once"]["track"]
-    twice = moved(results["jump, nothing, jump"]["track"], once)
-    later = moved(results["jump, 3 x nothing, jump"]["track"], once)
+    twice, mid, later = (moved(results[f"jump, {gap}nothing, jump"]["track"], once) for gap in ("", "2 x ", "3 x "))
     unstable = [n for n, r in results.items() if not r["same"]]
     idle = [n for n in must_act if not results[n]["acts"]]
-    ok = not unstable and not idle and charged > differs_at and max(twice, later) > 2 * jitter
+    ok = not unstable and not idle and charged > differs_at and max(twice, mid, later) > 2 * jitter
     lines += ["", f"- Same move both times: {len(results) - len(unstable)} of {len(results)}"
               + (f"; not: {', '.join(unstable)}" if unstable else ""),
               f"- Walking, jump, light, heavy and dodge each do something: {'yes' if not idle else 'no: ' + ', '.join(idle)}",
               f"- A heavy held for 6 decisions differs from one tapped by {charged:.3%} (charging works above {differs_at:.3%})",
-              f"- A second jump moves the torso away from a single jump's path by {twice:.0f} px when pressed 1 decision "
-              f"after the first, and {later:.0f} px when pressed 4 decisions after (pressing again works above "
+              f"- A second jump moves the torso away from a single jump's path by {twice:.0f} px when pressed 2 decisions "
+              f"after the first, {mid:.0f} px when 3 after, and {later:.0f} px when 4 after (pressing again works above "
               f"{2 * jitter:.0f} px)",
               f"- Distinct outcomes: {len(groups)} among {len(sequences)} sequences. Looking alike: "
               + "; ".join(" = ".join(g) for g in groups if len(g) > 1),

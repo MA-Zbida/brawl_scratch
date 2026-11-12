@@ -86,6 +86,55 @@ def test_cloning_learns_what_the_demonstrator_does(tmp_path):
     assert (picked == action[:200]).all(1).mean() > 0.8  # chance is about 0.35
 
 
+def test_ppo_trains_in_the_live_loop_and_reads_the_game_again_after_each_update(tmp_path):
+    import csv
+
+    class Live(Game):  # the game goes on for 30 frames during every stall
+        def __init__(self):
+            super().__init__()
+            self.released, self.resyncs = 0, 0
+            self.keys = SimpleNamespace(release_all=self.release)
+
+        def release(self):
+            self.released += 1
+
+        def advance(self, plan):
+            timing = super().advance(plan)
+            self.damage = min(self.damage, 40.0)
+            return timing
+
+        def resync(self):
+            self.resyncs += 1
+            self.frame += 30
+            return 30
+
+    game = Live()
+    env = BrawlEnv(game, game, Perception(game), window=0)
+    learn.make_policy((32, 32)).save(str(tmp_path / "bc.zip"))
+    cfg = dict(init=str(tmp_path / "bc.zip"), total_steps=48, n_steps=16, batch_size=8, n_epochs=1, learning_rate="3e-4",
+               gamma=0.995, gae_lambda=0.95, clip_range=0.2, ent_coef=0.0, vf_coef=0.5, max_grad_norm=0.5, net=[32, 32],
+               checkpoint_every=2, seed=0)
+    asked = []
+
+    def focused():  # another window takes the keyboard once, at the first check
+        asked.append(len(asked))
+        return len(asked) != 1
+
+    saved = learn.train_ppo(env, cfg, tmp_path / "run", realtime=True, focused=focused, sleep=lambda s: None,
+                            log=lambda m: None)
+    rows = list(csv.DictReader(open(tmp_path / "run" / "progress.csv", encoding="utf-8")))
+    assert saved.name == "policy.zip" and [r["steps"] for r in rows] == ["16", "32", "48"]
+    assert [r["stall_frames"] for r in rows] == ["0", "30", "30"] and sum(int(r["pauses"]) for r in rows) == 1
+    assert rows[0]["approx_kl"] == "nan" and float(rows[1]["value_loss"]) > 0 and float(rows[2]["entropy"]) > 0
+    assert game.resyncs == 3 and game.released >= 4          # two updates and one pause; keys released before each
+    assert env.calls["advance"] == 48 and env.calls["perceive"] == 48 + 1 + 3
+    again = learn.load_policy(tmp_path / "run" / "checkpoints" / "policy_0000032.zip")
+    assert again.observation_space.shape == (observation.SIZE,)
+    stopped = learn.train_ppo(BrawlEnv(Live(), game, Perception(game), window=0), cfg, tmp_path / "stopped", realtime=True,
+                              stop=lambda: True, log=lambda m: None)
+    assert stopped.name == "policy_stopped.zip"
+
+
 def test_play_reports_blocks_and_virtual_matches():
     import importlib.util
 

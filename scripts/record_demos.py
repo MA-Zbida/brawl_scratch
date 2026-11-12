@@ -1,6 +1,6 @@
 """Record your play as demonstrations (research/DESIGN.md section 8).
 
-Start Brawlhalla in training mode (Wu Shang vs a Mordex bot, Brawlhaven), **not paused**, with the
+Start Brawlhalla in training mode (Wu Shang vs a Mordex bot, Brawlhaven, camera mode **Fixed**), **not paused**, with the
 bot at the level you name below. Run this, click into the game during the countdown, and play.
 Press **F10** to stop (or wait for --minutes).
 
@@ -10,13 +10,18 @@ Overlays are part of the frames, so every session uses the same ones: by default
 hitboxes, hurtboxes, stun, damage numbers, combo counter, force or Power Viewer). Name any other
 setting with --overlays (e.g. ``--overlays damage`` for the HUD check); it is kept in meta.json.
 
-Every 1/60 s it records the screen (half resolution, JPEG), the fight keys you hold, and the fight
-keys you pressed since the previous frame (a jump or an attack starts on the press). Every 2 s it
-also keeps a full-resolution lossless still, for labelling (scripts/label.py). The keyboard is
-read 1,000 times a second, so short taps are not missed.
+Every 1/60 s it records the fight keys you hold and the fight keys you pressed since the previous
+frame (a jump or an attack starts on the press), and the screen (half resolution, JPEG) on every
+``--frame-every``-th row. Every 2 s it also keeps a full-resolution lossless still, for labelling.
+The keyboard is read 1,000 times a second, so short taps are not missed.
 
-Output: data/demos/<date_time>/ in the recording format of brawl/record.py. Recordings are large
-(about 15 GB per hour, 2.5 GB per 10 minutes): set BRAWL_DATA to a folder outside OneDrive.
+``--frame-every 3`` keeps the picture of the decision frames only (k = 3: what the environment, the
+demonstration reader and the vision probes use), a third of the size: about 6 GB per hour instead
+of 18. The vision probes of 2026-11-11 found nothing in the frames between decisions that the
+decision frames lack (results/probes/vision.md).
+
+Output: data/demos/<date_time>/ in the recording format of brawl/record.py. Set BRAWL_DATA to a
+folder outside OneDrive.
 """
 from __future__ import annotations
 
@@ -50,15 +55,17 @@ def git_commit() -> str:
 
 
 def record(screen, reader: KeyReader, writer: Writer, *, rate_hz: float, seconds: float,
-           still_every_s: float, now=time.perf_counter, sleep=time.sleep) -> dict:
-    """The capture loop: one row every 1 / rate_hz s until F10 or ``seconds``. Encoding and disk
-    writes happen on a second thread so the schedule holds."""
+           still_every_s: float, frame_every: int = 1, now=time.perf_counter, sleep=time.sleep) -> dict:
+    """The capture loop: one row every 1 / rate_hz s until F10 or ``seconds``; the picture is kept
+    on rows whose index is a multiple of ``frame_every``. Encoding and disk writes happen on a
+    second thread so the schedule holds."""
     queue: Queue = Queue(maxsize=int(rate_hz * 4))
 
     def write() -> None:
         while (item := queue.get()) is not None:
             image, row, keep_still = item
-            index = writer.append(image, **row)
+            keep = writer.rows % frame_every == 0  # by the row's index, which is what readers count
+            index = writer.append(image if keep else None, **row)
             if keep_still:
                 writer.still(index, image)
 
@@ -110,6 +117,8 @@ def main(argv=None) -> int:
     p.add_argument("--minutes", type=float, default=10.0)
     p.add_argument("--rate", type=float, default=60.0, help="rows per second")
     p.add_argument("--still-every", type=float, default=2.0, help="seconds between full-resolution stills")
+    p.add_argument("--frame-every", type=int, default=3,
+                   help="keep the picture of every n-th row (3: the decision frames at k = 3; 1: every frame)")
     p.add_argument("--overlays", default="none",
                    help="training-mode overlays shown while recording, comma separated (none for no overlays); "
                         "keep the same in every session: they are part of the frames")
@@ -123,10 +132,11 @@ def main(argv=None) -> int:
     screen = capture.Screen(timeout_s=0.05)
     out = DATA / "demos" / datetime.now().strftime("%Y%m%d_%H%M%S")
     meta = {"source": "human", "regime": "realtime", "started": datetime.now().isoformat(timespec="seconds"),
-            "setting": {"map": "Brawlhaven (small)", "agent": "Wu Shang", "opponent": "Mordex",
+            "setting": {"map": "Brawlhaven (small)", "camera": "fixed", "agent": "Wu Shang", "opponent": "Mordex",
                         "difficulty": args.difficulty, "mode": "training",
                         "overlays": sorted(o for o in args.overlays.split(",") if o and o != "none")},
-            "rate_hz": args.rate, "still_every_s": args.still_every, "key_order": list(KEY_ORDER),
+            "rate_hz": args.rate, "still_every_s": args.still_every, "frame_every": args.frame_every,
+            "key_order": list(KEY_ORDER),
             "columns_doc": {"t": "seconds since the first row", "keys": "fight keys held (bitmask over key_order)",
                             "pressed": "fight keys pressed since the previous row (bitmask)",
                             "fresh": "the game presented a new frame since the previous row"},
@@ -140,7 +150,7 @@ def main(argv=None) -> int:
     writer = Writer(out, meta)
     try:
         stats = record(screen, reader, writer, rate_hz=args.rate, seconds=args.minutes * 60,
-                       still_every_s=args.still_every)
+                       still_every_s=args.still_every, frame_every=args.frame_every)
     finally:
         reader.stop()
     writer.meta["stats"] = stats

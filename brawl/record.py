@@ -133,13 +133,16 @@ class Recording:
                         parts.setdefault(name, []).append(z[name])
         return {name: np.concatenate(values) for name, values in parts.items()}
 
-    def frames(self) -> Iterator[Optional[np.ndarray]]:
-        """Every row's frame (downscaled), in order; None where a row has no frame."""
+    def frames(self, rows: Optional[set[int]] = None) -> Iterator[Optional[np.ndarray]]:
+        """Every row's frame (downscaled), in order; None where a row has no frame. With ``rows``,
+        only those rows are decoded and every other row yields None."""
+        row = 0
         for shard in self.shards:
             with np.load(shard) as z:
                 data, offsets = z["frame_bytes"], z["frame_offsets"]
             for a, b in zip(offsets[:-1], offsets[1:]):
-                yield decode(data[a:b]) if b > a else None
+                yield decode(data[a:b]) if b > a and (rows is None or row in rows) else None
+                row += 1
 
     def stills(self) -> list[Path]:
         return sorted((self.root / "stills").glob("*.png"))

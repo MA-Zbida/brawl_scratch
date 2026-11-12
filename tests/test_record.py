@@ -126,6 +126,19 @@ def test_the_recorder_keeps_its_schedule_and_records_keys(tmp_path):
     assert len(rec.stills()) == stats["stills"] == 3          # at 0, 0.5 and 1.0 s
 
 
+def test_the_recorder_can_keep_the_picture_of_every_third_row_only(tmp_path):
+    record_demos = script("record_demos")
+    clock = FakeTime()
+    reader = KeyReader(is_down=lambda vk: False)
+    with Writer(tmp_path / "demo", {}, scale=1.0) as w:
+        record_demos.record(FakeScreen(clock), reader, w, rate_hz=60, seconds=0.5, still_every_s=0.25,
+                            frame_every=3, now=clock.now, sleep=clock.sleep)
+    rec = Recording(tmp_path / "demo")
+    pictures = [f is not None for f in rec.frames()]
+    assert len(pictures) == 31 and pictures == [i % 3 == 0 for i in range(31)]
+    assert len(rec.stills()) == 3  # stills are kept whatever the row: they are for labelling
+
+
 def test_a_still_that_cannot_be_written_is_retried_then_counted(tmp_path, monkeypatch):
     import cv2
 
@@ -143,16 +156,21 @@ def test_a_still_that_cannot_be_written_is_retried_then_counted(tmp_path, monkey
 
 # -- drafts for Roboflow ---------------------------------------------------------------------
 def test_the_character_under_the_indicator_is_wu_shang():
+    from brawl.sense.detectors import assign
+    from brawl.sense.truth import Box
+
     prelabel = script("prelabel")
     mordex, wu = [1185, 545, 1250, 615, 0.3], [1289, 586, 1346, 658, 0.7]
-    named = prelabel.assign([mordex, wu], [[1310, 567, 1333, 591, 0.9]])
-    assert dict((c, b[0]) for c, b in named) == {"mordex": 1185, "wu_shang": 1289}
-    assert prelabel.assign([mordex], []) == [("mordex", mordex)]  # no triangle: never guessed as the agent
-    duplicate = [1190, 550, 1240, 600, 0.12]
-    assert len(prelabel.assign([mordex, duplicate, wu], [[1310, 567, 1333, 591, 0.9]])) == 2
-    line = prelabel.yolo_line("wu_shang", [0, 0, 192, 108], 1920, 1080)
-    assert line == "0 0.050000 0.050000 0.100000 0.100000"
-    assert [p.name for p in prelabel.pick([Path(f"{i}.png") for i in range(10)], 3)] == ["0.png", "4.png", "9.png"]
-    held, lying = [1300, 600, 1330, 640], [900, 600, 960, 630]
-    assert prelabel.free_weapons([held, lying], [wu]) == [lying]  # a held weapon is not labelled
-    assert prelabel.yolo_line("weapon", [0, 0, 192, 108], 1920, 1080).startswith("2 ")
+    named = assign([mordex, wu], [[1310, 567, 1333, 591, 0.9]])
+    assert dict((c, b[0]) for c, b in named) == {"mordex_unarmed": 1185, "wu_shang_unarmed": 1289}
+    assert assign([mordex], []) == [("mordex_unarmed", mordex)]  # no triangle: never the agent
+    assert len(assign([mordex, [1190, 550, 1240, 600, 0.12], wu], [[1310, 567, 1333, 591, 0.9]])) == 2
+    spear = Box("wu_shang_spear", 0, 0, 192, 108, 0.4, point=(48, 54))
+    assert prelabel.line(spear, 1920, 1080) == "1 0.050000 0.050000 0.100000 0.100000 0.025000 0.050000 2"
+    spawn = Box("weapon_spawn", 0, 0, 192, 108, 0.9, point=(48, 54))  # a weapon's point is its centre
+    assert prelabel.line(spawn, 1920, 1080) == "6 0.050000 0.050000 0.100000 0.100000 0.050000 0.050000 2"
+    assert prelabel.sureness([spear, Box("mordex_unarmed", 0, 0, 1, 1, 0.9)]) == 0.4
+    assert prelabel.sureness([spear, spawn]) == 0.3  # Mordex missing: often truly absent (KO'd)
+    sure = [0.9, 0.1, 0.9, 0.9, 0.0, 0.9, 0.9, 0.9]
+    assert prelabel.pick(sure, 4) == [0, 1, 4, 7]    # the two least sure, and the ends of the rest
+    assert len(prelabel.CLASSES) == 9

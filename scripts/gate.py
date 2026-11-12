@@ -10,6 +10,7 @@ in whatever window has focus.
     python scripts/gate.py t2     # every F6 advances and every F5 rewinds exactly one frame
     python scripts/gate.py t3     # rewind and replay give identical frames
     python scripts/gate.py t4     # steps and rewind frames per second
+    python scripts/gate.py a1     # every action does its move, the same way each time (see a1 below)
 
 Ground truth is the game's own **frame counter**, shown in the training toolbar while paused
 (between "F5 Prev" and "F6 Next"). It restarts at 0 on every pause. With confirmation (the
@@ -478,7 +479,132 @@ def t4(s: Session) -> tuple[bool, list[str]]:
         f"- Settings: tap {s.args.tap_ms} ms, settle {s.args.settle_ms} ms"]
 
 
-GATES = {"counter": counter, "t0": t0, "t1": t1, "t2": t2, "t3": t3, "t4": t4}
+def a1(s: Session) -> tuple[bool, list[str]]:
+    """Actions: every entry of the action list is performed from the same moment and compared.
+
+    Before running: Wu Shang stands on the stage with room on both sides, the bot well away from
+    him (a bot standing on him moved the detected torso by 7-10 px between plays on 2026-11-11).
+    Each sequence (an action chosen for 2 decisions, then nothing for 4; k = 3) is played twice from
+    the same frame, rewinding in between. Compared in a 300 x 300 window around Wu Shang and by his
+    torso's path: the two plays with each other (the same keys must give the same move), and with
+    doing nothing (the action must do something). More sequences check what the held button is
+    for: a heavy held for 6 decisions against one tapped (charging), and a second jump 1 and 4
+    decisions after the first against a single jump (pressing again), over 12 decisions.
+    Strips of every sequence are saved for a human to name the moves.
+    """
+    import cv2
+
+    from brawl import actions
+    from brawl.sense.detectors import Yolo
+
+    lines = s.lines
+    lines += s.ensure_paused() + s.calibrate()
+    detector = Yolo(RUNS / "detector" / "armed_yolo11s-pose_960" / "weights" / "best.engine", conf=0.25)
+    k, none = 3, (0, 0)
+
+    def wu(image):
+        return next((b for b in detector(np.ascontiguousarray(image)) if b.cls.startswith("wu_shang")), None)
+
+    start = wu(s.image())
+    if start is None:
+        return False, lines + ["- **Wu Shang is not detected on the starting frame: stand on the stage and run again.**"]
+    cx, cy = start.position
+    x0, y0 = int(max(0, min(1920 - 560, cx - 280))), int(max(0, min(1080 - 440, cy - 260)))
+    box = (x0, y0, x0 + 560, y0 + 440)
+    near = (int(max(0, min(1920 - 300, cx - 150))), int(max(0, min(1080 - 300, cy - 200))))
+    near = (near[0], near[1], near[0] + 300, near[1] + 300)
+    lines.append(f"- Start: {start.cls} at ({cx:.0f}, {cy:.0f}); compared window {near}, strips show {box}")
+
+    def run(sequence):
+        shots, track, colour = [], [], []
+        for action in sequence:
+            timing = s.clock.advance(actions.to_plan(action, k))
+            s.retries, s.repairs = s.retries + timing.retries, s.repairs + timing.repairs
+            image = s.image()
+            shots.append(grey(image, near))
+            colour.append(np.asarray(image)[box[1]:box[3], box[0]:box[2]].copy())
+            b = wu(image)
+            track.append(None if b is None else b.position)
+        timing = s.clock.rewind(len(sequence) * k)
+        s.retries, s.repairs = s.retries + timing.retries, s.repairs + timing.repairs
+        return shots, track, colour
+
+    def apart(a, b) -> float:
+        return float(np.mean([(np.abs(x - y) > PIXEL_THRESHOLD).mean() for x, y in zip(a, b)]))
+
+    def moved(a, b) -> float:
+        d = [np.hypot(p[0] - q[0], p[1] - q[1]) for p, q in zip(a, b) if p is not None and q is not None]
+        return float(max(d)) if d else 0.0
+
+    sequences = {actions.name((d, b)): [(d, b)] * 2 + [none] * 4 for d in range(9) for b in range(6)}
+    heavy, jump = actions.BUTTON_NAMES.index("heavy"), actions.BUTTON_NAMES.index("jump")
+    sequences.update({"heavy held for 6 decisions": [(0, heavy)] * 6, "heavy for 1 decision": [(0, heavy)] + [none] * 5,
+                      "jump, nothing, jump": [(0, jump), none, (0, jump)] + [none] * 9,
+                      "jump, 3 x nothing, jump": [(0, jump), none, none, none, (0, jump)] + [none] * 7,
+                      "jump once": [(0, jump)] + [none] * 11})
+    idle1, idle_track, _ = run(sequences["none+none"])
+    idle2, _, _ = run(sequences["none+none"])
+    floor = apart(idle1, idle2)
+    same_at, differs_at, jitter = max(3 * floor, 0.004), max(3 * floor, 0.006), 12.0  # px: the detector's own
+    lines += [f"- Doing nothing twice differs by {floor:.3%} of the window (animations that are not rewound): two plays "
+              f"are the same move below {same_at:.3%}, and an action does something above {differs_at:.3%}", "",
+              "| Sequence | Same both times | Differs from nothing | Torso moved (px): right, down | Detected |",
+              "|---|---|---|---|---|"]
+    results, strips = {}, []
+    for name, sequence in sequences.items():
+        first, track1, colour = run(sequence)
+        second, track2, _ = run(sequence)
+        again, drift = apart(first, second), moved(track1, track2)
+        other, path = apart(first, idle1[:len(first)]), moved(track1, idle_track)
+        end = next((p for p in reversed(track1) if p is not None), None)
+        results[name] = {"same": again <= same_at and drift <= jitter, "acts": other > differs_at or path > jitter,
+                         "shots": first, "track": track1}
+        shift = "-" if end is None else f"{end[0] - cx:+.0f}, {end[1] - cy:+.0f}"
+        lines.append(f"| {name} | {'yes' if results[name]['same'] else '**no**'} ({again:.3%}, {drift:.0f} px) | "
+                     f"{'yes' if results[name]['acts'] else 'no'} ({other:.3%}, {path:.0f} px) | {shift} | "
+                     f"{sum(p is not None for p in track1)}/{len(track1)} |")
+        strip = np.hstack([cv2.resize(c, (280, 220), interpolation=cv2.INTER_AREA) for c in colour])
+        cv2.putText(strip, name, (6, 18), 0, 0.6, (0, 0, 0), 3)
+        cv2.putText(strip, name, (6, 18), 0, 0.6, (255, 255, 255), 1)
+        strips.append(strip)
+        print(lines[-1], flush=True)
+    for i in range(0, len(strips), 6):
+        cv2.imwrite(str(s.out / f"moves_{i // 6:02d}.png"), np.vstack(strips[i:i + 6]))
+    groups: list[list[str]] = []
+    for name in sequences:  # sequences that look the same as an earlier one
+        for group in groups:
+            other = results[group[0]]
+            if len(other["shots"]) == len(results[name]["shots"]) and apart(results[name]["shots"], other["shots"]) \
+                    <= same_at and moved(results[name]["track"], other["track"]) <= jitter:
+                group.append(name)
+                break
+        else:
+            groups.append([name])
+    must_act = [actions.name((d, b)) for d, b in ((1, 0), (2, 0), (0, 1), (0, 2), (0, 3), (0, 4))]
+    charged = apart(results["heavy held for 6 decisions"]["shots"], results["heavy for 1 decision"]["shots"])
+    once = results["jump once"]["track"]
+    twice = moved(results["jump, nothing, jump"]["track"], once)
+    later = moved(results["jump, 3 x nothing, jump"]["track"], once)
+    unstable = [n for n, r in results.items() if not r["same"]]
+    idle = [n for n in must_act if not results[n]["acts"]]
+    ok = not unstable and not idle and charged > differs_at and max(twice, later) > 2 * jitter
+    lines += ["", f"- Same move both times: {len(results) - len(unstable)} of {len(results)}"
+              + (f"; not: {', '.join(unstable)}" if unstable else ""),
+              f"- Walking, jump, light, heavy and dodge each do something: {'yes' if not idle else 'no: ' + ', '.join(idle)}",
+              f"- A heavy held for 6 decisions differs from one tapped by {charged:.3%} (charging works above {differs_at:.3%})",
+              f"- A second jump moves the torso away from a single jump's path by {twice:.0f} px when pressed 1 decision "
+              f"after the first, and {later:.0f} px when pressed 4 decisions after (pressing again works above "
+              f"{2 * jitter:.0f} px)",
+              f"- Distinct outcomes: {len(groups)} among {len(sequences)} sequences. Looking alike: "
+              + "; ".join(" = ".join(g) for g in groups if len(g) > 1),
+              f"- Presses retried: {s.retries}; presses that undid a double landing: {s.repairs}",
+              f"- Strips of every sequence, one picture per decision: `{s.out}` (moves_*.png): **check that each "
+              f"shows the move its name says**",
+              f"- Pass (same both times, the basic moves act, charging and pressing again work): {'PASS' if ok else 'FAIL'}"]
+    return ok, lines
+
+
+GATES = {"counter": counter, "t0": t0, "t1": t1, "t2": t2, "t3": t3, "t4": t4, "a1": a1}
 
 
 def main(argv=None) -> int:

@@ -151,7 +151,8 @@ def clone(demos: Demos, out: Path, *, epochs: int = 40, batch: int = 512, lr: fl
 
 # -- reinforcement learning in the live game -------------------------------------------------------
 PPO_SETTINGS = {"learning_rate": float, "n_steps": int, "batch_size": int, "n_epochs": int, "gamma": float,
-                "gae_lambda": float, "clip_range": float, "ent_coef": float, "vf_coef": float, "max_grad_norm": float}
+                "gae_lambda": float, "clip_range": float, "ent_coef": float, "vf_coef": float, "max_grad_norm": float,
+                "target_kl": lambda v: None if v is None else float(v)}
 PROGRESS = ("rollout", "steps", "game_frames", "wall_s", "play_s", "stall_s", "stall_frames", "stocks_taken",
             "stocks_lost", "damage_dealt", "damage_taken", "reward", "stall_stocks_lost", "stall_damage_taken",
             "late_frames", "sense_ms", "over_budget", "pauses",
@@ -185,7 +186,7 @@ def train_ppo(env, cfg: dict, run_dir: Path, *, realtime: bool, stop=lambda: Fal
     torch.set_num_threads(1)
     net = [int(n) for n in cfg["net"]]
     model = PPO("MlpPolicy", env, policy_kwargs=dict(net_arch=dict(pi=net, vf=net)), seed=int(cfg["seed"]), device="cpu",
-                **{key: cast(cfg[key]) for key, cast in PPO_SETTINGS.items()})
+                **{key: cast(cfg[key]) for key, cast in PPO_SETTINGS.items() if key in cfg})
     if cfg.get("init"):
         model.policy.load_state_dict(load_policy(Path(cfg["init"])).state_dict())
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -201,6 +202,9 @@ def train_ppo(env, cfg: dict, run_dir: Path, *, realtime: bool, stop=lambda: Fal
             self.stall = dict(stall_s=0.0, stall_frames=0, stall_stocks_lost=0, stall_damage_taken=0.0)
 
         def _on_rollout_start(self) -> None:
+            warm = self.rollout < int(cfg.get("vf_warmup_rollouts") or 0)  # the update after this rollout: value only
+            for p in (*self.model.policy.mlp_extractor.policy_net.parameters(), *self.model.policy.action_net.parameters()):
+                p.requires_grad_(not warm)
             seen = self.model.logger.name_to_value  # what the update before this rollout recorded
             self.update = {k: (-seen[v] if k == "entropy" else seen[v]) if v in seen else float("nan")
                            for k, v in TRAIN_METRICS.items()}
@@ -266,3 +270,163 @@ def train_ppo(env, cfg: dict, run_dir: Path, *, realtime: bool, stop=lambda: Fal
     name = "policy_stopped.zip" if live.stopped else "policy.zip"  # only a run that reached its end is finished
     model.policy.save(str(run_dir / name))
     return run_dir / name
+
+
+RDQN_PROGRESS = ("rollout", "steps", "game_frames", "wall_s", "play_s", "stall_s", "stall_frames", "stocks_taken",
+                 "stocks_lost", "damage_dealt", "damage_taken", "reward", "stall_stocks_lost", "stall_damage_taken",
+                 "late_frames", "sense_ms", "over_budget", "pauses", "updates", "learner_lag", "weights_loaded")
+
+
+def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: bool, reward_weights: tuple[float, float],
+               stop=lambda: False, focused=lambda: True, now=None, sleep=None, log=print) -> Path:
+    """The recurrent Q-learner (brawl/rdqn.py) on ``env``: this process plays, a second one learns.
+
+    Without ``cfg["init"]`` the network is first pretrained on the demonstrations (on the GPU if there is
+    one). Each decision: the network, its memory carried, picks the best action (a random one with
+    probability epsilon); the decision goes to the learner in chunks of 64; every 100 decisions the
+    newest weights are taken. In stepped mode the actor waits for the learner to keep
+    ``updates_per_decision``; in real time it never waits. A gap (lost focus) cuts the stream: no return
+    is bootstrapped across it and the memory starts afresh.
+
+    Writes <run_dir>/progress.csv (one row per ``n_steps`` decisions), learner.csv, checkpoints/ and
+    qnet.pt (qnet_stopped.pt if the run did not reach its end).
+    """
+    import csv
+    import multiprocessing as mp
+    import os
+    import shutil
+    import time
+
+    import torch
+
+    from brawl import observation, rdqn
+
+    now, sleep = now or time.perf_counter, sleep or time.sleep
+    q = cfg["rdqn"]
+    torch.set_num_threads(1)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "checkpoints").mkdir(exist_ok=True)
+    init = Path(cfg["init"]) if cfg.get("init") else None
+    if init is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        log(f"pretraining on {len(demo_roots)} demonstration sessions ({device}) ...")
+        learner = rdqn.Learner(observation.SIZE, q, float(cfg["gamma"]), device, seed=int(cfg["seed"]))
+        rdqn.pretrain(learner, rdqn.demonstrations(demo_roots, env.k, *reward_weights, log=log), int(q["pretrain_updates"]), log)
+        init = run_dir / "pretrained.pt"
+        rdqn.save(learner.net, init, observation.SIZE, int(q["hidden"]))
+        del learner
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    net = rdqn.load(init)[0].eval()
+    latest = run_dir / "latest.pt"
+    shutil.copy(init, latest)
+    ctx = mp.get_context("spawn")
+    queue, decisions, updates, done = ctx.Queue(maxsize=400), ctx.Value("q", 0), ctx.Value("q", 0), ctx.Event()
+    os.environ["BRAWL_NO_EARLY_CAPTURE"] = "1"  # the learner process must not take the screen
+    learner = ctx.Process(target=rdqn.learner_main, daemon=True,
+                          args=(q, float(cfg["gamma"]), [str(r) for r in demo_roots], env.k, reward_weights, str(run_dir),
+                                str(init), queue, decisions, updates, done, int(cfg["seed"])))
+    learner.start()
+    rng = np.random.default_rng(int(cfg["seed"]))
+    eps, per, block = float(q["epsilon"]), float(q["updates_per_decision"]), int(cfg["n_steps"])
+    file = open(run_dir / "progress.csv", "w", newline="", encoding="utf-8")
+    rows = csv.DictWriter(file, fieldnames=RDQN_PROGRESS)
+    rows.writeheader()
+    budget_s, t0, stopped, unreadable, loaded = env.k / 60, now(), False, 0, 0
+    seen = latest.stat().st_mtime
+    buf: list = []
+    cut_next = True
+
+    def new() -> dict:
+        return dict(stocks_taken=0, stocks_lost=0, damage_dealt=0.0, damage_taken=0.0, reward=0.0, late_frames=0,
+                    game_frames=0, pauses=0)
+
+    s, sense, started = new(), [], now()
+
+    def send() -> None:
+        if buf:
+            obs, act, rew, cut = (np.array(x) for x in zip(*buf))
+            try:
+                queue.put((obs.astype(np.float16), act, rew.astype(np.float32), cut), timeout=5)
+            except Exception:  # noqa: BLE001 - a learner that stopped reading: the decisions are lost, play goes on
+                pass
+            buf.clear()
+
+    obs, _ = env.reset()
+    h = None
+    try:
+        for step in range(1, int(cfg["total_steps"]) + 1):
+            if stop():
+                stopped = True
+                break
+            if not learner.is_alive():
+                log("the learner process stopped: ending the run")
+                stopped = True
+                break
+            if step % 20 == 0 and not focused():  # never type into another window
+                env.idle()
+                log("the game lost the keyboard: waiting for its window to have focus again")
+                while not focused() and not stop():
+                    sleep(1.0)
+                obs, h, cut_next = env.resume()[0], None, True
+                s["pauses"] += 1
+            if step % 100 == 0 and latest.stat().st_mtime != seen:
+                try:
+                    net.load_state_dict(torch.load(latest, map_location="cpu", weights_only=False)["state"])
+                    seen, loaded = latest.stat().st_mtime, loaded + 1
+                except Exception:  # noqa: BLE001 - being replaced this instant: next time
+                    pass
+            with torch.no_grad():
+                values, h = net(torch.as_tensor(obs, dtype=torch.float32)[None, None], h)
+            j = int(rng.integers(rdqn.N_ACTIONS)) if rng.random() < eps else int(values[0, 0].argmax())
+            nxt, reward, _, _, info = env.step(rdqn.split(j))
+            buf.append((obs, j, reward, cut_next))
+            cut_next, obs = False, nxt
+            decisions.value = step
+            if len(buf) >= 64:
+                send()
+            e, timing = info["events"], info["timing"]
+            s["stocks_taken"] += e.ko_scored
+            s["stocks_lost"] += e.ko_lost
+            s["damage_dealt"] += e.damage_dealt
+            s["damage_taken"] += e.damage_taken
+            s["reward"] += float(reward)
+            s["late_frames"] += timing.late_frames
+            s["game_frames"] += timing.frames
+            sense.append(info["sense_s"])
+            unreadable = 0 if info["sense"].readable else unreadable + 1
+            if unreadable >= int(q["watchdog_decisions"]):
+                log("the HUD has not been read for a minute: the game is not showing the fight; ending the run")
+                stopped = True
+                break
+            if not realtime:  # the game waits: let the learner keep its pace
+                while updates.value < per * step and learner.is_alive() and not stop():
+                    sleep(0.002)
+            if step % block == 0:
+                n = step // block
+                row = {"rollout": n, "steps": step, "wall_s": round(now() - t0, 1), "play_s": round(now() - started, 1),
+                       "stall_s": 0.0, "stall_frames": 0, "stall_stocks_lost": 0, "stall_damage_taken": 0.0,
+                       "sense_ms": round(float(np.median(sense)) * 1000, 1),
+                       "over_budget": round(float(np.mean(np.array(sense) > budget_s)), 4), "updates": updates.value,
+                       "learner_lag": round(updates.value / max(per * step, 1e-9), 3), "weights_loaded": loaded, **s}
+                rows.writerow({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()})
+                file.flush()
+                minutes = max(s["game_frames"] / 3600, 1e-9)
+                log(f"block {n} ({step} decisions): stocks {s['stocks_taken']} - {s['stocks_lost']}, damage "
+                    f"{s['damage_dealt']:.0f} / {s['damage_taken']:.0f}, reward per minute {s['reward'] / minutes:.2f}; "
+                    f"{updates.value} updates")
+                if n % int(cfg["checkpoint_every"]) == 0:
+                    shutil.copy(latest, run_dir / "checkpoints" / f"qnet_{step:07d}.pt")
+                s, sense, started = new(), [], now()
+        send()
+    finally:
+        env.idle()
+        done.set()
+        queue.cancel_join_thread()  # decisions not yet read are dropped rather than block the exit
+        learner.join(timeout=120)
+        if learner.is_alive():
+            learner.terminate()
+        file.close()
+    final = run_dir / ("qnet_stopped.pt" if stopped else "qnet.pt")
+    shutil.copy(latest, final)
+    return final

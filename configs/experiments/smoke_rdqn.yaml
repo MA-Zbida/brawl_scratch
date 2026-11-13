@@ -1,0 +1,5 @@
+name: smoke_rdqn
+description: Five minutes of the recurrent Q-learner from the pretrained network, to check the loop in the game.
+base: ../base.yaml
+overrides:
+  train: {learner: rdqn, init: runs/rdqn/pretrain_all/qnet.pt, total_steps: 6000, checkpoint_every: 2}

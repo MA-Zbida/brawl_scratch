@@ -69,12 +69,14 @@ def parse_sets(items: Optional[list[str]]) -> dict[str, Any]:
     return out
 
 
-def check(config: dict[str, Any], known: dict[str, Any]) -> None:
-    """Every setting must exist in the defaults."""
-    for section in config:
-        unknown = set(config[section]) - set(known.get(section, {})) if section in known else {section}
-        if unknown:
-            raise ValueError(f"unknown setting(s) in {section!r}: {sorted(unknown)} (not in configs/base.yaml)")
+def check(config: dict[str, Any], known: dict[str, Any], where: str = "") -> None:
+    """Every setting must exist in the defaults, at every level."""
+    unknown = set(config) - set(known)
+    if unknown:
+        raise ValueError(f"unknown setting(s) in {where or 'the config'!r}: {sorted(unknown)} (not in configs/base.yaml)")
+    for key, value in config.items():
+        if isinstance(value, dict) and isinstance(known[key], dict):
+            check(value, known[key], f"{where}.{key}" if where else key)
 
 
 @dataclass

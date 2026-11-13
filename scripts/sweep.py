@@ -29,13 +29,14 @@ def main(argv=None) -> int:
     seeds = args.seeds if args.seeds is not None else experiment.seeds
     for n, seed in enumerate(seeds):
         run_dir = experiment.run_dir(args.variant, seed)
-        if (run_dir / "policy.zip").exists():
+        finished = lambda: (run_dir / "policy.zip").exists() or (run_dir / "qnet.pt").exists()  # noqa: E731
+        if finished():
             print(f"seed {seed}: already finished", flush=True)
             continue
         print(f"\n=== {experiment.name} / {args.variant} / seed {seed} ({n + 1} of {len(seeds)}) ===", flush=True)
         code = subprocess.call([sys.executable, str(ROOT / "scripts" / "train.py"), "--config", str(args.config),
                                 "--variant", args.variant, "--seed", str(seed), "--countdown", "5" if n == 0 else "0"])
-        if code != 0 or not (run_dir / "policy.zip").exists():
+        if code != 0 or not finished():
             print(f"seed {seed} did not reach its end: the sweep stops here", flush=True)
             return 1
     print(f"\ndone. python scripts/analyze.py {experiment.name}")

@@ -8,19 +8,44 @@ env:
   ko_weight: 1.0
   detector: runs/detector/armed_yolo11s-pose_960/weights/best.engine
 train:
-  learner: ppo
-  init: null            # policy.zip of a cloned policy (scripts/train_bc.py), or null for a new network
+  learner: ppo          # ppo | rdqn (recurrent Q-learning from demonstrations, brawl/rdqn.py)
+  init: null            # ppo: policy.zip of a cloned policy; rdqn: qnet.pt (null: pretrain on the demonstrations first)
   total_steps: 72000    # decisions: one hour of game time at k = 3
-  n_steps: 1200         # decisions per rollout: one minute
+  n_steps: 1200         # decisions per rollout (ppo) or per logged block (rdqn): one minute
+  checkpoint_every: 10  # rollouts / blocks
+  gamma: 0.995          # half-life of about 7 s of game time
+  seed: 0
+  # -- ppo --
   batch_size: 300
   n_epochs: 5
   learning_rate: 3.0e-4
-  gamma: 0.995          # half-life of about 7 s of game time
   gae_lambda: 0.95
   clip_range: 0.2
   ent_coef: 0.0
   vf_coef: 0.5
   max_grad_norm: 0.5
   net: [256, 256]       # the same network as behaviour cloning
-  checkpoint_every: 10  # rollouts
-  seed: 0
+  vf_warmup_rollouts: 0 # rollouts at the start in which only the value function learns
+  target_kl: null       # stop an update's epochs once the policy has moved this far
+  # -- rdqn --
+  rdqn:
+    hidden: 256         # GRU size
+    burn_in: 16         # decisions replayed to rebuild the memory before the loss
+    train_length: 48    # decisions of each sequence that carry the loss
+    n_step: 5
+    batch: 16           # sequences per update
+    learning_rate: 1.0e-4
+    target_every: 2000  # updates between target-network copies
+    margin: 0.5         # DQfD margin: the human's action must lead the others by this much
+    margin_weight: 1.0  # of the margin loss while pretraining
+    live_margin_weight: 0.3  # and while playing
+    demo_fraction: 0.25 # of each batch, once there is live data
+    demo_levels: [easy, medium, hard, extreme, chosen]  # human Wu Shang sessions kept in replay
+    pretrain_updates: 20000
+    updates_per_decision: 0.4  # 8 updates a second at 20 decisions; the CPU learner manages about 13
+    epsilon: 0.05       # random actions while training
+    sync_every: 100     # updates between weight files for the actor
+    capacity: 600000    # live decisions kept
+    threads: 4          # CPU threads of the learner
+    device: cpu         # the learner's device while the game runs (the detector keeps the GPU)
+    watchdog_decisions: 1200  # stop when the HUD is unreadable this long (the game left the fight)

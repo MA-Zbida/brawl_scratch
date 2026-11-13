@@ -208,7 +208,12 @@ def main(argv=None) -> int:
     scripted = args.policy == "scripted"
     if args.playing != "wu_shang" and not scripted:
         raise SystemExit("--playing mordex is for the scripted player: the policies play Wu Shang")
-    policy = None if args.policy in ("random", "scripted") else learn.load_policy(Path(args.policy), "cpu")
+    greedy = None
+    if args.policy.endswith(".pt"):  # a recurrent Q-network (brawl/rdqn.py): its best action, memory carried
+        from brawl.rdqn import Greedy
+
+        greedy = Greedy(Path(args.policy), epsilon=0.0, seed=args.seed)
+    policy = None if args.policy in ("random", "scripted") or greedy else learn.load_policy(Path(args.policy), "cpu")
     perception = Perception(Yolo(args.detector, conf=0.05), step=args.k)
     screen = capture.Screen(timeout_s=0.05)
     keys = Keys(DirectInput(), tap_s=0.01)
@@ -223,6 +228,8 @@ def main(argv=None) -> int:
             action = script(env.sense)
             crops.before(obs, action)
             return action
+        if greedy is not None:
+            return greedy(obs)
         if policy is None:
             return int(rng.integers(9)), int(rng.integers(6))
         with torch.no_grad():
@@ -261,7 +268,7 @@ def main(argv=None) -> int:
     if not r["think_s"]:
         print("stopped before the first decision: nothing to report")
         return 1
-    name = args.name or (f"{Path(args.policy).parent.name if policy else args.policy + ('_' + args.playing if scripted else '')}"
+    name = args.name or (f"{Path(args.policy).parent.name if policy or greedy else args.policy + ('_' + args.playing if scripted else '')}"
                          f"_{args.difficulty}_{args.regime}"
                          + (f"_x{args.blocks}" if args.blocks > 1 else ""))
     title = (f"Policy {args.policy} ({'most likely action' if args.greedy else 'sampled'}), bot {args.difficulty}, "

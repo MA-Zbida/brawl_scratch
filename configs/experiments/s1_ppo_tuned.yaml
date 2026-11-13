@@ -1,0 +1,10 @@
+name: s1_ppo_tuned
+description: >
+  The strong PPO baseline: from the clone, the value function trained alone for the first 5 minutes,
+  a smaller learning rate and clip range, and each update stopped once the policy moves too far.
+base: ../base.yaml
+seeds: [0, 1, 2, 3, 4]
+overrides:
+  env: {difficulty: medium}
+  train: {init: runs/bc/medium_v4/policy.zip, learning_rate: 1.0e-4, n_epochs: 3, clip_range: 0.1, target_kl: 0.01,
+          vf_warmup_rollouts: 5}

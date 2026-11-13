@@ -16,14 +16,14 @@ pause-and-rewind oracle a learner can close.
 Nothing is trained on a part until that part's gate passes. A wrong input fails every agent
 built on it, and no RL result can show where the fault was.
 
-## Your next steps (2026-11-12, evening)
+## Your next steps (2026-11-13, night)
 
-Run everything in the `brawl312` environment. Camera mode: Fixed.
+Run everything in the `brawl312` environment. Camera mode: Fixed. You as Wu Shang, bot Mordex on Medium.
 
-1. Four more seeds of the same arm, about four hours unattended, bot on Medium, game not paused:
-   `python scripts/sweep.py --config configs/experiments/s1_ppo.yaml --variant realtime-bc --seeds 1 2 3 4`
-2. Then: `python scripts/analyze.py s1_ppo`.
-3. When convenient, for the report file: `python scripts/gate.py a1` (bot away from Wu Shang).
+1. Smoke run of the main engine, 5 minutes: `python scripts/train.py --config configs/experiments/smoke_rdqn.yaml`
+2. Overnight, about 7 hours: `python scripts/train.py --config configs/experiments/rdqn_medium.yaml --seed 0`
+3. In the morning: `python scripts/analyze.py rdqn_medium`, then evaluate the result:
+   `python scripts/play.py runs/rdqn_medium/default/seed0/qnet.pt --difficulty medium --minutes 5 --blocks 6`
 
 ## Stage 0: gates (DESIGN section 9)
 

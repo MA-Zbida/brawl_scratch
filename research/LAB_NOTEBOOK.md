@@ -1113,3 +1113,33 @@ jump in the last 3 (5.7%). 9 Medium sessions held out whole, 3 folds (results/pr
   crop contains. What would settle Mordex: labels of his own state. The key log gives them if the
   human plays Mordex against a Wu Shang bot.
 - Held-out outputs written to <recording>/state_k3.npz.
+
+## 2026-11-13: new priority, and the main engine built
+
+**Priority (user):** an agent that reliably beats the bots comes first, as a showcase; the paper
+follows from what is built. Engineering choices now favour what wins.
+
+**Readers and vision (parked).** The recurrent readers, trained on two scripted hours with labels
+shifted by the measured action-to-screen delay (3 decisions for the live agent, 2 in the human
+recordings), read both fighters on human play (attacks 0.76 / 0.78 AUC, +0.16 to +0.21 over
+position and velocity), but their outputs add nothing to imitation, and their hidden state hurts it
+(results/probes/vision.md). Vision is parked until RL has produced far more data.
+
+**The main engine: recurrent Q-learning from demonstrations** (brawl/rdqn.py; R2D2-style with one
+actor, DQfD-style demonstrations). A GRU-256 Q-network over the 112-entry vector, dueling head over
+the 54 actions, double Q, 5-step returns, sequences of 69 decisions with a 16-decision burn-in. The
+15 human Wu Shang sessions (196,193 decisions, all levels) stay in replay; on their winning
+stretches a margin loss (0.5) keeps the human's action ahead. The actor plays in the game process;
+the learner runs in its own process on the CPU (4 threads, 74 ms an update, about 13 a second
+possible; set to 0.4 per decision, 8 a second), so the detector keeps the GPU. Weights reach the
+actor through a file every 100 updates (replacement retried: Windows refuses while it is read).
+
+**Pretrained network** (scripts/pretrain_rdqn.py, 20,000 updates on the GPU; results/rdqn/pretrain_all.md),
+held-out check on 5 sessions: right where the human changes action 0.213 (behaviour cloning 0.224),
+buttons on 25% of decisions (human 30%), 52 of the 54 actions used: it plays like the clone and has
+not collapsed. runs/rdqn/pretrain_all/qnet.pt starts the live runs.
+
+**Also:** the tuned PPO baseline (configs/experiments/s1_ppo_tuned.yaml: value function alone for 5
+minutes, learning rate 1e-4, clip 0.1, target KL 0.01); scripts/play.py plays a qnet.pt greedily;
+configs are checked at every level. 52 tests pass. Not built: the difficulty macro (levels are set
+by hand between runs).

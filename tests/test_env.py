@@ -31,7 +31,7 @@ class Game:
         return Timing(frames=len(plan))
 
     def grab(self, fresh=True):
-        ring = (255, 255, round(255 - self.damage * 255 / 50))
+        ring = (255, 255, max(0, round(255 - self.damage * 255 / 50)))  # yellow at 50 damage and beyond
         return SimpleNamespace(image=draw(("mordex", ring, None), ("wu_shang", (255, 255, 255), None)), fresh=True)
 
     def __call__(self, image):

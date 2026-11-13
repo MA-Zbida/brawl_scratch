@@ -1,0 +1,9 @@
+name: rdqn_medium
+description: >
+  The main engine against the Medium bot, overnight: recurrent Q-learning from the pretrained network,
+  the demonstrations kept in replay. About 7 hours of real-time play.
+base: ../base.yaml
+seeds: [0, 1, 2]
+overrides:
+  env: {difficulty: medium}
+  train: {learner: rdqn, init: runs/rdqn/pretrain_all/qnet.pt, total_steps: 500000, checkpoint_every: 30}

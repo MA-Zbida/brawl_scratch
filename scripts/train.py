@@ -11,7 +11,7 @@ game during the countdown. Press **F10** to stop early.
 Outputs go to runs/<experiment>/<variant>/seed<seed>/: config.yaml, meta.json, progress.csv (one row
 per rollout), checkpoints/ and policy.zip. A run is never resumed: the game cannot be put back
 where it was. A run that stopped early stays as seed<seed>_attempt<n>/ and a new one starts; a
-finished run is skipped unless --force. Any saved policy plays with scripts/play.py.
+finished run is skipped unless --force. Any saved policy (policy.zip, qnet.pt) plays with scripts/play.py.
 """
 from __future__ import annotations
 
@@ -46,12 +46,21 @@ def git_commit() -> str:
         return "unknown"
 
 
+def demo_sessions(levels, k: int) -> list[Path]:
+    """The human Wu Shang sessions at ``levels`` that are prepared (scripts/prepare_demos.py)."""
+    from brawl.paths import DATA
+    from brawl.record import Recording, is_demo
+
+    return [r for r in sorted((DATA / "demos").iterdir()) if (r / "meta.json").exists() and (r / f"decisions_k{k}.npz").exists()
+            and is_demo(Recording(r).meta) and Recording(r).meta["setting"].get("difficulty") in set(levels)]
+
+
 def claim(run_dir: Path, force: bool) -> bool:
     """Make ``run_dir`` ready for a new run. False if it already holds a finished one."""
     if run_dir.exists():
         if force:
             shutil.rmtree(run_dir)
-        elif (run_dir / "policy.zip").exists():
+        elif (run_dir / "policy.zip").exists() or (run_dir / "qnet.pt").exists():
             return False
         else:  # stopped early: kept as an attempt
             n = 1 + sum(1 for _ in run_dir.parent.glob(f"{run_dir.name}_attempt*"))
@@ -82,8 +91,8 @@ def main(argv=None) -> int:
     seed = experiment.seeds[0] if args.seed is None else args.seed
     config = experiment.resolve(variant, seed, args.set)
     env_cfg, train_cfg = config["env"], config["train"]
-    if train_cfg["learner"] != "ppo":
-        raise SystemExit(f"unknown learner {train_cfg['learner']!r}: ppo")
+    if train_cfg["learner"] not in ("ppo", "rdqn"):
+        raise SystemExit(f"unknown learner {train_cfg['learner']!r}: ppo or rdqn")
     if train_cfg["init"] and not (REPO_ROOT / train_cfg["init"]).exists():
         raise SystemExit(f"train.init: {REPO_ROOT / train_cfg['init']} does not exist")
     run_dir = experiment.run_dir(variant, seed)
@@ -124,10 +133,17 @@ def main(argv=None) -> int:
     env = BrawlEnv(clock, screen, perception, k=int(env_cfg["k"]), window=0, damage_weight=float(env_cfg["damage_weight"]),
                    ko_weight=float(env_cfg["ko_weight"]))
     print("training: press F10 to stop", flush=True)
+    focused = lambda: GAME in focused_window().lower()  # noqa: E731
     try:
-        saved = learn.train_ppo(env, train_cfg, run_dir, realtime=realtime, stop=reader.stop_requested,
-                                focused=lambda: GAME in focused_window().lower(),
-                                log=lambda m: print(m, flush=True))
+        if train_cfg["learner"] == "rdqn":
+            demos = demo_sessions(train_cfg["rdqn"]["demo_levels"], int(env_cfg["k"]))
+            meta["demonstrations"] = [r.name for r in demos]
+            saved = learn.train_rdqn(env, train_cfg, run_dir, demos, realtime=realtime, stop=reader.stop_requested,
+                                     focused=focused, log=lambda m: print(m, flush=True),
+                                     reward_weights=(float(env_cfg["damage_weight"]), float(env_cfg["ko_weight"])))
+        else:
+            saved = learn.train_ppo(env, train_cfg, run_dir, realtime=realtime, stop=reader.stop_requested,
+                                    focused=focused, log=lambda m: print(m, flush=True))
     finally:
         env.close()
         keys.release_all()

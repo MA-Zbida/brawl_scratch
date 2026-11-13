@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from brawl import learn  # noqa: E402
 from brawl.paths import DATA, RESULTS, RUNS  # noqa: E402
-from brawl.record import Recording  # noqa: E402
+from brawl.record import Recording, is_demo  # noqa: E402
 
 
 def main(argv=None) -> int:
@@ -36,7 +36,7 @@ def main(argv=None) -> int:
 
     levels = {x for x in args.difficulty.split(",") if x}
     roots = [r for r in sorted(q for q in (DATA / "demos").iterdir() if (q / "meta.json").exists())
-             if not levels or Recording(r).meta["setting"].get("difficulty") in levels]
+             if is_demo(Recording(r).meta) and (not levels or Recording(r).meta["setting"].get("difficulty") in levels)]
     demos = learn.load(roots, args.k, tuple(args.keep.split(",")))
     print("\n".join(demos.summary))
     out = RUNS / "bc" / args.name

@@ -42,6 +42,11 @@ def decode(data: bytes | np.ndarray) -> np.ndarray:
     return cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
 
 
+def is_demo(meta: dict) -> bool:
+    """A human playing the agent's legend: what the agent may be cloned from."""
+    return meta.get("source") == "human" and meta["setting"].get("agent", "Wu Shang") == "Wu Shang"
+
+
 class Writer:
     """Appends rows and writes a shard every ``shard_rows`` rows. Use as a context manager."""
 

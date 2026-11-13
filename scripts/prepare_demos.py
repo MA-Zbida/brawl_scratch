@@ -28,7 +28,7 @@ import numpy as np  # noqa: E402
 from brawl import actions  # noqa: E402
 from brawl.observation import BASE, FEATURES, Observation, add_timers  # noqa: E402
 from brawl.paths import DATA, RUNS  # noqa: E402
-from brawl.record import Recording  # noqa: E402
+from brawl.record import Recording, is_demo  # noqa: E402
 
 DETECTOR = RUNS / "detector" / "armed_yolo11s-pose_960" / "weights" / "best.engine"
 
@@ -86,6 +86,9 @@ def main(argv=None) -> int:
     perception = None
     for root in roots:
         meta = Recording(root).meta
+        if not is_demo(meta) and (not args.recordings or meta.get("source") != "human"):  # named: prepared for its positions
+            print(f"{root.name}: skipped ({meta.get('source')}, played as {meta['setting'].get('agent')}): not a demonstration")
+            continue
         if meta["setting"].get("overlays"):
             print(f"{root.name}: skipped, recorded with overlays {meta['setting']['overlays']}")
             continue

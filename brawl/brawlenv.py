@@ -40,6 +40,7 @@ class BrawlEnv(gym.Env):
         t0 = self.now()
         frame = self.screen.grab(fresh=False)
         sense = self.perception(frame.image, self.clock.frame)
+        self.frame, self.sense = frame.image, sense  # what the last observation was built from
         obs = self.builder.build(sense)
         self.calls["grab"] += 1
         self.calls["perceive"] += 1

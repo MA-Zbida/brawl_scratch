@@ -122,6 +122,9 @@ def main(argv=None) -> int:
     p.add_argument("--overlays", default="none",
                    help="training-mode overlays shown while recording, comma separated (none for no overlays); "
                         "keep the same in every session: they are part of the frames")
+    p.add_argument("--playing", choices=("wu_shang", "mordex"), default="wu_shang",
+                   help="the legend you play; the bot is the other one. Mordex sessions label Mordex's moves "
+                        "by your keys (scripts/probe_state.py); they are not demonstrations for the agent")
     p.add_argument("--note", default="", help="free text kept in meta.json")
     p.add_argument("--countdown", type=int, default=5)
     args = p.parse_args(argv)
@@ -132,7 +135,8 @@ def main(argv=None) -> int:
     screen = capture.Screen(timeout_s=0.05)
     out = DATA / "demos" / datetime.now().strftime("%Y%m%d_%H%M%S")
     meta = {"source": "human", "regime": "realtime", "started": datetime.now().isoformat(timespec="seconds"),
-            "setting": {"map": "Brawlhaven (small)", "camera": "fixed", "agent": "Wu Shang", "opponent": "Mordex",
+            "setting": {"map": "Brawlhaven (small)", "camera": "fixed", "agent": {"wu_shang": "Wu Shang", "mordex": "Mordex"}[args.playing],
+                        "opponent": {"wu_shang": "Mordex", "mordex": "Wu Shang"}[args.playing],
                         "difficulty": args.difficulty, "mode": "training",
                         "overlays": sorted(o for o in args.overlays.split(",") if o and o != "none")},
             "rate_hz": args.rate, "still_every_s": args.still_every, "frame_every": args.frame_every,

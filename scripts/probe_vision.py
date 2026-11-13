@@ -44,7 +44,7 @@ import numpy as np  # noqa: E402
 
 from brawl import observation  # noqa: E402
 from brawl.paths import DATA, RESULTS, RUNS  # noqa: E402
-from brawl.record import Recording  # noqa: E402
+from brawl.record import Recording, is_demo  # noqa: E402
 
 CANDIDATES = {
     "vector, no timers": dict(fighters=(), stack=1, timers=False, recurrent=False),
@@ -53,7 +53,18 @@ CANDIDATES = {
     "both, 1 frame": dict(fighters=(0, 1), stack=1, timers=True, recurrent=False),
     "both, 4 decisions (0.15 s)": dict(fighters=(0, 1), stack=4, timers=True, recurrent=False),
     "both, 1 frame, GRU": dict(fighters=(0, 1), stack=1, timers=True, recurrent=True),
+    # the recurrent readers' view of both fighters (scripts/train_reader.py), added to the vector: their five
+    # outputs each (attacking, dodging, jumping, since the last dodge, jumps), or their hidden states
+    "vector + reader states": dict(fighters=(), stack=1, timers=True, recurrent=False, extra="states"),
+    "vector + reader states, GRU": dict(fighters=(), stack=1, timers=True, recurrent=True, extra="states"),
+    "vector + reader memory": dict(fighters=(), stack=1, timers=True, recurrent=False, extra="hidden"),
+    "vector + reader memory, GRU": dict(fighters=(), stack=1, timers=True, recurrent=True, extra="hidden"),
 }
+EXTRA = {None: 0, "states": 10, "hidden": 256}
+
+
+def vector_size(c: dict) -> int:
+    return observation.SIZE + EXTRA[c.get("extra")]
 HIT_AHEAD, AHEAD = 10, (5, 10)
 LENGTH, PER_BATCH, PATIENCE, TAIL = 128, 8, 12, 0.12  # window (decisions), windows per batch, epochs, stop share
 F = observation.FEATURES
@@ -92,6 +103,8 @@ class Session:
             self.move_ok[i] = ok
         self.move = guess / 100.0
         self.gpu = None  # the crops on the GPU, when they fit
+        path = root / f"reader_k{k}.npz"
+        self.reader = dict(np.load(path)) if path.exists() else None
 
     def images(self, idx: np.ndarray, c: dict, device: str):
         """uint8 tensor [N, fighters x stack, S, S]: for each fighter, its last ``stack`` decisions, newest first."""
@@ -118,7 +131,7 @@ def build(c: dict, device: str):
             self.cnn = nn.Sequential(nn.Conv2d(c["stack"], 32, 8, 4), nn.ReLU(), nn.Conv2d(32, 64, 4, 2), nn.ReLU(),
                                      nn.Conv2d(64, 64, 3, 1), nn.ReLU(), nn.Flatten(),
                                      nn.LazyLinear(256), nn.ReLU()) if self.fighters else None
-            self.mlp = nn.Sequential(nn.Linear(observation.SIZE, 256), nn.ReLU())
+            self.mlp = nn.Sequential(nn.Linear(vector_size(c), 256), nn.ReLU())
             width = 256 * (1 + self.fighters)
             self.gru = nn.GRU(width, 128, batch_first=True) if c["recurrent"] else None
             self.trunk = nn.Sequential(nn.Linear(width + (128 if c["recurrent"] else 0), 256), nn.ReLU(),
@@ -139,7 +152,7 @@ def build(c: dict, device: str):
 
     model = Probe().to(device)
     with torch.no_grad():  # materialise the lazy layer
-        model(torch.zeros(1, 1, observation.SIZE, device=device), blank(c, device))
+        model(torch.zeros(1, 1, vector_size(c), device=device), blank(c, device))
     return model
 
 
@@ -211,6 +224,10 @@ def run(sessions, c: dict, train_ids, test_ids, seed: int, device: str, epochs: 
         x[i] = torch.as_tensor(s.obs, device=device).clone()
         if not c["timers"]:
             x[i][:, len(observation.BASE):] = 0
+        if c.get("extra"):
+            if s.reader is None:
+                raise SystemExit(f"{s.name}: no reader outputs (scripts/train_reader.py)")
+            x[i] = torch.cat([x[i], torch.as_tensor(s.reader[c["extra"]].astype(np.float32), device=device)], 1)
         tgt[i] = {k: torch.as_tensor(getattr(s, k), device=device) for k in ("hit", "move", "action", "hit_ok", "move_ok")}
     cut = {i: int(len(sessions[i].obs) * (1 - TAIL)) for i in train_ids}
 
@@ -274,7 +291,7 @@ def cost_ms(model, c: dict) -> dict:
     out, threads = {}, torch.get_num_threads()
     for device in ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",):
         m = model.to(device).eval()
-        vec, img = torch.zeros(1, 1, observation.SIZE, device=device), blank(c, device)
+        vec, img = torch.zeros(1, 1, vector_size(c), device=device), blank(c, device)
         torch.set_num_threads(1)
         with torch.no_grad():
             ts = []
@@ -317,7 +334,7 @@ def main(argv=None) -> int:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     roots = [q for q in sorted((DATA / "demos").iterdir()) if (q / f"crops_k{args.k}_{args.size}.npy").exists()
-             and Recording(q).meta["setting"].get("difficulty") in set(args.difficulty.split(","))]
+             and is_demo(Recording(q).meta) and Recording(q).meta["setting"].get("difficulty") in set(args.difficulty.split(","))]
     if len(roots) < 3:
         raise SystemExit(f"need at least 3 sessions with crops; found {len(roots)} (scripts/prepare_crops.py)")
     sessions = [Session(r, args.k, args.size) for r in roots]

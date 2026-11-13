@@ -7,6 +7,12 @@ the countdown. Press **F10** to stop early.
     python scripts/play.py runs/bc/medium_v4/policy.zip --difficulty medium --minutes 5
     python scripts/play.py runs/bc/medium_v4/policy.zip --difficulty medium --minutes 5 --blocks 6   # gate N1
     python scripts/play.py random --difficulty easy --minutes 1       # no policy: random actions
+    python scripts/play.py scripted --playing mordex --difficulty medium --minutes 60   # label Mordex's moves
+
+``scripted`` is brawl/scripted.py: it shows every move, to label what a fighter is doing. Its run is
+saved under <BRAWL_DATA>/demos/ as decisions (observation, action, events) and the 96 px crops of
+both fighters, cut from the full-size frame; the frames themselves are not kept (1.3 GB an hour).
+With ``--playing mordex`` you pick Mordex in the game and the bot is Wu Shang.
 
 ``--blocks n`` plays n blocks of ``--minutes`` one after the other without stopping and reports each
 block and their spread: how much the same policy's result varies from block to block is the noise
@@ -39,7 +45,8 @@ DETECTOR = RUNS / "detector" / "armed_yolo11s-pose_960" / "weights" / "best.engi
 MATCH = 3  # stocks to win a virtual match
 
 
-def play(env, choose, *, block_s: float, blocks: int, stop=lambda: False, now=time.perf_counter, log=print) -> dict:
+def play(env, choose, *, block_s: float, blocks: int, stop=lambda: False, now=time.perf_counter, log=print,
+         each=None) -> dict:
     """Step ``env`` with ``choose(obs) -> action`` for ``blocks`` blocks of ``block_s`` seconds.
     Returns the per-block totals, the virtual matches, and the timing of every decision."""
     obs, _ = env.reset()
@@ -58,6 +65,8 @@ def play(env, choose, *, block_s: float, blocks: int, stop=lambda: False, now=ti
         action = choose(obs)
         think.append(now() - t)
         obs, reward, _, _, info = env.step(action)
+        if each is not None:
+            each(info)
         e, timing, b = info["events"], info["timing"], rows[-1]
         b["dealt"] += e.damage_dealt
         b["taken"] += e.damage_taken
@@ -77,6 +86,43 @@ def play(env, choose, *, block_s: float, blocks: int, stop=lambda: False, now=ti
             race = [0, 0]
     return {"blocks": rows, "matches_won": matches[0], "matches_lost": matches[1], "late_frames": late, "buttons": buttons,
             "think_s": think, "sense_s": sense, "present": present, "seconds": now() - t0}
+
+
+class Crops:
+    """Keeps each decision's observation, both fighters' crops, action and events, as scripts/prepare_demos.py
+    and scripts/prepare_crops.py would have produced them from a recording."""
+
+    def __init__(self, env, root: Path, decisions: int, size: int = 96) -> None:
+        from brawl import observation, vision
+
+        self.env, self.root, self.n, self.vision, self.o = env, root, 0, vision, observation
+        root.mkdir(parents=True, exist_ok=False)
+        self.crops = np.lib.format.open_memmap(root / f"crops_k{env.k}_{size}.npy", mode="w+", dtype=np.uint8,
+                                               shape=(decisions, 2, size, size))
+        self.obs = np.zeros((decisions, observation.SIZE), np.float32)
+        self.action = np.zeros((decisions, 2), np.int64)
+        self.events = np.zeros((decisions, 4), np.float32)
+
+    def before(self, obs, action) -> None:
+        if self.n >= len(self.obs):
+            return
+        for i, who in enumerate((self.o.AGENT, self.o.OPPONENT)):
+            self.crops[self.n, i] = self.vision.crop(self.env.frame, self.env.builder.last[who], self.crops.shape[-1])
+        self.obs[self.n], self.action[self.n] = obs, action
+
+    def after(self, e) -> None:
+        if self.n < len(self.obs):
+            self.events[self.n] = (e.damage_dealt, e.damage_taken, e.ko_scored, e.ko_lost)
+            self.n += 1
+
+    def close(self, meta: dict) -> None:
+        n, e = self.n, self.events
+        self.crops.flush()
+        np.savez_compressed(self.root / f"decisions_k{self.env.k}.npz", obs=self.obs[:n], action=self.action[:n],
+                            dealt=e[:n, 0], taken=e[:n, 1], ko_scored=e[:n, 2], ko_lost=e[:n, 3],
+                            lost_presses=np.zeros(n, np.int64), features=np.array(self.o.FEATURES), k=self.env.k)
+        (self.root / "meta.json").write_text(json.dumps({**meta, "rows": n * self.env.k, "decisions": n}, indent=2),
+                                             encoding="utf-8")
 
 
 def report(r: dict, name: str, title: str, k: int, calls: dict, steps: int) -> list[str]:
@@ -129,7 +175,9 @@ def report(r: dict, name: str, title: str, k: int, calls: dict, steps: int) -> l
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("policy", help="policy.zip from scripts/train_bc.py, or 'random'")
+    p.add_argument("policy", help="policy.zip from scripts/train_bc.py, 'random', or 'scripted' (recorded)")
+    p.add_argument("--playing", choices=("wu_shang", "mordex"), default="wu_shang",
+                   help="scripted only: the legend picked in the game; the bot is the other one")
     p.add_argument("--difficulty", required=True, help="the bot's level, as set in the game (for the report)")
     p.add_argument("--minutes", type=float, default=5.0, help="length of one block")
     p.add_argument("--blocks", type=int, default=1, help="blocks played one after the other (gate N1: 6 or more)")
@@ -157,7 +205,10 @@ def main(argv=None) -> int:
     torch.set_num_threads(1)  # a small MLP on one core; more threads only add waiting
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
-    policy = None if args.policy == "random" else learn.load_policy(Path(args.policy), "cpu")
+    scripted = args.policy == "scripted"
+    if args.playing != "wu_shang" and not scripted:
+        raise SystemExit("--playing mordex is for the scripted player: the policies play Wu Shang")
+    policy = None if args.policy in ("random", "scripted") else learn.load_policy(Path(args.policy), "cpu")
     perception = Perception(Yolo(args.detector, conf=0.05), step=args.k)
     screen = capture.Screen(timeout_s=0.05)
     keys = Keys(DirectInput(), tap_s=0.01)
@@ -165,7 +216,13 @@ def main(argv=None) -> int:
              else SteppedClock(keys, counter=FrameCounter(screen), key_gap_s=0.01))
     reader = KeyReader()
 
+    script = crops = None
+
     def choose(obs):
+        if scripted:
+            action = script(env.sense)
+            crops.before(obs, action)
+            return action
         if policy is None:
             return int(rng.integers(9)), int(rng.integers(6))
         with torch.no_grad():
@@ -177,16 +234,35 @@ def main(argv=None) -> int:
     perception(screen.grab(fresh=True).image, 0)  # warm the detector up before the clock starts
     clock.start()
     env = BrawlEnv(clock, screen, perception, k=args.k)
+    if scripted:
+        from brawl.paths import DATA
+        from brawl.scripted import Scripted
+
+        script = Scripted(args.playing, args.seed)
+        crops = Crops(env, DATA / "demos" / datetime.now().strftime("%Y%m%d_%H%M%S"),
+                      int(args.minutes * args.blocks * 60 * 60 / args.k) + 200)
     print(f"playing {args.blocks} x {args.minutes:g} min: press F10 to stop", flush=True)
     try:
-        r = play(env, choose, block_s=args.minutes * 60, blocks=args.blocks, stop=reader.stop_requested)
+        r = play(env, choose, block_s=args.minutes * 60, blocks=args.blocks, stop=reader.stop_requested,
+                 each=(lambda info: crops.after(info["events"])) if scripted else None)
     finally:
         env.close()
         keys.release_all()
+        if scripted:
+            names = {"wu_shang": "Wu Shang", "mordex": "Mordex"}
+            crops.close({"source": "scripted", "regime": args.regime, "started": datetime.now().isoformat(timespec="seconds"),
+                         "setting": {"map": "Brawlhaven (small)", "camera": "fixed", "agent": names[args.playing],
+                                     "opponent": names["mordex" if args.playing == "wu_shang" else "wu_shang"],
+                                     "difficulty": args.difficulty, "mode": "training", "overlays": []},
+                         "k": args.k, "seed": args.seed,
+                         "note": "crops cut from the full-size frame; frames not kept. Observation entries about the "
+                                 "agent describe Wu Shang whoever plays; the action is the player's."})
+            print(f"{crops.n} decisions recorded -> {crops.root}", flush=True)
     if not r["think_s"]:
         print("stopped before the first decision: nothing to report")
         return 1
-    name = args.name or (f"{Path(args.policy).parent.name if policy else 'random'}_{args.difficulty}_{args.regime}"
+    name = args.name or (f"{Path(args.policy).parent.name if policy else args.policy + ('_' + args.playing if scripted else '')}"
+                         f"_{args.difficulty}_{args.regime}"
                          + (f"_x{args.blocks}" if args.blocks > 1 else ""))
     title = (f"Policy {args.policy} ({'most likely action' if args.greedy else 'sampled'}), bot {args.difficulty}, "
              f"{args.regime}, k = {args.k}, {args.blocks} x {args.minutes:g} min.")

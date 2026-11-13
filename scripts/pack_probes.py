@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from brawl.paths import DATA  # noqa: E402
-from brawl.record import Recording  # noqa: E402
+from brawl.record import Recording, is_demo  # noqa: E402
 
 CODE = ("brawl/__init__.py", "brawl/paths.py", "brawl/actions.py", "brawl/stage.py", "brawl/observation.py",
         "brawl/ledger.py", "brawl/record.py", "brawl/game/__init__.py", "brawl/game/keys.py", "brawl/sense/__init__.py",
@@ -54,7 +54,7 @@ def main(argv=None) -> int:
     levels = set(args.difficulty.split(","))
     names = (f"decisions_k{args.k}.npz", f"crops_k{args.k}_{args.size}.npy", "meta.json")
     roots = [q for q in sorted((DATA / "demos").iterdir()) if all((q / n).exists() for n in names)
-             and Recording(q).meta["setting"].get("difficulty") in levels]
+             and is_demo(Recording(q).meta) and Recording(q).meta["setting"].get("difficulty") in levels]
     out = DATA / "probes" / "brawl_probe_pack.zip"
     out.parent.mkdir(parents=True, exist_ok=True)
     decisions = 0

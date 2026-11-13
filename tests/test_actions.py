@@ -56,3 +56,31 @@ def test_the_stage_tells_ground_ledges_and_recovery():
     assert not jumping.grounded and jumping.height == 132
     off = stage.place(500, 700)
     assert off.offstage and off.below and off.to_left_ledge == -105 and not off.grounded
+
+
+def test_the_scripted_player_shows_every_button_stays_on_the_stage_and_recovers():
+    from types import SimpleNamespace
+
+    from brawl.scripted import Scripted
+    from brawl.sense.truth import Box
+
+    def sense(x, y, cls="mordex_unarmed", spawns=()):
+        me = SimpleNamespace(box=Box(cls, x - 30, y - 40, x + 30, y + 40, 0.9, point=(x, y)))
+        return SimpleNamespace(fighters={"mordex": me},
+                               weapons=[Box("weapon_spawn", s - 15, 540, s + 15, 620, 0.9) for s in spawns])
+
+    script, seen = Scripted("mordex"), set()
+    for _ in range(3000):
+        seen.add(script(sense(950, 582, "mordex_scythe")))
+    assert {b for _, b in seen} == set(range(6)) and len({d for d, _ in seen}) == 9
+    quiet = [script(sense(950, 582, "mordex_scythe")) for _ in range(1000)]
+    assert sum(a == (0, 0) for a in quiet) > 300  # pauses between moves
+    right, left = actions.DIRECTION_NAMES.index("right"), actions.DIRECTION_NAMES.index("left")
+    fresh = Scripted("mordex")
+    assert fresh(sense(stage.LEFT + 20, 582)) == (right, 0) and fresh(sense(stage.RIGHT - 20, 582)) == (left, 0)
+    off = [fresh(sense(stage.LEFT - 150, 700)) for _ in range(6)]
+    assert off[0] == (actions.DIRECTION_NAMES.index("up-right"), 1) and off[1] == (right, 0) and off[5][1] == 1
+    assert Scripted("mordex")(SimpleNamespace(fighters={}, weapons=[])) == (0, 0)  # not on the screen: nothing
+    fetch = Scripted("mordex", seed=1)
+    moves = [fetch(sense(900, 582, spawns=(1000,))) for _ in range(400)]
+    assert (right, 0) in moves and any(fetch(sense(1000, 582, spawns=(1000,))) == (0, 5) for _ in range(400))

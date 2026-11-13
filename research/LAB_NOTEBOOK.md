@@ -1089,3 +1089,27 @@ until there is RL-scale data; the recurrent layer is the next addition worth an 
 
 Added: scripts/analyze.py (blocks, standard errors, change beyond noise), scripts/sweep.py (seeds
 back to back, unattended).
+
+## 2026-11-12: does a crop show what its fighter is doing? (scripts/probe_state.py)
+
+Labels for free from the key log: Wu Shang is "attacking" if a light or heavy was pressed in the 4
+decisions before (16.5% of decisions), "dodging" for a dodge in the last 4 (9.1%), "jumping" for a
+jump in the last 3 (5.7%). 9 Medium sessions held out whole, 3 folds (results/probes/state.md):
+
+| Input (Wu Shang only) | Attacking | Dodging | Jumping |
+|---|---|---|---|
+| kinematics (position, velocity, weapon, place) | 0.707 ± 0.007 | 0.812 ± 0.006 | 0.836 ± 0.013 |
+| his 96 px crop, one frame | 0.875 ± 0.002 | 0.891 ± 0.000 | 0.929 ± 0.004 |
+| crop + kinematics | 0.886 ± 0.002 | 0.901 ± 0.002 | 0.932 ± 0.003 |
+
+- **The picture shows the action state** (AUC; 0.5 is chance): attacking +0.17 over what position
+  and velocity tell, dodging +0.08, jumping +0.09. The user's intuition holds for the fighter whose
+  state is labelled.
+- **The reader does not carry over to Mordex.** Trained on Wu Shang, its "attacking" output on
+  Mordex's crop ranks the decisions before Wu Shang takes damage at 0.566 (being close alone: 0.710).
+  Two explanations cannot be told apart here: a reader of Wu Shang's sprites does not read Mordex's,
+  or Mordex attacking does not predict damage because the human dodges.
+- So the long probe's negative result is about the targets and the data size, not about what a
+  crop contains. What would settle Mordex: labels of his own state. The key log gives them if the
+  human plays Mordex against a Wu Shang bot.
+- Held-out outputs written to <recording>/state_k3.npz.

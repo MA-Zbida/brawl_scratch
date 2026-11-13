@@ -30,6 +30,7 @@ train:
   # -- rdqn --
   rdqn:
     hidden: 256         # GRU size
+    drop_history: true  # leave the last actions out of the input (they taught the network to repeat itself)
     burn_in: 16         # decisions replayed to rebuild the memory before the loss
     train_length: 48    # decisions of each sequence that carry the loss
     n_step: 5

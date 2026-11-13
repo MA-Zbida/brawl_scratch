@@ -1143,3 +1143,30 @@ not collapsed. runs/rdqn/pretrain_all/qnet.pt starts the live runs.
 minutes, learning rate 1e-4, clip 0.1, target KL 0.01); scripts/play.py plays a qnet.pt greedily;
 configs are checked at every level. 52 tests pass. Not built: the difficulty macro (levels are set
 by hand between runs).
+
+## 2026-11-13: first smoke run of the main engine, and the copycat fault
+
+`train.py --config configs/experiments/smoke_rdqn.yaml`, 5 minutes against Medium, from the network
+pretrained with the last-4-actions history in its input: stocks 0 - 18, damage dealt 63, taken 790.
+Bad from the first minute, before learning had changed much: the starting network, not RL.
+
+**Cause, measured offline:** given held-out situations with the action history taken from random
+other moments, the network chose the history's last action 88-90% of the time (the human repeats the
+previous action 63-69%). Playing greedily, it then repeated its own last action, e.g. walking off the
+stage (4 stocks lost in the first minute with 79 damage taken). The cloned policies survived because
+they sample. The held-out check had fed the human's history, not the network's own, so it missed it.
+
+**Fix:** the action history is left out of the Q-network's input (train.rdqn.drop_history); the GRU and
+the timers keep what happened. Re-pretrained (results/rdqn/pretrain_all.md, held out):
+
+| | With history | Without |
+|---|---|---|
+| Repeats a history taken from elsewhere | 0.88-0.90 | 0.156 |
+| Right where the human changes action | 0.213 | 0.248 (cloning: 0.224) |
+| Human's new button presses matched | 0.141 | 0.162 |
+| Action right overall | 0.689 | 0.437 (it changes action more often than the human) |
+| Decisions with a button (human 0.300) | 0.252 | 0.239 |
+
+The copycat check is now part of scripts/pretrain_rdqn.py. The rest of the smoke run worked: learner
+6.1-6.5 updates a second (asked 8: it shares the CPU with the game loop), perception 32 ms (26 without
+the learner), under 1% of decisions late, one focus pause handled.

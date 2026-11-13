@@ -27,17 +27,25 @@ from brawl.paths import CONFIGS, RESULTS, RUNS  # noqa: E402
 from train import demo_sessions  # noqa: E402
 
 
-def play_back(net, root: Path, k: int, device: str) -> tuple[np.ndarray, np.ndarray]:
-    """The network's greedy action at every decision of a session, and the human's (joint indices)."""
+def play_back(net, root: Path, k: int, device: str, shuffle_history: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    """The network's greedy action at every decision of a session, and the human's (joint indices). With
+    ``shuffle_history`` the action history in each observation comes from a random other decision, and the
+    human action returned is that decision's last one: how often the network just repeats its history."""
     import torch
 
     z = np.load(root / f"decisions_k{k}.npz")
     human = z["action"][:, 0] * actions.SHAPE[1] + z["action"][:, 1]
+    obs = z["obs"]
+    if shuffle_history:
+        perm = np.random.default_rng(0).permutation(len(human))
+        obs = obs.copy()
+        obs[:, rdqn.HISTORY] = obs[perm][:, rdqn.HISTORY]
+        human = np.concatenate([[0], human[:-1]])[perm]
     net.eval()
     out, h = [], None
     with torch.no_grad():
         for a in range(0, len(human), 2048):
-            q, h = net(torch.as_tensor(z["obs"][a:a + 2048], dtype=torch.float32, device=device)[None], h)
+            q, h = net(torch.as_tensor(obs[a:a + 2048], dtype=torch.float32, device=device)[None], h)
             out.append(q[0].argmax(-1).cpu().numpy())
     return np.concatenate(out), human
 
@@ -81,6 +89,7 @@ def main(argv=None) -> int:
         learner = rdqn.Learner(observation.SIZE, cfg, gamma, device, seed=0)
         rdqn.pretrain(learner, rdqn.demonstrations(train, k, *weights), updates, lambda m: print(m, flush=True))
         s = score([play_back(learner.net, r, k, device) for r in test])
+        copy = np.mean([np.mean(np.equal(*play_back(learner.net, r, k, device, shuffle_history=True))) for r in test])
         lines += [f"Held-out check: trained on {len(train)} sessions, played back greedily on {len(test)} others "
                   f"({', '.join(r.name for r in test)}), memory carried through each session.", "",
                   "| Measure | Value |", "|---|---|",
@@ -90,10 +99,12 @@ def main(argv=None) -> int:
                   f"| Human's new button presses matched | {s['new_press']:.3f} |",
                   f"| Decisions with a button: human / network | {s['buttons_human']:.3f} / {s['buttons_agent']:.3f} |",
                   f"| Different actions used by the network (of 54) | {s['actions_used']} |",
-                  f"| Share of its most used action | {s['top_action']:.3f} |", "",
+                  f"| Share of its most used action | {s['top_action']:.3f} |",
+                  f"| Repeats an action history taken from elsewhere (copying itself; 2026-11-13 network: 0.88-0.90) | "
+                  f"{copy:.3f} |", "",
                   "For scale, behaviour cloning (medium_v4) is right at 0.224 where the human changes action, on held-out "
                   "stretches.", ""]
-        print("\n".join(lines[-14:]), flush=True)
+        print("\n".join(lines[-15:]), flush=True)
         del learner
     learner = rdqn.Learner(observation.SIZE, cfg, gamma, device, seed=0)
     rdqn.pretrain(learner, rdqn.demonstrations(roots, k, *weights), updates, lambda m: print(m, flush=True))

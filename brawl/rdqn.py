@@ -24,6 +24,11 @@ import numpy as np
 from brawl import actions, observation
 
 N_ACTIONS = actions.SHAPE[0] * actions.SHAPE[1]
+# The last actions, one-hot: left out of the network's input by default. With them the pretrained network
+# learned to repeat whatever the history said (88-90% of its choices on held-out play, 2026-11-13), and
+# playing greedily it then repeated its own last action until it walked off the stage. The GRU and the
+# timers still carry what happened.
+HISTORY = [i for i, name in enumerate(observation.FEATURES) if name.startswith("action_")]
 
 
 def joint(action) -> int:
@@ -34,21 +39,25 @@ def split(j: int) -> tuple[int, int]:
     return divmod(int(j), actions.SHAPE[1])
 
 
-def build(n_in: int, hidden: int, device: str = "cpu"):
+def build(n_in: int, hidden: int, device: str = "cpu", drop: list[int] | None = None):
     import torch
     from torch import nn
+
+    keep = [i for i in range(n_in) if i not in set(drop or [])]
 
     class QNet(nn.Module):
         def __init__(self):
             super().__init__()
-            self.inp = nn.Sequential(nn.Linear(n_in, 256), nn.ReLU())
+            self.drop = list(drop or [])
+            self.register_buffer("keep", torch.as_tensor(keep, dtype=torch.long), persistent=False)
+            self.inp = nn.Sequential(nn.Linear(len(keep), 256), nn.ReLU())
             self.gru = nn.GRU(256, hidden, batch_first=True)
             self.value = nn.Sequential(nn.Linear(hidden, 256), nn.ReLU(), nn.Linear(256, 1))
             self.advantage = nn.Sequential(nn.Linear(hidden, 256), nn.ReLU(), nn.Linear(256, N_ACTIONS))
 
         def forward(self, x, h=None):
             """x [B, T, n_in] -> Q [B, T, 54], the GRU's last state."""
-            z, h = self.gru(self.inp(x), h)
+            z, h = self.gru(self.inp(x.index_select(-1, self.keep)), h)
             a = self.advantage(z)
             return self.value(z) + a - a.mean(-1, keepdim=True), h
 
@@ -61,7 +70,7 @@ def save(net, path: Path, n_in: int, hidden: int) -> None:
 
     tmp = Path(path).with_suffix(".tmp")
     torch.save({"state": {k: v.detach().cpu() for k, v in net.state_dict().items()}, "n_in": n_in, "hidden": hidden,
-                "features": list(observation.FEATURES)}, tmp)
+                "features": list(observation.FEATURES), "drop": list(getattr(net, "drop", []))}, tmp)
     for attempt in range(50):  # Windows refuses while the actor is reading the old file: wait for it
         try:
             os.replace(tmp, path)
@@ -77,7 +86,7 @@ def load(path: Path, device: str = "cpu"):
     saved = torch.load(path, map_location=device, weights_only=False)
     if saved["features"] != list(observation.FEATURES):
         raise SystemExit(f"{path}: trained on another observation vector")
-    net = build(saved["n_in"], saved["hidden"], device)
+    net = build(saved["n_in"], saved["hidden"], device, saved.get("drop", []))
     net.load_state_dict(saved["state"])
     return net, saved
 
@@ -203,7 +212,8 @@ class Learner:
 
         torch.manual_seed(seed)
         self.cfg, self.gamma, self.device, self.n_in = cfg, gamma, device, n_in
-        self.net = load(init, device)[0] if init else build(n_in, int(cfg["hidden"]), device)
+        drop = HISTORY if cfg.get("drop_history", True) else []
+        self.net = load(init, device)[0] if init else build(n_in, int(cfg["hidden"]), device, drop)
         self.target = copy.deepcopy(self.net).eval()
         self.target.gru.flatten_parameters()
         self.opt = torch.optim.AdamW(self.net.parameters(), lr=float(cfg["learning_rate"]), weight_decay=1e-5)

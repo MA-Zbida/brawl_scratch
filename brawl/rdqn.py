@@ -191,7 +191,10 @@ def losses(net, target, obs, action, reward, margin_mask, cfg: dict, gamma: floa
         q_target, _ = target(obs)
         steps = torch.arange(b, b + t, device=obs.device)
         ret = sum(gamma ** j * reward[:, steps + j] for j in range(n))
-        best = q[:, steps + n].detach().argmax(-1, keepdim=True)
+        if cfg.get("bootstrap", "double_q") == "sarsa":  # the value of the action actually taken next
+            best = action[:, steps + n, None]
+        else:  # double Q: the online network picks, the target network values
+            best = q[:, steps + n].detach().argmax(-1, keepdim=True)
         y = ret + gamma ** n * q_target[:, steps + n].gather(-1, best).squeeze(-1)
     q_t = q[:, steps]
     taken = action[:, steps]

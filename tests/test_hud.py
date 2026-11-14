@@ -79,3 +79,21 @@ def test_a_ko_at_zero_damage_is_seen_by_its_badge_and_unreadable_frames_change_n
     assert ledger.update(None, KO_FRAMES + 5).ko_scored == 0
     after = ledger.update(next(frames((8, 0, "lost"))), KO_FRAMES + 6)
     assert after.ko_scored == 0 and after.damage_dealt == pytest.approx(8, abs=0.5)
+
+
+def test_a_stock_lost_without_the_other_credited_is_a_fall():
+    from brawl.ledger import CREDIT_FRAMES
+
+    def frame(m, badge_m=None, badge_w=None):
+        ring = lambda d: (255, 255, round(255 - d * 255 / 50))  # noqa: E731
+        return hud.read(draw(("mordex", ring(m), badge_m), ("wu_shang", (255, 255, 255), badge_w)))
+
+    ledger = Ledger()
+    ledger.update(frame(30), 0)
+    assert ledger.update(frame(0), 10).ko_scored == 1                  # Mordex KO'd...
+    assert ledger.update(frame(0, "lost", "scored"), 25).fell == 0     # ...and Wu Shang credited: a KO
+    assert sum(ledger.update(frame(0), 25 + i).opponent_fell for i in range(1, CREDIT_FRAMES + 20)) == 0
+    ledger.update(frame(30), 1000)
+    assert ledger.update(frame(0), 1010).ko_scored == 1                # KO'd again, nobody credited
+    falls = [ledger.update(frame(0, "lost"), 1010 + i).opponent_fell for i in range(1, CREDIT_FRAMES + 5)]
+    assert sum(falls) == 1 and falls.index(1) == CREDIT_FRAMES - 1

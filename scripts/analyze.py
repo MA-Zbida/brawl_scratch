@@ -71,7 +71,7 @@ def main(argv=None) -> int:
             lines += [f"## {run.parent.name} / {run.name}", "", f"Fewer than {args.block} rollouts: not summarised.", ""]
             continue
         s = summarise(progress, args.block)
-        finished = (run / "policy.zip").exists()
+        finished = (run / "policy.zip").exists() or (run / "qnet.pt").exists()
         verdict = "no blocks to compare"
         if s["change"] == s["change"]:
             beyond = abs(s["change"]) > 2 * s["se_change"]

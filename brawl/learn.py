@@ -274,7 +274,9 @@ def train_ppo(env, cfg: dict, run_dir: Path, *, realtime: bool, stop=lambda: Fal
 
 RDQN_PROGRESS = ("rollout", "steps", "game_frames", "wall_s", "play_s", "stall_s", "stall_frames", "stocks_taken",
                  "stocks_lost", "damage_dealt", "damage_taken", "reward", "stall_stocks_lost", "stall_damage_taken",
-                 "late_frames", "sense_ms", "over_budget", "pauses", "updates", "learner_lag", "weights_loaded")
+                 "late_frames", "sense_ms", "over_budget", "pauses", "updates", "learner_lag", "weights_loaded", "fell",
+                 "opponent_fell")
+TRACE_ROWS = 6000  # decisions per shard of a run's trace (5 minutes)
 
 
 def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: bool, reward_weights: tuple[float, float],
@@ -288,8 +290,9 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
     ``updates_per_decision``; in real time it never waits. A gap (lost focus) cuts the stream: no return
     is bootstrapped across it and the memory starts afresh.
 
-    Writes <run_dir>/progress.csv (one row per ``n_steps`` decisions), learner.csv, checkpoints/ and
-    qnet.pt (qnet_stopped.pt if the run did not reach its end).
+    Writes <run_dir>/progress.csv (one row per ``n_steps`` decisions), learner.csv, checkpoints/,
+    trace/ (every decision: observation, action, reward, events; shards of TRACE_ROWS) and qnet.pt
+    (qnet_stopped.pt if the run did not reach its end).
     """
     import csv
     import multiprocessing as mp
@@ -339,7 +342,20 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
 
     def new() -> dict:
         return dict(stocks_taken=0, stocks_lost=0, damage_dealt=0.0, damage_taken=0.0, reward=0.0, late_frames=0,
-                    game_frames=0, pauses=0)
+                    game_frames=0, pauses=0, fell=0, opponent_fell=0)
+
+    (run_dir / "trace").mkdir(exist_ok=True)
+    trace: list = []
+
+    def dump(final: bool = False) -> None:
+        if trace and (final or len(trace) >= TRACE_ROWS):
+            cols = list(zip(*trace))
+            np.savez_compressed(run_dir / "trace" / f"shard_{int(cols[0][0]):07d}.npz", step=np.array(cols[0]),
+                                obs=np.array(cols[1], np.float16), action=np.array(cols[2]), reward=np.array(cols[3], np.float32),
+                                events=np.array(cols[4], np.float32), readable=np.array(cols[5]),
+                                events_doc=np.array(["damage_dealt", "damage_taken", "ko_scored", "ko_lost", "fell",
+                                                     "opponent_fell"]), features=np.array(observation.FEATURES))
+            trace.clear()
 
     s, sense, started = new(), [], now()
 
@@ -380,7 +396,8 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
                 values, h = net(torch.as_tensor(obs, dtype=torch.float32)[None, None], h)
             j = int(rng.integers(rdqn.N_ACTIONS)) if rng.random() < eps else int(values[0, 0].argmax())
             nxt, reward, _, _, info = env.step(rdqn.split(j))
-            buf.append((obs, j, reward, cut_next))
+            before = obs
+            buf.append((before, j, reward, cut_next))
             cut_next, obs = False, nxt
             decisions.value = step
             if len(buf) >= 64:
@@ -390,10 +407,15 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
             s["stocks_lost"] += e.ko_lost
             s["damage_dealt"] += e.damage_dealt
             s["damage_taken"] += e.damage_taken
+            s["fell"] += e.fell
+            s["opponent_fell"] += e.opponent_fell
             s["reward"] += float(reward)
             s["late_frames"] += timing.late_frames
             s["game_frames"] += timing.frames
             sense.append(info["sense_s"])
+            trace.append((step, before, j, reward, (e.damage_dealt, e.damage_taken, e.ko_scored, e.ko_lost, e.fell,
+                                                         e.opponent_fell), info["sense"].readable))
+            dump()
             unreadable = 0 if info["sense"].readable else unreadable + 1
             if unreadable >= int(q["watchdog_decisions"]):
                 log("the HUD has not been read for a minute: the game is not showing the fight; ending the run")
@@ -412,7 +434,7 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
                 rows.writerow({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()})
                 file.flush()
                 minutes = max(s["game_frames"] / 3600, 1e-9)
-                log(f"block {n} ({step} decisions): stocks {s['stocks_taken']} - {s['stocks_lost']}, damage "
+                log(f"block {n} ({step} decisions): stocks {s['stocks_taken']} - {s['stocks_lost']} ({s['fell']} fell), damage "
                     f"{s['damage_dealt']:.0f} / {s['damage_taken']:.0f}, reward per minute {s['reward'] / minutes:.2f}; "
                     f"{updates.value} updates")
                 if n % int(cfg["checkpoint_every"]) == 0:
@@ -420,6 +442,7 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
                 s, sense, started = new(), [], now()
         send()
     finally:
+        dump(final=True)
         env.idle()
         done.set()
         queue.cancel_join_thread()  # decisions not yet read are dropped rather than block the exit

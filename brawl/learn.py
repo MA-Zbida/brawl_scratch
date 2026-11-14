@@ -275,7 +275,7 @@ def train_ppo(env, cfg: dict, run_dir: Path, *, realtime: bool, stop=lambda: Fal
 RDQN_PROGRESS = ("rollout", "steps", "game_frames", "wall_s", "play_s", "stall_s", "stall_frames", "stocks_taken",
                  "stocks_lost", "damage_dealt", "damage_taken", "reward", "stall_stocks_lost", "stall_damage_taken",
                  "late_frames", "sense_ms", "over_budget", "pauses", "updates", "learner_lag", "weights_loaded", "fell",
-                 "opponent_fell")
+                 "opponent_fell", "rollbacks")
 TRACE_ROWS = 6000  # decisions per shard of a run's trace (5 minutes)
 BEST_WINDOW = 30  # blocks (30 minutes at 1,200 decisions): the window over which the best policy is judged
 
@@ -327,10 +327,19 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
     shutil.copy(init, latest)
     ctx = mp.get_context("spawn")
     queue, decisions, updates, done = ctx.Queue(maxsize=400), ctx.Value("q", 0), ctx.Value("q", 0), ctx.Event()
+    rollback = ctx.Value("i", 0)
+    if q.get("explore", "uniform") == "human":  # how often the human took each action, over the demonstrations
+        counts = np.ones(rdqn.N_ACTIONS)
+        for r in demo_roots:
+            a = np.load(Path(r) / f"decisions_k{env.k}.npz")["action"]
+            counts += np.bincount(a[:, 0] * actions.SHAPE[1] + a[:, 1], minlength=rdqn.N_ACTIONS)
+        explore_p = counts / counts.sum()
+    else:
+        explore_p = np.full(rdqn.N_ACTIONS, 1 / rdqn.N_ACTIONS)
     os.environ["BRAWL_NO_EARLY_CAPTURE"] = "1"  # the learner process must not take the screen
     learner = ctx.Process(target=rdqn.learner_main, daemon=True,
                           args=(q, float(cfg["gamma"]), [str(r) for r in demo_roots], env.k, reward_weights, str(run_dir),
-                                str(init), queue, decisions, updates, done, int(cfg["seed"])))
+                                str(init), queue, decisions, updates, done, int(cfg["seed"]), rollback))
     learner.start()
     rng = np.random.default_rng(int(cfg["seed"]))
     eps, per, block = float(q["epsilon"]), float(q["updates_per_decision"]), int(cfg["n_steps"])
@@ -398,7 +407,7 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
                     pass
             with torch.no_grad():
                 values, h = net(torch.as_tensor(obs, dtype=torch.float32)[None, None], h)
-            j = int(rng.integers(rdqn.N_ACTIONS)) if rng.random() < eps else int(values[0, 0].argmax())
+            j = int(rng.choice(rdqn.N_ACTIONS, p=explore_p)) if rng.random() < eps else int(values[0, 0].argmax())
             nxt, reward, _, _, info = env.step(rdqn.split(j))
             before = obs
             buf.append((before, j, reward, cut_next))
@@ -434,7 +443,8 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
                        "stall_s": 0.0, "stall_frames": 0, "stall_stocks_lost": 0, "stall_damage_taken": 0.0,
                        "sense_ms": round(float(np.median(sense)) * 1000, 1),
                        "over_budget": round(float(np.mean(np.array(sense) > budget_s)), 4), "updates": updates.value,
-                       "learner_lag": round(updates.value / max(per * step, 1e-9), 3), "weights_loaded": loaded, **s}
+                       "learner_lag": round(updates.value / max(per * step, 1e-9), 3), "weights_loaded": loaded,
+                       "rollbacks": rollback.value, **s}
                 rows.writerow({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()})
                 file.flush()
                 minutes = max(s["game_frames"] / 3600, 1e-9)
@@ -450,6 +460,11 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
                         best = rate
                         shutil.copy(latest, run_dir / "best.pt")
                         log(f"best so far: {rate:.2f} reward per minute over the last {BEST_WINDOW} blocks -> best.pt")
+                    elif rate < best - float(q.get("rollback") or float("inf")):
+                        rollback.value += 1
+                        window = []  # judge the restored weights on a fresh half hour
+                        log(f"the last {BEST_WINDOW} blocks ({rate:.2f}) fell {best - rate:.2f} below the best ({best:.2f}): "
+                            f"back to best.pt (rollback {rollback.value})")
                 s, sense, started = new(), [], now()
         send()
     finally:

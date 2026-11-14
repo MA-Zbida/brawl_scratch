@@ -273,11 +273,35 @@ def pretrain(learner: Learner, demos: Replay, updates: int, log=print) -> None:
             acc = []
 
 
-LEARNER_LOG = ("updates", "decisions", "live", "td", "margin", "q", "updates_per_s", "wall_s")
+LEARNER_LOG = ("updates", "decisions", "live", "td", "margin", "q", "updates_per_s", "wall_s", "q_live", "live_gap",
+               "rollbacks")
+LONG = 100  # decisions: the horizon of the check of the values on the agent's own play
+
+
+def live_gap(learner: "Learner", live: Replay) -> tuple[float, float]:
+    """On the agent's own decisions: the value it gave the action it took, and that value minus what the
+    next LONG decisions paid plus the target network's value after them. A gap that grows above zero is
+    the values inflating (2026-11-14: +0.8 over a night)."""
+    import torch
+
+    b = int(learner.cfg["burn_in"])
+    idx = live.sample(8, b + LONG + 1, learner.rng)
+    if idx is None:
+        return float("nan"), float("nan")
+    with torch.no_grad():
+        obs = torch.as_tensor(live.obs[idx].astype(np.float32), device=learner.device)
+        q, _ = learner.net(obs)
+        qt, _ = learner.target(obs)
+        act = torch.as_tensor(live.action[idx], device=learner.device)
+        reward = torch.as_tensor(live.reward[idx], device=learner.device)
+        g = learner.gamma ** torch.arange(LONG, device=learner.device, dtype=torch.float32)
+        q_a = q[:, b].gather(-1, act[:, b, None]).squeeze(-1)
+        target = (reward[:, b:b + LONG] * g).sum(1) + learner.gamma ** LONG * qt[:, b + LONG].max(-1).values
+    return float(q_a.mean()), float((q_a - target).mean())
 
 
 def learner_main(cfg: dict, gamma: float, demo_roots: list[str], k: int, reward_weights: tuple[float, float],
-                 run_dir: str, init: str, queue, decisions, updates, stop, seed: int) -> None:
+                 run_dir: str, init: str, queue, decisions, updates, stop, seed: int, rollback=None) -> None:
     """The learner process: replay = the demonstrations + the live decisions arriving on ``queue``;
     updates at most ``updates_per_decision`` times the decisions played; weights to latest.pt."""
     import queue as queues
@@ -294,9 +318,15 @@ def learner_main(cfg: dict, gamma: float, demo_roots: list[str], k: int, reward_
     log = open(run / "learner.csv", "w", newline="", encoding="utf-8")
     rows = csv.DictWriter(log, fieldnames=LEARNER_LOG)
     rows.writeheader()
-    t0, last, acc = time.perf_counter(), (time.perf_counter(), 0), []
+    t0, last, acc, rolled = time.perf_counter(), (time.perf_counter(), 0), [], 0
     try:
         while not stop.is_set():
+            if rollback is not None and rollback.value > rolled and (run / "best.pt").exists():
+                rolled = rollback.value  # the play got worse: continue from the best weights so far
+                state = load(run / "best.pt", cfg["device"])[0].state_dict()
+                learner.net.load_state_dict(state)
+                learner.target.load_state_dict(state)
+                save(learner.net, run / "latest.pt", observation.SIZE, int(cfg["hidden"]))
             try:
                 while True:
                     obs, action, reward, cut = queue.get_nowait()
@@ -321,7 +351,9 @@ def learner_main(cfg: dict, gamma: float, demo_roots: list[str], k: int, reward_
             if learner.updates % 500 == 0:
                 now = time.perf_counter()
                 m = np.mean(acc, 0)
-                rows.writerow({"updates": learner.updates, "decisions": decisions.value, "live": live.n,
+                q_live, gap = live_gap(learner, live)
+                rows.writerow({"q_live": round(q_live, 4), "live_gap": round(gap, 4), "rollbacks": rolled,
+                               "updates": learner.updates, "decisions": decisions.value, "live": live.n,
                                "td": round(float(m[0]), 5), "margin": round(float(m[1]), 5), "q": round(float(m[2]), 4),
                                "updates_per_s": round((learner.updates - last[1]) / max(now - last[0], 1e-9), 2),
                                "wall_s": round(now - t0, 1)})

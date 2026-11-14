@@ -44,7 +44,10 @@ train:
     demo_levels: [easy, medium, hard, extreme, chosen]  # human Wu Shang sessions kept in replay
     pretrain_updates: 20000
     updates_per_decision: 0.4  # 8 updates a second at 20 decisions; the CPU learner manages about 13
-    epsilon: 0.05       # random actions while training
+    epsilon: 0.02       # share of decisions that explore while training
+    explore: human      # an exploring decision takes an action as often as the human took it (uniform: any of the 54;
+                        # at 0.05 uniform the agent threw its weapon 10 times a minute and was armed 47% of the time)
+    rollback: 1.0       # reward per minute: when the last 30 minutes fall this far below the best 30, go back to best.pt
     sync_every: 100     # updates between weight files for the actor
     capacity: 600000    # live decisions kept
     threads: 4          # CPU threads of the learner

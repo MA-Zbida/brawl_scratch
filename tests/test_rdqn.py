@@ -75,7 +75,8 @@ def test_the_live_loop_plays_learns_in_another_process_and_saves(tmp_path):
              ko_scored=np.r_[np.zeros(n - 1), 1], ko_lost=np.zeros(n), features=np.array(observation.FEATURES))
     q = dict(hidden=32, burn_in=4, train_length=12, n_step=3, batch=4, learning_rate=1e-3, target_every=50, margin=0.5,
              margin_weight=1.0, live_margin_weight=0.3, demo_fraction=0.25, pretrain_updates=20, updates_per_decision=0.5,
-             epsilon=0.1, sync_every=10, capacity=5000, threads=1, device="cpu", watchdog_decisions=10000)
+             epsilon=0.1, explore="human", rollback=1.0, sync_every=10, capacity=5000, threads=1, device="cpu",
+             watchdog_decisions=10000)
     cfg = dict(init=None, total_steps=240, n_steps=60, checkpoint_every=2, gamma=0.99, seed=0, rdqn=q)
     game = Game()
     game.keys = SimpleNamespace(release_all=lambda: None)

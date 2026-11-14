@@ -277,6 +277,7 @@ RDQN_PROGRESS = ("rollout", "steps", "game_frames", "wall_s", "play_s", "stall_s
                  "late_frames", "sense_ms", "over_budget", "pauses", "updates", "learner_lag", "weights_loaded", "fell",
                  "opponent_fell")
 TRACE_ROWS = 6000  # decisions per shard of a run's trace (5 minutes)
+BEST_WINDOW = 30  # blocks (30 minutes at 1,200 decisions): the window over which the best policy is judged
 
 
 def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: bool, reward_weights: tuple[float, float],
@@ -291,8 +292,9 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
     is bootstrapped across it and the memory starts afresh.
 
     Writes <run_dir>/progress.csv (one row per ``n_steps`` decisions), learner.csv, checkpoints/,
-    trace/ (every decision: observation, action, reward, events; shards of TRACE_ROWS) and qnet.pt
-    (qnet_stopped.pt if the run did not reach its end).
+    trace/ (every decision: observation, action, reward, events; shards of TRACE_ROWS), best.pt (the
+    weights playing during the best BEST_WINDOW blocks so far, by reward) and qnet.pt (qnet_stopped.pt
+    if the run did not reach its end).
     """
     import csv
     import multiprocessing as mp
@@ -358,6 +360,8 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
             trace.clear()
 
     s, sense, started = new(), [], now()
+    window: list = []  # (reward, game frames) of the last BEST_WINDOW blocks
+    best = -float("inf")
 
     def send() -> None:
         if buf:
@@ -439,6 +443,13 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
                     f"{updates.value} updates")
                 if n % int(cfg["checkpoint_every"]) == 0:
                     shutil.copy(latest, run_dir / "checkpoints" / f"qnet_{step:07d}.pt")
+                window = (window + [(s["reward"], s["game_frames"])])[-BEST_WINDOW:]
+                if len(window) == BEST_WINDOW:
+                    rate = sum(r for r, _ in window) / max(sum(f for _, f in window) / 3600, 1e-9)
+                    if rate > best:  # the weights playing now were good over the last half hour
+                        best = rate
+                        shutil.copy(latest, run_dir / "best.pt")
+                        log(f"best so far: {rate:.2f} reward per minute over the last {BEST_WINDOW} blocks -> best.pt")
                 s, sense, started = new(), [], now()
         send()
     finally:

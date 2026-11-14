@@ -1,0 +1,17 @@
+name: rdqn_medium_v2
+description: >
+  The main engine against Medium, with the value-learning settings that tracked real outcomes best in
+  the offline test (results/rdqn/value_bench.md, 2026-11-14): gamma 0.99, 20-step returns, the target
+  network copied every 500 updates, learning rate 3e-5. Pretrained with the same settings
+  (scripts/pretrain_rdqn.py --config this file --name v2). About 7 hours of real-time play.
+base: ../base.yaml
+seeds: [0, 1, 2]
+overrides:
+  env: {difficulty: medium}
+  train:
+    learner: rdqn
+    init: runs/rdqn/pretrain_v2/qnet.pt
+    total_steps: 500000
+    checkpoint_every: 30
+    gamma: 0.99
+    rdqn: {n_step: 20, target_every: 500, learning_rate: 3.0e-5}

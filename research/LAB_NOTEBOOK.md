@@ -1170,3 +1170,33 @@ the timers keep what happened. Re-pretrained (results/rdqn/pretrain_all.md, held
 The copycat check is now part of scripts/pretrain_rdqn.py. The rest of the smoke run worked: learner
 6.1-6.5 updates a second (asked 8: it shares the CPU with the game loop), perception 32 ms (26 without
 the learner), under 1% of decisions late, one focus pause handled.
+
+## 2026-11-14: the overnight run, its cause, and an offline test of value learning
+
+**rdqn_medium seed 0** (7 h, 500,000 decisions, 186,000 updates; results/rdqn_medium/summary.md,
+results/figures/rl_runs.png, rl_stocks.png): reward per minute fell from -1.85 (first 10 minutes) to
+-4.32 (last 10), -2.47 +- 0.56 first to last block. Stocks 102 - 902. Damage taken per stock lost fell
+from 73 (hour 1) to 19 (hour 7): increasingly, it lost stocks by itself. The machinery held for 7 hours
+(perception 29-31 ms, 0.08% of decisions over the budget, no stall, no focus loss).
+
+**Cause: value estimates that never tracked outcomes, then inflated** (results/figures/value_estimates.png).
+Mean Q of the human's action against the true discounted return (gamma 0.995): Medium play +0.25 at
+the start, +1.05 after the night, true +0.55; Chosen play +0.19, +0.78, true -0.43. Offstage moments
+ended valued as high as onstage ones. The agent's own play (about -0.4 true) was valued about +1.1.
+
+**Offline test of value learning** (scripts/value_bench.py, results/rdqn/value_bench.md, value_bench.png):
+10 human sessions to train, 5 held out, 20,000 updates each; scored on Q(s, a_human) against the true
+return. Regressing the true return directly: correlation 0.34-0.39, unbiased. The night's settings
+(double Q, gamma 0.995, n 5, target 2000, lr 1e-4): correlation 0.25, the worst Q variant. Best:
+gamma 0.99, n 20, target 500, lr 3e-5: correlation 0.43, bias +0.09, a lost stock within 3 s ranked at
+0.74, a stock taken at 0.83. Without the margin loss every session is valued about +0.7 (it anchors the
+scale). No variant values the held-out Hard session (lost) below zero: the bot's level is not in the
+observation, and the training sessions are mostly won. Limit: the test uses human play only; the live
+inflation came from the agent's own data.
+
+**Changes:** falls are told apart from KOs (the ledger matches the HUD badges on two recordings); every
+live decision is written to trace/; the live run keeps best.pt, the weights playing during its best
+30 minutes; configs/experiments/rdqn_medium_v2.yaml uses the best settings, pretrained with them
+(results/rdqn/pretrain_v2.md: copying 0.171, right where the human changes action 0.232, buttons 21%
+against the human's 30%, its most used action 46% of decisions). scripts/plot_results.py draws every
+figure from the run files.

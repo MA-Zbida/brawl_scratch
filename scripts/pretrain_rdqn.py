@@ -1,7 +1,7 @@
 """Pretrain the recurrent Q-network on the human demonstrations, check it, and save it for the live runs.
 
     python scripts/pretrain_rdqn.py                    # -> runs/rdqn/pretrain_all/qnet.pt
-    python scripts/pretrain_rdqn.py --updates 40000
+    python scripts/pretrain_rdqn.py --config configs/experiments/rdqn_medium_v2.yaml --name v2
 
 First a check: the network is pretrained on two thirds of the sessions and plays the held-out third
 greedily, memory carried through each session; it is scored like behaviour cloning (actions right,
@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import numpy as np  # noqa: E402
 
 from brawl import actions, observation, rdqn  # noqa: E402
-from brawl.config import resolve_config  # noqa: E402
+from brawl.config import load_experiment, resolve_config  # noqa: E402
 from brawl.paths import CONFIGS, RESULTS, RUNS  # noqa: E402
 from train import demo_sessions  # noqa: E402
 
@@ -69,11 +69,13 @@ def main(argv=None) -> int:
     p.add_argument("--name", default="all")
     p.add_argument("--updates", type=int, default=None, help="default: train.rdqn.pretrain_updates in configs/base.yaml")
     p.add_argument("--no-check", action="store_true", help="skip the held-out check")
+    p.add_argument("--config", type=Path, default=None, help="take the settings from this experiment (default: base.yaml)")
     args = p.parse_args(argv)
 
     import torch
 
-    base = resolve_config(CONFIGS / "base.yaml")
+    base = load_experiment(args.config).resolve(load_experiment(args.config).variants()[0][0], 0) if args.config \
+        else resolve_config(CONFIGS / "base.yaml")
     cfg, env = base["train"]["rdqn"], base["env"]
     k, gamma, weights = int(env["k"]), float(base["train"]["gamma"]), (float(env["damage_weight"]), float(env["ko_weight"]))
     updates = args.updates or int(cfg["pretrain_updates"])
@@ -82,7 +84,9 @@ def main(argv=None) -> int:
     print(f"{len(roots)} demonstration sessions; {updates} updates on {device}", flush=True)
     lines = [f"# Pretrained recurrent Q-network: {args.name}", "",
              f"{datetime.now():%Y-%m-%d %H:%M}. {len(roots)} human sessions ({', '.join(cfg['demo_levels'])}), {updates} updates "
-             f"of batch {cfg['batch']} sequences, margin {cfg['margin']}, n-step {cfg['n_step']}. scripts/pretrain_rdqn.py.", ""]
+             f"of batch {cfg['batch']} sequences, margin {cfg['margin']}, n-step {cfg['n_step']}, gamma {gamma}, target every "
+             f"{cfg['target_every']}, learning rate {cfg['learning_rate']}"
+             f"{' (' + str(args.config) + ')' if args.config else ''}. scripts/pretrain_rdqn.py.", ""]
     if not args.no_check:
         test = roots[::3]
         train = [r for r in roots if r not in test]

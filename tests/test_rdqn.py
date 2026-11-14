@@ -91,3 +91,38 @@ def test_the_live_loop_plays_learns_in_another_process_and_saves(tmp_path):
     assert (tmp_path / "run" / "pretrained.pt").exists() and len(list((tmp_path / "run" / "checkpoints").glob("*.pt"))) == 2
     assert env.calls["advance"] == 240
     assert rdqn.load(saved)[1]["n_in"] == observation.SIZE
+
+
+def test_the_live_loop_samples_from_a_cloned_policy_when_given_one(tmp_path):
+    from types import SimpleNamespace
+
+    from test_env import Game
+
+    from brawl import learn
+    from brawl.brawlenv import BrawlEnv
+    from brawl.sense.perception import Perception
+
+    n = 300
+    demo = tmp_path / "demo"
+    demo.mkdir()
+    rng = np.random.default_rng(0)
+    np.savez(demo / "decisions_k3.npz", obs=rng.normal(size=(n, observation.SIZE)).astype(np.float32),
+             action=np.stack([rng.integers(9, size=n), rng.integers(6, size=n)], 1), dealt=np.zeros(n), taken=np.zeros(n),
+             ko_scored=np.zeros(n), ko_lost=np.zeros(n), features=np.array(observation.FEATURES))
+    learn.make_policy((32, 32)).save(str(tmp_path / "clone.zip"))
+    q = dict(hidden=32, burn_in=4, train_length=12, n_step=3, batch=4, learning_rate=1e-3, target_every=50, margin=0.5,
+             margin_weight=0.0, live_margin_weight=0.0, demo_fraction=0.25, pretrain_updates=10, updates_per_decision=0.5,
+             epsilon=0.0, explore="human", rollback=1.0, sync_every=10, capacity=5000, threads=1, device="cpu",
+             watchdog_decisions=10000, bootstrap="sarsa", prior=str(tmp_path / "clone.zip"), beta=10.0, beta_after=60,
+             beta_ramp=120, adv_clip=0.1)
+    cfg = dict(init=None, total_steps=180, n_steps=60, checkpoint_every=2, gamma=0.99, seed=0, rdqn=q)
+    game = Game()
+    game.keys = SimpleNamespace(release_all=lambda: None)
+    env = BrawlEnv(game, game, Perception(game), window=0)
+    saved = learn.train_rdqn(env, cfg, tmp_path / "run", [demo], realtime=False, reward_weights=(0.01, 1.0), log=lambda m: None)
+    import csv
+
+    rows = list(csv.DictReader(open(tmp_path / "run" / "progress.csv", encoding="utf-8")))
+    assert saved.name == "qnet.pt" and [float(r["beta"]) for r in rows] == [0.0, 5.0, 10.0]  # pure clone, ramp, full
+    actions_taken = np.concatenate([np.load(f)["action"] for f in sorted((tmp_path / "run" / "trace").glob("*.npz"))])
+    assert len(np.unique(actions_taken)) > 20  # sampled, not one best action

@@ -48,6 +48,13 @@ train:
     explore: human      # an exploring decision takes an action as often as the human took it (uniform: any of the 54;
                         # at 0.05 uniform the agent threw its weapon 10 times a minute and was armed 47% of the time)
     rollback: 1.0       # reward per minute: when the last 30 minutes fall this far below the best 30, go back to best.pt
+    bootstrap: double_q # double_q: values the best next action; sarsa: values the action actually taken (no max, no inflation)
+    prior: null         # a cloned policy.zip: the agent samples from it, its odds shifted by the Q-network's advantages
+                        # (logits + beta * clipped advantage). null: the agent takes the Q-network's best action
+    beta: 0.0           # how strongly the advantages shift the cloned policy, once ramped
+    beta_after: 36000   # decisions played as the pure clone first (30 minutes: the run's own baseline)
+    beta_ramp: 36000    # decisions over which beta then rises to its value
+    adv_clip: 0.2       # advantages are clipped to this, so the odds of an action change by at most exp(beta * adv_clip)
     sync_every: 100     # updates between weight files for the actor
     capacity: 600000    # live decisions kept
     threads: 4          # CPU threads of the learner

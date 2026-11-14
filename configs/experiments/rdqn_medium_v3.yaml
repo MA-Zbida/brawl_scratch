@@ -1,0 +1,27 @@
+name: rdqn_medium_v3
+description: >
+  Improve the cloned policy without leaving it. The agent samples from the clone (medium_v4), its odds
+  shifted by the advantages of a recurrent Q-network that evaluates the play actually seen (sarsa: no
+  max, so no inflation). The first 30 minutes are the pure clone (the run's own baseline); beta then
+  rises over 30 minutes. An action's odds never change by more than exp(beta * adv_clip) = 2.7.
+base: ../base.yaml
+seeds: [0, 1, 2]
+overrides:
+  env: {difficulty: medium}
+  train:
+    learner: rdqn
+    init: runs/rdqn/pretrain_v3/qnet.pt
+    total_steps: 500000
+    checkpoint_every: 30
+    gamma: 0.99
+    rdqn:
+      n_step: 20
+      target_every: 500
+      learning_rate: 3.0e-5
+      bootstrap: sarsa
+      margin_weight: 0.0
+      live_margin_weight: 0.0
+      epsilon: 0.0
+      prior: runs/bc/medium_v4/policy.zip
+      beta: 10.0      # measured on human play: moves the clone's most likely action in 5% of decisions
+      adv_clip: 0.1   # odds change by at most exp(10 x 0.1) = 2.7

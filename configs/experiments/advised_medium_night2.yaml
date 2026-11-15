@@ -1,0 +1,14 @@
+name: advised_medium_night2
+description: >
+  The second night of the advised clone (rdqn_medium_v3 seed 0 lifted the clone from -0.11 to +0.38
+  reward per minute, 2.5 standard errors). It continues from that night's Q-network and advises more
+  strongly: beta 15 (the clone's most likely action changes in about 8% of decisions; an action's odds
+  change by at most exp(1.5) = 4.5). The first 30 minutes are again the pure clone, the night's baseline.
+  About 6 hours.
+base: rdqn_medium_v3.yaml
+seeds: [0]
+overrides:
+  train:
+    init: runs/rdqn_medium_v3/default/seed0/qnet.pt
+    total_steps: 432000
+    rdqn: {beta: 15.0}

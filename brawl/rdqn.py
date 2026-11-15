@@ -111,6 +111,33 @@ class Greedy:
         return split(int(q[0, 0].argmax()))
 
 
+class Advised:
+    """The clone, its odds shifted by a Q-network's advantages: logits + beta * clip(Q - E_clone[Q]), as the
+    live run plays it (brawl/learn.py train_rdqn with ``prior``). Sampled; memory carried along."""
+
+    def __init__(self, qnet: Path, prior: Path, beta: float, clip: float, seed: int = 0) -> None:
+        import torch
+
+        from brawl.learn import load_policy
+
+        torch.manual_seed(seed)
+        self.torch, self.net, self.prior, self.h = torch, load(qnet)[0].eval(), load_policy(Path(prior)), None
+        self.beta, self.clip = beta, clip
+
+    def reset(self) -> None:
+        self.h = None
+
+    def __call__(self, obs: np.ndarray) -> tuple[int, int]:
+        torch = self.torch
+        with torch.no_grad():
+            x = torch.as_tensor(obs, dtype=torch.float32)
+            q, self.h = self.net(x[None, None], self.h)
+            d = self.prior.get_distribution(x[None]).distribution
+            logp = (d[0].logits[0][:, None] + d[1].logits[0][None, :]).reshape(-1)
+            adv = (q[0, 0] - (logp.exp() * q[0, 0]).sum()).clamp(-self.clip, self.clip)
+            return split(int(torch.distributions.Categorical(logits=logp + self.beta * adv).sample()))
+
+
 class Replay:
     """A stream of decisions sampled as sequences that never cross a cut (the start of a session, or
     a gap in the live run). Observations are kept in float16: 224 bytes a decision."""

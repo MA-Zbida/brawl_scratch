@@ -69,7 +69,7 @@ def clone_floor() -> tuple[float, float]:
 
 RUNS_SHOWN = [("PPO from the clone (1 h)", RUNS / "s1_ppo" / "realtime-bc" / "seed0" / "progress.csv", ORANGE),
               ("Recurrent Q-learning, first settings (7 h)", RUNS / "rdqn_medium" / "default" / "seed0" / "progress.csv", BLUE),
-              ("Recurrent Q-learning, tested settings", RUNS / "rdqn_medium_v2" / "default" / "seed0" / "progress.csv", AQUA)]
+              ("The clone, advised by a Q-network (7 h)", RUNS / "rdqn_medium_v3" / "default" / "seed0" / "progress.csv", AQUA)]
 
 
 def rl_runs(plt) -> Path:
@@ -89,7 +89,7 @@ def rl_runs(plt) -> Path:
         ax.annotate(label, (t[-1], m[-1]), xytext=(6, 0), textcoords="offset points", color=INK, fontsize=9, va="center")
     ax.set_xlabel("minutes of game time")
     ax.set_ylabel("reward per minute (10-minute blocks)")
-    ax.set_title("Both RL runs end below the cloned policy they started from")
+    ax.set_title("Advising the clone with learned values beats it; replacing the clone did not")
     ax.legend(loc="lower left", fontsize=9)
     ax.set_xlim(0, None)
     fig.tight_layout()

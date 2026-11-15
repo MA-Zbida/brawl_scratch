@@ -1200,3 +1200,35 @@ live decision is written to trace/; the live run keeps best.pt, the weights play
 (results/rdqn/pretrain_v2.md: copying 0.171, right where the human changes action 0.232, buttons 21%
 against the human's 30%, its most used action 46% of decisions). scripts/plot_results.py draws every
 figure from the run files.
+
+## 2026-11-14/15: the greedy Q-network stands still; the advised clone beats the clone
+
+**Exploration and the greedy player.** In the 5-minute run with the second network, uniform random
+actions at 5% of decisions threw the weapon 18 times a minute (the human 7) and the agent was armed 47%
+of the time (the human 90%). With exploration off, the greedy network stood still: trained to rank the
+human's action first, its best action is the most common one, no button (70% of the human's
+decisions), and standing still leads to states where it stays best. The Q-network alone is the wrong
+player.
+
+**The advised clone** (configs/experiments/rdqn_medium_v3.yaml). The agent samples from the clone
+(medium_v4), its logits shifted by beta * clip(Q - E_clone[Q], 0.1); the Q-network evaluates the play
+it sees (sarsa: no max, no inflation), pretrained without the margin loss. Advantages on human play are
+small (median |A| 0.04, 90th percentile 0.12): beta 5 would have moved the clone's most likely action in
+2.7% of decisions, beta 10 moves it in 5%, with an action's odds changed at most 2.7-fold. The first 30
+minutes are the pure clone, the run's own baseline; beta then ramps over 30 minutes.
+
+**Night of 2026-11-14** (7 h, results/rdqn_medium_v3/summary.md, results/figures/rl_runs.png):
+
+| | Reward per minute | Stocks taken / lost per minute | Falls per minute | Damage dealt / taken per minute |
+|---|---|---|---|---|
+| Clone only (first 30 min) | -0.11 +- 0.19 | 0.53 / 0.57 | 0.27 | 108 / 116 |
+| Advised (beta 10, 357 min) | +0.38 +- 0.06 | 0.66 / 0.57 | 0.15 | 134 / 104 |
+
+Difference +0.49, 2.5 standard errors; Mann-Whitney over minutes p = 0.016. The clone measured on
+2026-11-12: -0.03 +- 0.24. Stocks 270 - 236 over the night: the first run that takes more stocks than it
+loses. By part of the night: +0.32, +0.28, +0.56 (last two hours). The values stayed honest (gap on live
+play between -0.05 and +0.14, no trend); no rollback; 0.29% of decisions over the time budget.
+
+Caveats: one seed; the in-run baseline is 30 minutes (standard error 0.19). A paired evaluation of the
+frozen advised policy against the clone in one session is the next measurement. scripts/play.py now
+plays the advised clone (--prior, --beta, --adv-clip).

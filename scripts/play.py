@@ -184,6 +184,10 @@ def main(argv=None) -> int:
     p.add_argument("--regime", choices=("realtime", "stepped"), default="realtime")
     p.add_argument("--k", type=int, default=3)
     p.add_argument("--greedy", action="store_true", help="take the most likely action instead of sampling")
+    p.add_argument("--prior", type=Path, default=None,
+                   help="with a qnet.pt: sample from this cloned policy.zip, shifted by the Q-network's advantages")
+    p.add_argument("--beta", type=float, default=10.0, help="with --prior: strength of the shift")
+    p.add_argument("--adv-clip", type=float, default=0.1, help="with --prior: advantages clipped to this")
     p.add_argument("--detector", type=Path, default=DETECTOR)
     p.add_argument("--name", default=None, help="report name (default: policy folder, level and regime)")
     p.add_argument("--countdown", type=int, default=5)
@@ -213,6 +217,10 @@ def main(argv=None) -> int:
         from brawl.rdqn import Greedy
 
         greedy = Greedy(Path(args.policy), epsilon=0.0, seed=args.seed)
+        if args.prior:  # the clone, advised by this Q-network, as the live run played it
+            from brawl.rdqn import Advised
+
+            greedy = Advised(Path(args.policy), args.prior, args.beta, args.adv_clip, seed=args.seed)
     policy = None if args.policy in ("random", "scripted") or greedy else learn.load_policy(Path(args.policy), "cpu")
     perception = Perception(Yolo(args.detector, conf=0.05), step=args.k)
     screen = capture.Screen(timeout_s=0.05)

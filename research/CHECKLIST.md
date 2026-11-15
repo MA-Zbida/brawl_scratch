@@ -16,14 +16,11 @@ pause-and-rewind oracle a learner can close.
 Nothing is trained on a part until that part's gate passes. A wrong input fails every agent
 built on it, and no RL result can show where the fault was.
 
-## Your next steps (2026-11-14)
+## Your next steps (2026-11-15)
 
 Run everything in the `brawl312` environment. Camera mode: Fixed. You as Wu Shang, bot Mordex on Medium.
-
-1. 5-minute check of the new starting network:
-   `python scripts/train.py --config configs/experiments/smoke_rdqn.yaml --set train.init=runs/rdqn/pretrain_v2/qnet.pt train.gamma=0.99 train.rdqn.n_step=20 train.rdqn.target_every=500 train.rdqn.learning_rate=3.0e-5 --name smoke_v2`
-2. Overnight: `python scripts/train.py --config configs/experiments/rdqn_medium_v2.yaml --seed 0`
-3. In the morning: `python scripts/analyze.py rdqn_medium_v2` and `python scripts/plot_results.py`.
+Tonight, one line (about 7 hours): 30 min clone, 30 min last night's advised clone (frozen), then the
+second training night. See the lab notebook entry of 2026-11-15.
 
 ## Stage 0: gates (DESIGN section 9)
 

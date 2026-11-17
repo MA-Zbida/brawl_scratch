@@ -110,10 +110,11 @@ def test_the_live_loop_samples_from_a_cloned_policy_when_given_one(tmp_path):
              action=np.stack([rng.integers(9, size=n), rng.integers(6, size=n)], 1), dealt=np.zeros(n), taken=np.zeros(n),
              ko_scored=np.zeros(n), ko_lost=np.zeros(n), features=np.array(observation.FEATURES))
     learn.make_policy((32, 32)).save(str(tmp_path / "clone.zip"))
+    learn.make_policy((32, 32)).save(str(tmp_path / "other.zip"))
     q = dict(hidden=32, burn_in=4, train_length=12, n_step=3, batch=4, learning_rate=1e-3, target_every=50, margin=0.5,
              margin_weight=0.0, live_margin_weight=0.0, demo_fraction=0.25, pretrain_updates=10, updates_per_decision=0.5,
              epsilon=0.0, explore="human", rollback=1.0, sync_every=10, capacity=5000, threads=1, device="cpu",
-             watchdog_decisions=10000, bootstrap="sarsa", prior=str(tmp_path / "clone.zip"), beta=10.0, beta_after=60,
+             watchdog_decisions=10000, bootstrap="sarsa", prior=[str(tmp_path / "clone.zip"), str(tmp_path / "other.zip")], prior_every=1, beta=10.0, beta_after=60,
              beta_ramp=120, adv_clip=0.1, trace_crops=True)
     cfg = dict(init=None, total_steps=180, n_steps=60, checkpoint_every=2, gamma=0.99, seed=0, rdqn=q)
     game = Game()
@@ -124,6 +125,7 @@ def test_the_live_loop_samples_from_a_cloned_policy_when_given_one(tmp_path):
 
     rows = list(csv.DictReader(open(tmp_path / "run" / "progress.csv", encoding="utf-8")))
     assert saved.name == "qnet.pt" and [float(r["beta"]) for r in rows] == [0.0, 5.0, 10.0]  # pure clone, ramp, full
+    assert [int(r["prior"]) for r in rows] == [0, 1, 0]  # the two clones take turns, a block each
     actions_taken = np.concatenate([np.load(f)["action"] for f in sorted((tmp_path / "run" / "trace").glob("*.npz"))])
     assert len(np.unique(actions_taken)) > 20  # sampled, not one best action
     crops = np.concatenate([np.load(f)["crops"] for f in sorted((tmp_path / "run" / "trace").glob("*.npz"))])

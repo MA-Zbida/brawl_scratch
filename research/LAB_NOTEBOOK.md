@@ -1262,3 +1262,16 @@ advisor (sarsa, n 20, 10,000 updates) on the 9 Medium sessions, 3 folds. Vector:
 0.015), win AUC 0.828. Worse in every fold, consistently. Reading: with about 2.5 h of human play the
 picture network overfits (the vector already carries positions, damage, timers); the same as the
 imitation probes. Vision stays parked until the night traces with crops give 10x the data (night 3 on).
+
+**Night 3, 5 h planned** (advised_night3: base advised_v1, night 2's Q-network, beta 10, crops traced). The
+game crashed after 69 min (no Windows error logged); the HUD watchdog ended the run cleanly
+(qnet_stopped.pt). Distilled clone alone (30 min): -0.29 +- 0.22 reward per minute, stocks 18 - 23, 8 falls
+(the human clone's four half hours: mean 0.00). Beta ramping: -0.02 +- 0.24; full beta (9 min): +0.25.
+But sensing was 7 ms slower all run from the first block (38 against 31 ms on both earlier nights; 40% more
+late frames, over budget 2.3% against 0.4%): the laptop's state, plus possibly the crop shards (110 MB
+compressed on the main thread every 5 minutes). Not a clean test of distillation: worse by 1.2 standard
+errors, and confounded.
+
+**Night 4 planned** (advised_night4, about 10 h): the human clone and the distilled clone take turns every
+5 minutes under one advisor (train.rdqn.prior as a list, prior_every; progress.csv "prior"), so drift in
+the laptop's speed falls on both arms. No crops.

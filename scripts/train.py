@@ -123,7 +123,9 @@ def main(argv=None) -> int:
     if train_cfg["init"]:
         train_cfg = {**train_cfg, "init": str(REPO_ROOT / train_cfg["init"])}
     if train_cfg["rdqn"].get("prior"):
-        train_cfg = {**train_cfg, "rdqn": {**train_cfg["rdqn"], "prior": str(REPO_ROOT / train_cfg["rdqn"]["prior"])}}
+        p = train_cfg["rdqn"]["prior"]
+        p = str(REPO_ROOT / p) if isinstance(p, str) else [str(REPO_ROOT / x) for x in p]
+        train_cfg = {**train_cfg, "rdqn": {**train_cfg["rdqn"], "prior": p}}
     print(f"{experiment.name} / {variant} / seed {seed}: {train_cfg['total_steps']} decisions "
           f"({int(train_cfg['total_steps']) * int(env_cfg['k']) / 3600:.0f} min of game time), {env_cfg['regime']}, "
           f"bot {env_cfg['difficulty']} (set it in the game)")

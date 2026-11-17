@@ -275,7 +275,7 @@ def train_ppo(env, cfg: dict, run_dir: Path, *, realtime: bool, stop=lambda: Fal
 RDQN_PROGRESS = ("rollout", "steps", "game_frames", "wall_s", "play_s", "stall_s", "stall_frames", "stocks_taken",
                  "stocks_lost", "damage_dealt", "damage_taken", "reward", "stall_stocks_lost", "stall_damage_taken",
                  "late_frames", "sense_ms", "over_budget", "pauses", "updates", "learner_lag", "weights_loaded", "fell",
-                 "opponent_fell", "rollbacks", "beta")
+                 "opponent_fell", "rollbacks", "beta", "prior")
 TRACE_ROWS = 6000  # decisions per shard of a run's trace (5 minutes)
 BEST_WINDOW = 30  # blocks (30 minutes at 1,200 decisions): the window over which the best policy is judged
 
@@ -344,7 +344,12 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
     rng = np.random.default_rng(int(cfg["seed"]))
     torch.manual_seed(int(cfg["seed"]))
     eps, per, block = float(q["epsilon"]), float(q["updates_per_decision"]), int(cfg["n_steps"])
-    prior = load_policy(Path(q["prior"])) if q.get("prior") else None  # the clone the agent samples from
+    # the clone the agent samples from; given several, they take turns every prior_every blocks (an A/B test
+    # within one night, so a slow hour of the laptop falls on both); progress.csv's "prior" says whose block it was
+    paths = q.get("prior") or []
+    priors = [load_policy(Path(p)) for p in ([paths] if isinstance(paths, str) else paths)]
+    turn = int(q.get("prior_every") or 1) * int(cfg["n_steps"])
+    prior, arm = (priors[0] if priors else None), 0
     beta_max, after, ramp, clip = (float(q.get(key) or 0) for key in ("beta", "beta_after", "beta_ramp", "adv_clip"))
     beta = 0.0
     file = open(run_dir / "progress.csv", "w", newline="", encoding="utf-8")
@@ -415,6 +420,8 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
             with torch.no_grad():
                 values, h = net(torch.as_tensor(obs, dtype=torch.float32)[None, None], h)
             if prior is not None:  # the clone's own odds, shifted towards what the values favour
+                arm = (step - 1) // turn % len(priors)
+                prior = priors[arm]
                 with torch.no_grad():
                     d = prior.get_distribution(torch.as_tensor(obs, dtype=torch.float32)[None]).distribution
                     logp = (d[0].logits[0][:, None] + d[1].logits[0][None, :]).reshape(-1)
@@ -463,7 +470,7 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
                        "sense_ms": round(float(np.median(sense)) * 1000, 1),
                        "over_budget": round(float(np.mean(np.array(sense) > budget_s)), 4), "updates": updates.value,
                        "learner_lag": round(updates.value / max(per * step, 1e-9), 3), "weights_loaded": loaded,
-                       "rollbacks": rollback.value, "beta": round(beta, 3), **s}
+                       "rollbacks": rollback.value, "beta": round(beta, 3), "prior": arm, **s}
                 rows.writerow({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()})
                 file.flush()
                 minutes = max(s["game_frames"] / 3600, 1e-9)

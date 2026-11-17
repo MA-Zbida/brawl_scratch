@@ -55,6 +55,7 @@ train:
     beta_after: 36000   # decisions played as the pure clone first (30 minutes: the run's own baseline)
     beta_ramp: 36000    # decisions over which beta then rises to its value
     adv_clip: 0.2       # advantages are clipped to this, so the odds of an action change by at most exp(beta * adv_clip)
+    prior_every: 5      # with several priors (a list), they take turns every this many blocks: an A/B test within a run
     trace_crops: false  # save both fighters' 96 px crops with every traced decision (about 1 GB an hour, compressed)
     sync_every: 100     # updates between weight files for the actor
     capacity: 600000    # live decisions kept

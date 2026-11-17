@@ -1,0 +1,19 @@
+name: advised_night4
+description: >
+  A/B night (about 10 hours): does the distilled clone (runs/bc/advised_v1) make a better base than the
+  human clone (runs/bc/medium_v4)? Night 3 measured it alone at -0.29 +- 0.22 against about 0.0, but
+  that afternoon the laptop sensed 7 ms slower (38 against 31 ms, 40% more late frames), so it was not a
+  clean test. Here the two take turns every 5 minutes all night under one advisor (night 2's Q-network,
+  sarsa, beta 10 after the first 30 minutes), so slow hours fall on both. progress.csv "prior": 0 = human
+  clone, 1 = distilled. No crops (vision is parked: results/rdqn/value_bench_vision.md).
+base: rdqn_medium_v3.yaml
+seeds: [0]
+overrides:
+  train:
+    init: runs/advised_medium_night2/default/seed0/qnet.pt
+    total_steps: 700000
+    rdqn:
+      prior: [runs/bc/medium_v4/policy.zip, runs/bc/advised_v1/policy.zip]
+      prior_every: 5
+      beta: 10.0
+      trace_crops: false

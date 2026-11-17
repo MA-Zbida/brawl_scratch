@@ -1255,3 +1255,10 @@ traces can now keep both fighters' crops (train.rdqn.trace_crops).
 
 **Data:** the human recordings were deleted for disk space (2026-11-16); the 9 Medium sessions' decisions
 and crops were restored from the probe pack, the only remaining copy.
+
+**Vision value test** (2026-11-17, scripts/value_bench_vision.py, results/rdqn/value_bench_vision.md): the
+advisor (sarsa, n 20, 10,000 updates) on the 9 Medium sessions, 3 folds. Vector: correlation 0.477, lose AUC
+0.725, win AUC 0.862. Vector + both crops (CNN, lr 1e-4): 0.414 (-0.063 +- 0.021), lose AUC 0.608 (-0.117 +-
+0.015), win AUC 0.828. Worse in every fold, consistently. Reading: with about 2.5 h of human play the
+picture network overfits (the vector already carries positions, damage, timers); the same as the
+imitation probes. Vision stays parked until the night traces with crops give 10x the data (night 3 on).

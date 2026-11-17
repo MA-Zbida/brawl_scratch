@@ -69,7 +69,8 @@ def clone_floor() -> tuple[float, float]:
 
 RUNS_SHOWN = [("PPO from the clone (1 h)", RUNS / "s1_ppo" / "realtime-bc" / "seed0" / "progress.csv", ORANGE),
               ("Recurrent Q-learning, first settings (7 h)", RUNS / "rdqn_medium" / "default" / "seed0" / "progress.csv", BLUE),
-              ("The clone, advised by a Q-network (7 h)", RUNS / "rdqn_medium_v3" / "default" / "seed0" / "progress.csv", AQUA)]
+              ("The clone, advised by a Q-network (7 h)", RUNS / "rdqn_medium_v3" / "default" / "seed0" / "progress.csv", AQUA),
+              ("Advised, second night (6 h)", RUNS / "advised_medium_night2" / "default" / "seed0" / "progress.csv", "#eda100")]
 
 
 def rl_runs(plt) -> Path:

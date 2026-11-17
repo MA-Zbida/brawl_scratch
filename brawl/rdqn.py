@@ -64,6 +64,37 @@ def build(n_in: int, hidden: int, device: str = "cpu", drop: list[int] | None = 
     return QNet().to(device)
 
 
+def build_vision(n_in: int, hidden: int, device: str = "cpu", drop: list[int] | None = None):
+    """The Q-network with pictures: a CNN shared by both fighters' 96 px crops (Nature-DQN size), its two
+    256-wide outputs concatenated with the vector's, into the same GRU and dueling head as ``build``."""
+    import torch
+    from torch import nn
+
+    keep = [i for i in range(n_in) if i not in set(drop or [])]
+
+    class VisionQ(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.drop = list(drop or [])
+            self.register_buffer("keep", torch.as_tensor(keep, dtype=torch.long), persistent=False)
+            self.inp = nn.Sequential(nn.Linear(len(keep), 256), nn.ReLU())
+            self.cnn = nn.Sequential(nn.Conv2d(1, 32, 8, 4), nn.ReLU(), nn.Conv2d(32, 64, 4, 2), nn.ReLU(),
+                                     nn.Conv2d(64, 64, 3, 1), nn.ReLU(), nn.Flatten(), nn.Linear(64 * 8 * 8, 256), nn.ReLU())
+            self.gru = nn.GRU(256 * 3, hidden, batch_first=True)
+            self.value = nn.Sequential(nn.Linear(hidden, 256), nn.ReLU(), nn.Linear(256, 1))
+            self.advantage = nn.Sequential(nn.Linear(hidden, 256), nn.ReLU(), nn.Linear(256, N_ACTIONS))
+
+        def forward(self, x, img, h=None):
+            """x [B, T, n_in]; img float [B, T, 2, 96, 96] in 0-1 (Wu Shang, Mordex)."""
+            b, t = x.shape[:2]
+            seen = self.cnn(img.reshape(b * t * 2, 1, *img.shape[-2:])).reshape(b, t, 512)
+            z, h = self.gru(torch.cat([self.inp(x.index_select(-1, self.keep)), seen], -1), h)
+            a = self.advantage(z)
+            return self.value(z) + a - a.mean(-1, keepdim=True), h
+
+    return VisionQ().to(device)
+
+
 def save(net, path: Path, n_in: int, hidden: int) -> None:
     """Atomically: a reader never sees half a file."""
     import torch

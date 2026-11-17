@@ -1,0 +1,14 @@
+name: advised_night3
+description: >
+  The third night: the base is no longer the human clone but a clone of the advised play of the first
+  two nights (scripts/distill.py, runs/bc/advised_v1), so the improvement builds on itself; the advisor
+  continues from night 2; beta back to 10 (15 added nothing on night 2). Its first 30 minutes are the new
+  base alone, which measures the distillation directly. Both fighters' crops are saved with every
+  decision, for the picture advisor. About 7 hours.
+base: rdqn_medium_v3.yaml
+seeds: [0]
+overrides:
+  train:
+    init: runs/advised_medium_night2/default/seed0/qnet.pt
+    total_steps: 500000
+    rdqn: {prior: runs/bc/advised_v1/policy.zip, beta: 10.0, trace_crops: true}

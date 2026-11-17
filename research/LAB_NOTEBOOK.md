@@ -1232,3 +1232,26 @@ play between -0.05 and +0.14, no trend); no rollback; 0.29% of decisions over th
 Caveats: one seed; the in-run baseline is 30 minutes (standard error 0.19). A paired evaluation of the
 frozen advised policy against the clone in one session is the next measurement. scripts/play.py now
 plays the advised clone (--prior, --beta, --adv-clip).
+
+## 2026-11-15/17: evaluation, the second night, distillation
+
+**Paired evaluation** (2026-11-15, frozen policies back to back, 6 x 5 min each, results/play/eval_*.md): the
+clone -0.08 +- 0.32 reward per minute, stocks 15 - 16, virtual matches 4 - 3; the advised clone (night 1's
+best.pt, beta 10) +0.50 +- 0.21, stocks 20 - 14, virtual matches 6 - 1. +0.58, 1.5 standard errors alone,
+the same gap as during the night (+0.49).
+
+**Second night** (advised_medium_night2: continued from night 1's Q-network, beta 15, 6 h): clone alone
+(first 30 min) +0.20 +- 0.25; advised +0.26 +- 0.07 (thirds +0.20, +0.46, +0.11); stocks 0.64 / 0.60 per
+minute, falls 0.21 per minute (night 1: 0.15). No improvement on night 1 (+0.38). The clone's half hours
+so far: -0.03, -0.08, -0.11, +0.20 (mean 0.00): the advised clone is about +0.3 to +0.5 above it, and
+stops there. Reading: with the clone fixed and the advice clipped, a night is one bounded step of
+improvement; a second night of the same adds nothing, and the stronger beta did not help.
+
+**Distillation** (scripts/distill.py, runs/bc/advised_v1): behaviour cloning on both nights' advised play,
+kept from stretches ending in a stock taken: 440,726 decisions (367 minutes). Held out: loss 0.887, actions
+right 0.726 (repeat-previous 0.698), buttons on 23% of most-likely actions (played 28%). It becomes the
+base of night 3 (configs/experiments/advised_night3.yaml), whose first 30 minutes measure it alone. Live
+traces can now keep both fighters' crops (train.rdqn.trace_crops).
+
+**Data:** the human recordings were deleted for disk space (2026-11-16); the 9 Medium sessions' decisions
+and crops were restored from the probe pack, the only remaining copy.

@@ -304,7 +304,7 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
 
     import torch
 
-    from brawl import observation, rdqn
+    from brawl import observation, rdqn, vision
 
     now, sleep = now or time.perf_counter, sleep or time.sleep
     q = cfg["rdqn"]
@@ -362,10 +362,13 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
     (run_dir / "trace").mkdir(exist_ok=True)
     trace: list = []
 
+    keep_crops = bool(q.get("trace_crops"))  # both fighters' 96 px crops with every traced decision (vision data)
+
     def dump(final: bool = False) -> None:
         if trace and (final or len(trace) >= TRACE_ROWS):
             cols = list(zip(*trace))
-            np.savez_compressed(run_dir / "trace" / f"shard_{int(cols[0][0]):07d}.npz", step=np.array(cols[0]),
+            extra = {"crops": np.stack(cols[6]).astype(np.uint8)} if keep_crops else {}
+            np.savez_compressed(run_dir / "trace" / f"shard_{int(cols[0][0]):07d}.npz", step=np.array(cols[0]), **extra,
                                 obs=np.array(cols[1], np.float16), action=np.array(cols[2]), reward=np.array(cols[3], np.float32),
                                 events=np.array(cols[4], np.float32), readable=np.array(cols[5]),
                                 events_doc=np.array(["damage_dealt", "damage_taken", "ko_scored", "ko_lost", "fell",
@@ -422,6 +425,8 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
                 j = int(rng.choice(rdqn.N_ACTIONS, p=explore_p))
             else:
                 j = int(values[0, 0].argmax())
+            crops_now = (np.stack([vision.crop(env.frame, env.builder.last[who]) for who in (observation.AGENT, observation.OPPONENT)])
+                    if keep_crops else None)  # what the decision saw, cut from the full-size frame
             nxt, reward, _, _, info = env.step(rdqn.split(j))
             before = obs
             buf.append((before, j, reward, cut_next))
@@ -441,7 +446,7 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
             s["game_frames"] += timing.frames
             sense.append(info["sense_s"])
             trace.append((step, before, j, reward, (e.damage_dealt, e.damage_taken, e.ko_scored, e.ko_lost, e.fell,
-                                                         e.opponent_fell), info["sense"].readable))
+                                                         e.opponent_fell), info["sense"].readable, crops_now))
             dump()
             unreadable = 0 if info["sense"].readable else unreadable + 1
             if unreadable >= int(q["watchdog_decisions"]):

@@ -114,7 +114,7 @@ def test_the_live_loop_samples_from_a_cloned_policy_when_given_one(tmp_path):
              margin_weight=0.0, live_margin_weight=0.0, demo_fraction=0.25, pretrain_updates=10, updates_per_decision=0.5,
              epsilon=0.0, explore="human", rollback=1.0, sync_every=10, capacity=5000, threads=1, device="cpu",
              watchdog_decisions=10000, bootstrap="sarsa", prior=str(tmp_path / "clone.zip"), beta=10.0, beta_after=60,
-             beta_ramp=120, adv_clip=0.1)
+             beta_ramp=120, adv_clip=0.1, trace_crops=True)
     cfg = dict(init=None, total_steps=180, n_steps=60, checkpoint_every=2, gamma=0.99, seed=0, rdqn=q)
     game = Game()
     game.keys = SimpleNamespace(release_all=lambda: None)
@@ -126,3 +126,5 @@ def test_the_live_loop_samples_from_a_cloned_policy_when_given_one(tmp_path):
     assert saved.name == "qnet.pt" and [float(r["beta"]) for r in rows] == [0.0, 5.0, 10.0]  # pure clone, ramp, full
     actions_taken = np.concatenate([np.load(f)["action"] for f in sorted((tmp_path / "run" / "trace").glob("*.npz"))])
     assert len(np.unique(actions_taken)) > 20  # sampled, not one best action
+    crops = np.concatenate([np.load(f)["crops"] for f in sorted((tmp_path / "run" / "trace").glob("*.npz"))])
+    assert crops.shape == (180, 2, 96, 96) and crops.dtype == np.uint8

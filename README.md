@@ -1,161 +1,146 @@
-# brawl: vision-only reinforcement learning in a live game
+# brawl: a reinforcement-learning agent that plays a live fighting game from the screen
 
-An agent that plays Brawlhalla from **screen pixels alone**: no memory reading, no game API, no
-emulator. It runs on a single laptop (RTX 3050 Ti, 4 GB VRAM). Each step captures the screen,
-detects fighters and weapons with YOLO, updates a structured game state, reads stocks and damage
-from the HUD, and injects keyboard input.
+An agent that plays Brawlhalla against the game's built-in bots using **only what a human gets**: the
+pixels on the screen and the keyboard. No memory reading, no game API, no emulator, no speed-up or
+pause. Everything runs in real time on one laptop (RTX 3050 Ti, 4 GB VRAM), deciding 20 times a
+second.
 
-**Research question.** Being defined in `research/HYPOTHESIS.md` (next step). Everything produced before it (seven pipeline generations) is kept under `legacy/` and
-summarized, with its results and decisions, in [research/LAB_NOTEBOOK.md](research/LAB_NOTEBOOK.md).
+**Current result.** The agent starts from a cloned human policy, and a recurrent Q-network learns
+online, while the agent plays, how to shift that policy's choices. Against the Medium bot, the advised
+agent scores **+0.50 reward per minute**, against **−0.08** for the cloned policy alone. That is
+**20 stocks taken to 14 lost, against 15 to 16**, and **6 virtual matches won to 1, against 4 to 3**. Each
+was measured in 30 minutes of frozen-policy play (6 × 5 min blocks, back to back:
+[results/play/](results/play/)). The same gap held during training: +0.38 ± 0.06 against −0.11 ± 0.19
+over a 7-hour night.
 
-![Brawlhalla training-mode reference frame](assets/screenshots/stage-reference-1080p.png)
+![Reward per minute over each training run](results/figures/rl_runs.png)
 
-## Why this is hard
+*Each line is one overnight run in the live game (10-minute blocks, 95% bands). The grey band is the
+cloned policy without learning. Two baselines fell below it: PPO fine-tuning (red) and plain
+recurrent Q-learning (blue). Keeping the clone and letting a Q-network advise it (green, orange) is the
+first method that beat it.*
 
-| Constraint | Consequence |
-|---|---|
-| No memory access | Every state variable must be recovered from pixels |
-| No emulator, no pause | The game runs in wall-clock time and cannot be stepped or sped up |
-| Cannot reset the match | Episode boundaries are logical; the world keeps going |
-| One game instance | No parallel environments; about 26-30 control steps per second, detector-bound |
-| 4 GB VRAM | Detector and policy share one small GPU |
+## How it works
 
-About 27 steps/s is roughly 2.4M environment steps per day of continuous play, so sample
-efficiency per interaction and per wall-clock hour is the binding constraint. Detection is about
-93% of each step ([docs/performance.md](docs/performance.md)).
+```mermaid
+flowchart LR
+    S[Screen capture<br/>DXGI, 60 Hz] --> D[YOLO11s-pose<br/>TensorRT, ~14 ms]
+    D --> T[Tracker<br/>identities, weapons, velocities]
+    S --> H[HUD reader<br/>stocks, damage, KO vs fall]
+    T --> O[Observation<br/>112 features + timers]
+    H --> O
+    H --> R[Reward<br/>damage and stocks]
+    O --> P[Cloned policy<br/>MLP]
+    O --> Q[Recurrent Q-network<br/>GRU 256, dueling head]
+    P --> A{{"π ∝ π_clone · exp(β · clip(A_Q))"}}
+    Q --> A
+    A --> K[Keyboard<br/>9 directions × 6 buttons]
+    R --> L[Learner process<br/>n-step SARSA, CPU]
+    L -. new weights .-> Q
+```
 
-## Install
+1. **Perception.**
+   - A YOLO11s pose model finds both fighters and the weapons. I trained it on hand-labelled frames.
+     It is exported to a TensorRT FP16 engine and runs in about 14 ms a frame.
+   - A tracker keeps the fighters' identities and estimates their velocities.
+   - It passed a held-out gate ([results/gates/](results/gates/)): fighters found 98.6–100% of the
+     time, identity swaps at or below 0.7%, position error p95 at or below 15 px at 1920×1080.
+2. **Game state.**
+   - The HUD reader recovers stocks and damage from pixels.
+   - A ledger tells KOs apart from self-inflicted falls.
+   - The observation has 112 entries: positions, velocities, damage, weapons, stage geometry and
+     action timers.
+3. **Imitation.**
+   - I recorded under 2.5 hours of my own play.
+   - The policy clones only the stretches that ended in a stock taken.
+4. **Learning online: the "advised clone".**
+   - The agent samples from the clone's distribution, re-weighted by a recurrent Q-network's
+     advantages. The advantages are bounded, and the weighting ramps in after a 30-minute baseline.
+     This is a KL-regularised policy-improvement step, as in MPO and AWR.
+   - The Q-network learns by 20-step SARSA in a separate process while the game keeps running, so play
+     never waits for training.
+   - Safeguards for unattended 7–10 h runs:
+     - keep the best weights from any half-hour, and roll back to them if play falls by 1.0 reward a
+       minute;
+     - a watchdog that stops the run when the HUD goes unread;
+     - per-decision traces.
 
-Windows, Python 3.12, a CUDA 12.x GPU, and Brawlhalla in Training Mode at 1920x1080. torch must
-come from the PyTorch CUDA index, in its own command ([docs/setup.md](docs/setup.md) explains why).
+## What did not work, and why that mattered
+
+Every result, including the negative ones, is in [research/LAB_NOTEBOOK.md](research/LAB_NOTEBOOK.md).
+
+| Attempt | Outcome | Reading |
+|---|---|---|
+| PPO fine-tuning from the clone | Worse within an hour | Policy-gradient noise from one slow real-time environment destroys the clone faster than it learns |
+| Recurrent Q-learning, acting greedily | −2 to −4 reward per minute | First copied its own last action. Then its values inflated overnight (−1.85 → −4.3). Then it stood still once exploration stopped |
+| Uniform exploration | The fighter threw its weapon away | Replaced by exploring with the human's action frequencies |
+| Fighter crops (CNN) added to the vector state | Worse value estimates (lose AUC 0.61 against 0.73) | Overfits on 2.5 h of data; the vector already carries what the crops show |
+| Distilling the advised play into a new clone | Under test (A/B within one night) | – |
+
+## Engineering
+
+- **Real time, one instance:**
+  - Capture, perception and policy take 25 ms median per decision (p95 34 ms, against a 50 ms budget);
+  - 0.15% of decisions miss the budget.
+  - Every call is counted, so one frame gets exactly one grab, one detection and one step.
+- **Reproducible experiments:**
+  - YAML configs ([configs/base.yaml](configs/base.yaml), [configs/experiments/](configs/experiments/));
+  - `runs/<experiment>/<variant>/seed<k>/`, with per-block CSVs and the git commit in `meta.json`;
+  - [scripts/analyze.py](scripts/analyze.py) and [scripts/plot_results.py](scripts/plot_results.py) for summaries and figures;
+  - a lab notebook and a checklist.
+- **Offline benchmarks before every overnight run:**
+  - the value network on held-out human sessions: correlation with the real return, AUC for lost
+    and won stocks ([scripts/value_bench.py](scripts/value_bench.py));
+  - probes of which inputs help ([results/probes/](results/probes/)).
+- **1,000+ tests**, run in CI without the game: fake game and capture, the full live loop with a
+  learner process.
+
+## Run it
+
+Windows, Python 3.12, a CUDA 12 GPU, and Brawlhalla in Training Mode at 1920×1080 (Wu Shang vs a
+Mordex bot, Brawlhaven small, camera Fixed).
 
 ```powershell
 python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 python -m pip install -r requirements.txt
 python -m pip install -e .
-python -m pytest            # about 935 tests, 2 minutes; no game needed
+python -m pytest                                                     # no game needed
+
+python scripts/export_detector.py runs/detector/armed_yolo11s-pose_960/weights/best.pt   # TensorRT engine
+python scripts/record_demos.py --difficulty medium                   # record your own play
+python scripts/prepare_demos.py
+python scripts/train_bc.py --name medium_v1 --difficulty medium
+python scripts/train.py --config configs/experiments/rdqn_medium_v3.yaml   # the advised clone, overnight
+python scripts/analyze.py rdqn_medium_v3
+python scripts/plot_results.py
 ```
 
-The detector's TensorRT engine also needs the `tensorrt` (CUDA 12 build) and `onnx` packages. An
-engine only loads in the TensorRT version that built it, so build it in the environment that will
-run it, and again after TensorRT or the GPU driver changes:
+[docs/setup.md](docs/setup.md) covers CUDA and the TensorRT build.
 
-```powershell
-python scripts/export_detector.py runs/detector/armed_yolo11s-pose_960/weights/best.pt
-```
-
-## Quickstart
-
-```powershell
-python scripts/ops/check_capture.py                           # screen capture and detector on this machine
-python scripts/llc/llc_preflight.py --device cuda             # files, packages, GPU, calibration
-python scripts/llc/debug_observation_overlay.py --phase movement_fluency --show --max-steps 1000
-```
-
-Check perception with the overlay before training anything: if the overlay is wrong, everything
-downstream is wrong.
-
-## How one step works
-
-```mermaid
-flowchart LR
-    A[DXCam capture] --> B[YOLO detector<br/>TensorRT]
-    B --> C[Memory<br/>tracking, physics, stage geometry]
-    U[HUD probes<br/>stocks + damage] --> C
-    W[Weapon classifier<br/>+ input intent] --> C
-    C --> D[StateSpec<br/>146 state/history features]
-    D --> P[Policy<br/>Discrete-27]
-    P --> H[pydirectinput<br/>keyboard]
-    H --> A
-```
-
-`brawl/env/live.py` runs this loop; [docs/architecture.md](docs/architecture.md) and
-[docs/observation-space.md](docs/observation-space.md) describe each stage.
-
-## Pipelines
-
-Each pipeline generation (era) has its own subpackage, scripts, configs, outputs and docs, all under
-the same name. None is the research method yet; they are the starting material for it.
-
-| Era | What it is | Status | Entry point | Docs |
-|---|---|---|---|---|
-| `llc` | Goal-conditioned skill curriculum: teacher demos, BC, anchored-replay PPO, retention gates | Superseded | `python -m brawl.pipelines.llc.train_curriculum` | [llc](docs/pipelines/llc/) |
-| `final_agent` | One goal-free policy on full-match reward, initialized from the skill policy | Stalled | `python -m brawl.pipelines.final_agent.run` | [final_agent](docs/pipelines/final_agent/) |
-| `semantic57` | 57 macro actions with masked PPO | Parked | `python -m brawl.pipelines.semantic57.run` | [semantic57](docs/pipelines/semantic57/) |
-| `primitive27` | Integrated teacher, pooled BC, plain PPO on Discrete(27) | Frozen baseline | `python -m brawl.pipelines.primitive27.run` | [primitive27](docs/pipelines/primitive27/) |
-| `round_a` | Information and memory benchmark: mlp, recurrent and multi (RGB + state) candidates | Last active | `python -m brawl.pipelines.round_a.run` | [round_a](docs/pipelines/round_a/) |
-| `weapon_classifier` | Weapon-possession crop classifier | In use | `python -m brawl.pipelines.weapon_classifier.train` | [diagnostics](docs/pipelines/final_agent/diagnostics.md) |
-
-Every entry point takes `--help`. Run them from any folder: default paths are anchored at the
-repository root ([brawl/paths.py](brawl/paths.py)).
-
-## Repository layout
+## Layout
 
 ```
-brawl/                  the package (pip install -e .)
-  capture/              DXGI / GDI screen capture; capture_first.py must load before torch
-  perception/           YOLO wrapper, weapon classifier, weapon evidence fusion
-  state/                Memory (tracking, physics), StateSpec, canonicalization, detection schema
-  control/              Discrete(27) action space, input injection, tap scheduling, semantic actions
-  reward/               HUD decoding (stocks, damage), reward providers, match objective
-  env/                  live.py (the live-game env), match.py (match-reward wrapper)
-  training/             shared: checkpoints, runner, CLI, experiment config, teachers, curriculum goals
-  algo/                 AnchoredReplayPPO (replay, KL anchor, BC loss, PCGrad)
-  pipelines/<era>/      one subpackage per pipeline generation (table above)
-  analysis/             figures and paper evidence from run outputs
-  world_model/          world-replay recorder
-  paths.py, compat.py   repository locations; loading checkpoints saved before this layout
-scripts/                tools you run directly: ops/ (capture, calibration, probes), llc/, round_a/, final_agent/
-configs/legacy/<era>/   protocols and experiment files from before the hypothesis
-tests/                  unit and integration tests (CI runs them without the game)
-docs/                   how the system works, and docs/pipelines/<era>/ per pipeline
-research/               LAB_NOTEBOOK.md, paper/ (LaTeX), reports/, notebooks/, archive/
-results/legacy/<era>/   committed summaries and figures from before the hypothesis
-assets/                 YOLO weights (Git LFS), reference screenshots
-runs/                   training outputs, git-ignored (runs/legacy/<era>/ for existing runs)
-data/                   datasets, demos, world replay, frozen input models (data/models/), git-ignored
+brawl/
+  game/          screen capture, frame clock, keyboard
+  sense/         detector, tracker, HUD reader
+  observation.py, actions.py, ledger.py, brawlenv.py    the environment
+  learn.py       behaviour cloning, PPO, the live Q-learning loop
+  rdqn.py        recurrent Q-network, replay, learner process, the advised policy
+  vision.py      fighter crops (for the vision experiments)
+  pipelines/     earlier generations of the project, kept for reference
+scripts/         train, play, analyze, plot, benchmarks, data preparation
+configs/         base.yaml and one file per experiment
+results/         committed summaries and figures
+research/        LAB_NOTEBOOK.md, CHECKLIST.md, paper drafts
+tests/
 ```
 
-The research harness from the PADP project (`configs/base.yaml`, `configs/experiments/*.yaml`,
-`scripts/{train,sweep,analyze}.py`, `runs/<experiment>/<variant>/seed<k>/`,
-`results/<experiment>/summary.md`) comes with the first pipeline built for the hypothesis.
+**Earlier generations.** The project went through several approaches before this one:
+- a goal-conditioned skill curriculum;
+- macro-action PPO;
+- a representation benchmark.
 
-## Outputs
-
-| What | Where |
-|---|---|
-| A training run | `runs/legacy/<era>/<run>/` (Round A, primitive27, semantic57 and the final agent each write a run folder; LLC writes flat files into `runs/legacy/llc/`) |
-| Diagnostics, profiles, debug videos | `runs/legacy/<era>/` |
-| Weapon classifiers and other frozen inputs | `data/models/` |
-| World replay | `data/world_replay/` |
-| Curated summaries | `results/legacy/<era>/` |
-
-Checkpoints saved before the 2026-11-02 restructure still load: `brawl.compat.load_sb3()` maps
-their old module paths (for example `train.round_a_models`) to the current ones.
-
-## Known issues
-
-1. **PPO fine-tuning has made the BC initialization worse in every pipeline so far** (Round A:
-   -1.2 net stocks per minute after 50k steps, one seed). Not yet explained; see the lab notebook.
-2. **Weapon possession is fused from a crop classifier and input intent**, not observed directly;
-   the classifier is not yet validated as ground truth.
-3. **PPO updates do not pause the game**, so the agent is idle during each update (logged as
-   update-gap transitions).
-4. **The action space cannot express direction-modified attacks**, so much of the moveset is
-   unreachable.
-5. **`yolo_infer_every_n_steps` is not honoured** by the step loop; reusing stale boxes would
-   collapse velocity estimates, so the fix must skip the state update too.
-6. **Opponent weapon state is unavailable** under the 3-class detector schema.
-
-## Documents
-
-- [docs/setup.md](docs/setup.md): environment, CUDA, TensorRT engine build
-- [docs/architecture.md](docs/architecture.md): pipeline internals
-- [docs/observation-space.md](docs/observation-space.md): every state dimension and its provenance
-- [docs/experiment-workflow.md](docs/experiment-workflow.md): how a method is added and recorded
-- [docs/pipelines/](docs/pipelines/): one folder per pipeline generation
-- [research/LAB_NOTEBOOK.md](research/LAB_NOTEBOOK.md): what was run, what came out, what was decided
-- [research/paper/](research/paper/): working manuscript (August 2026, goal-conditioned skills)
+They live in `brawl/pipelines/` and `results/legacy/`, with their docs in [docs/pipelines/](docs/pipelines/).
 
 ## License
 

@@ -86,8 +86,7 @@ def rl_runs(plt) -> Path:
         p = progress(path)
         t, m, e = blocks(p["reward"], p["game_frames"] / 3600)
         ax.fill_between(t, m - 1.96 * e, m + 1.96 * e, color=colour, alpha=0.15, lw=0)
-        ax.plot(t, m, color=colour, marker="o", ms=4, label=label)
-        ax.annotate(label, (t[-1], m[-1]), xytext=(6, 0), textcoords="offset points", color=INK, fontsize=9, va="center")
+        ax.plot(t, m, color=colour, marker="o", ms=4, label=label)  # named in the legend: end labels collide
     ax.set_xlabel("minutes of game time")
     ax.set_ylabel("reward per minute (10-minute blocks)")
     ax.set_title("Advising the clone with learned values beats it; replacing the clone did not")

@@ -369,16 +369,32 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
 
     keep_crops = bool(q.get("trace_crops"))  # both fighters' 96 px crops with every traced decision (vision data)
 
+    writer: list = []  # the shard being compressed: off the play thread, so play never stalls on it
+
+    def write(rows: list) -> None:
+        cols = list(zip(*rows))
+        extra = {"crops": np.stack(cols[6]).astype(np.uint8)} if keep_crops else {}
+        np.savez_compressed(run_dir / "trace" / f"shard_{int(cols[0][0]):07d}.npz", step=np.array(cols[0]), **extra,
+                            obs=np.array(cols[1], np.float16), action=np.array(cols[2]), reward=np.array(cols[3], np.float32),
+                            events=np.array(cols[4], np.float32), readable=np.array(cols[5]),
+                            events_doc=np.array(["damage_dealt", "damage_taken", "ko_scored", "ko_lost", "fell",
+                                                 "opponent_fell"]), features=np.array(observation.FEATURES))
+
     def dump(final: bool = False) -> None:
+        import threading
+
         if trace and (final or len(trace) >= TRACE_ROWS):
-            cols = list(zip(*trace))
-            extra = {"crops": np.stack(cols[6]).astype(np.uint8)} if keep_crops else {}
-            np.savez_compressed(run_dir / "trace" / f"shard_{int(cols[0][0]):07d}.npz", step=np.array(cols[0]), **extra,
-                                obs=np.array(cols[1], np.float16), action=np.array(cols[2]), reward=np.array(cols[3], np.float32),
-                                events=np.array(cols[4], np.float32), readable=np.array(cols[5]),
-                                events_doc=np.array(["damage_dealt", "damage_taken", "ko_scored", "ko_lost", "fell",
-                                                     "opponent_fell"]), features=np.array(observation.FEATURES))
+            for t in writer:  # at most one shard in flight
+                t.join()
+            writer.clear()
+            rows = trace.copy()
             trace.clear()
+            t = threading.Thread(target=write, args=(rows,), daemon=False)
+            t.start()
+            writer.append(t)
+        if final:
+            for t in writer:
+                t.join()
 
     s, sense, started = new(), [], now()
     window: list = []  # (reward, game frames) of the last BEST_WINDOW blocks

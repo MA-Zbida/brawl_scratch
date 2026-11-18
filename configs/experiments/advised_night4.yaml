@@ -5,7 +5,7 @@ description: >
   that afternoon the laptop sensed 7 ms slower (38 against 31 ms, 40% more late frames), so it was not a
   clean test. Here the two take turns every 5 minutes all night under one advisor (night 2's Q-network,
   sarsa, beta 10 after the first 30 minutes), so slow hours fall on both. progress.csv "prior": 0 = human
-  clone, 1 = distilled. No crops (vision is parked: results/rdqn/value_bench_vision.md).
+  clone, 1 = distilled. Both fighters' crops are saved (about 1 GB an hour), for the picture advisor once there is 10x the data of results/rdqn/value_bench_vision.md; shards are compressed off the play thread.
 base: rdqn_medium_v3.yaml
 seeds: [0]
 overrides:
@@ -16,4 +16,4 @@ overrides:
       prior: [runs/bc/medium_v4/policy.zip, runs/bc/advised_v1/policy.zip]
       prior_every: 5
       beta: 10.0
-      trace_crops: false
+      trace_crops: true

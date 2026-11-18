@@ -93,7 +93,7 @@ def test_the_live_loop_plays_learns_in_another_process_and_saves(tmp_path):
     assert rdqn.load(saved)[1]["n_in"] == observation.SIZE
 
 
-def test_the_live_loop_samples_from_a_cloned_policy_when_given_one(tmp_path):
+def test_the_live_loop_samples_from_a_cloned_policy_when_given_one(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from test_env import Game
@@ -120,6 +120,7 @@ def test_the_live_loop_samples_from_a_cloned_policy_when_given_one(tmp_path):
     game = Game()
     game.keys = SimpleNamespace(release_all=lambda: None)
     env = BrawlEnv(game, game, Perception(game), window=0)
+    monkeypatch.setattr(learn, "TRACE_ROWS", 50)  # several shards, written off the play thread
     saved = learn.train_rdqn(env, cfg, tmp_path / "run", [demo], realtime=False, reward_weights=(0.01, 1.0), log=lambda m: None)
     import csv
 
@@ -130,3 +131,5 @@ def test_the_live_loop_samples_from_a_cloned_policy_when_given_one(tmp_path):
     assert len(np.unique(actions_taken)) > 20  # sampled, not one best action
     crops = np.concatenate([np.load(f)["crops"] for f in sorted((tmp_path / "run" / "trace").glob("*.npz"))])
     assert crops.shape == (180, 2, 96, 96) and crops.dtype == np.uint8
+    steps = np.concatenate([np.load(f)["step"] for f in sorted((tmp_path / "run" / "trace").glob("*.npz"))])
+    assert len(list((tmp_path / "run" / "trace").glob("*.npz"))) == 4 and (steps == np.arange(1, 181)).all()

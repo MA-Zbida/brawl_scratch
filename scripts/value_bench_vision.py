@@ -31,7 +31,7 @@ import numpy as np  # noqa: E402
 
 from brawl import actions, observation, rdqn  # noqa: E402
 from brawl.config import load_experiment  # noqa: E402
-from brawl.paths import CONFIGS, DATA, RESULTS  # noqa: E402
+from brawl.paths import CONFIGS, DATA, REPO_ROOT, RESULTS  # noqa: E402
 from brawl.record import Recording, is_demo  # noqa: E402
 from value_bench import AHEAD, auc, mc_return  # noqa: E402
 
@@ -41,16 +41,50 @@ VARIANTS = {"vector": dict(crops=False, learning_rate=3e-5),
 
 
 class Session:
-    def __init__(self, root: Path, k: int, weights):
+    def __init__(self, name, obs, action, reward, ko_scored, ko_lost, crops):
+        self.name, self.obs, self.action, self.reward, self.crops = name, obs, action, reward, crops  # crops [n, 2, 96, 96]
+        self.n = len(obs)
+        self.lose = np.array([ko_lost[i:i + AHEAD].sum() > 0 for i in range(self.n)])
+        self.win = np.array([ko_scored[i:i + AHEAD].sum() > 0 for i in range(self.n)])
+
+    @classmethod
+    def demo(cls, root: Path, k: int, weights):
         z = np.load(root / f"decisions_k{k}.npz")
-        self.name = root.name
-        self.obs = z["obs"].astype(np.float32)
-        self.n = len(self.obs)
-        self.action = (z["action"][:, 0] * actions.SHAPE[1] + z["action"][:, 1]).astype(np.int64)
-        self.reward = (weights[0] * (z["dealt"] - z["taken"]) + weights[1] * (z["ko_scored"] - z["ko_lost"])).astype(np.float32)
-        self.lose = np.array([z["ko_lost"][i:i + AHEAD].sum() > 0 for i in range(self.n)])
-        self.win = np.array([z["ko_scored"][i:i + AHEAD].sum() > 0 for i in range(self.n)])
-        self.crops = np.load(root / f"crops_k{k}_96.npy", mmap_mode="r")  # [n, 2, 96, 96]
+        reward = (weights[0] * (z["dealt"] - z["taken"]) + weights[1] * (z["ko_scored"] - z["ko_lost"])).astype(np.float32)
+        return cls(root.name, z["obs"].astype(np.float32), (z["action"][:, 0] * actions.SHAPE[1] + z["action"][:, 1]).astype(np.int64),
+                   reward, z["ko_scored"], z["ko_lost"], np.load(root / f"crops_k{k}_96.npy", mmap_mode="r"))
+
+
+def night(run: Path, segments: int, log) -> list[Session]:
+    """A live run's trace (train.rdqn.trace_crops) cut into equal segments of time. The crops are unpacked
+    once into DATA/traces/<experiment>/crops.npy (13 GB for 10 hours: the laptop's RAM cannot hold them)."""
+    cache = DATA / "traces" / run.parts[-3]
+    cache.mkdir(parents=True, exist_ok=True)
+    shards = sorted((run / "trace").glob("shard_*.npz"))
+    if not (cache / "done").exists():
+        n = sum(len(np.load(f)["step"]) for f in shards)
+        crops = np.lib.format.open_memmap(cache / "crops.npy", mode="w+", dtype=np.uint8, shape=(n, 2, 96, 96))
+        cols: dict[str, list] = {"obs": [], "action": [], "reward": [], "events": []}
+        a = 0
+        for i, f in enumerate(shards):
+            z = np.load(f)
+            m = len(z["step"])
+            crops[a:a + m] = z["crops"]
+            for key in cols:
+                cols[key].append(z[key])
+            a += m
+            if i % 20 == 0:
+                log(f"  unpacking {i + 1}/{len(shards)} shards")
+        crops.flush()
+        del crops
+        np.savez(cache / "decisions.npz", **{key: np.concatenate(v) for key, v in cols.items()})
+        (cache / "done").write_text("ok")
+    z = np.load(cache / "decisions.npz")
+    crops = np.load(cache / "crops.npy", mmap_mode="r")
+    obs, act, rew, ev = z["obs"].astype(np.float32), z["action"].astype(np.int64), z["reward"].astype(np.float32), z["events"]
+    edges = np.linspace(0, len(obs), segments + 1).astype(int)
+    return [Session(f"{run.parts[-3]}[{a}:{b}]", obs[a:b], act[a:b], rew[a:b], ev[a:b, 2], ev[a:b, 3], crops[a:b])
+            for a, b in zip(edges[:-1], edges[1:])]
 
 
 def shift(img, torch):
@@ -147,6 +181,10 @@ def main(argv=None) -> int:
     p.add_argument("--only", default="", help="variant names separated by ;")
     p.add_argument("--updates", type=int, default=20000)
     p.add_argument("--folds", type=int, default=3, help="sessions held out in turn (at least 2)")
+    p.add_argument("--trace", type=Path, default=None, help="a live run (runs/<exp>/<variant>/seed<k>) whose trace has crops, "
+                   "instead of the human sessions")
+    p.add_argument("--segments", type=int, default=8, help="with --trace: the run cut into this many segments of time; "
+                   "each fold holds out two, half a run apart")
     args = p.parse_args(argv)
 
     import torch
@@ -156,16 +194,29 @@ def main(argv=None) -> int:
     gamma, k = float(config["train"]["gamma"]), int(env["k"])
     weights = (float(env["damage_weight"]), float(env["ko_weight"]))
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    roots = [q for q in sorted((DATA / "demos").iterdir()) if (q / f"crops_k{k}_96.npy").exists()
-             and (q / f"decisions_k{k}.npz").exists() and is_demo(Recording(q).meta)
-             and Recording(q).meta["setting"].get("difficulty") == "medium"]
-    sessions = [Session(r, k, weights) for r in roots]
     log = lambda m: print(m, flush=True)  # noqa: E731
-    log(f"{len(sessions)} Medium sessions with crops, {sum(s.n for s in sessions)} decisions; {args.folds} folds")
+    if args.trace:
+        run = args.trace if args.trace.is_absolute() else REPO_ROOT / args.trace
+        sessions = night(run, args.segments, log)
+        half = args.segments // 2
+        step = max(1, half // args.folds)
+        held = [{f * step + 1, f * step + 1 + half} for f in range(args.folds)]
+        source = f"the agent's own play in {'/'.join(run.parts[-4:])} ({args.segments} segments of time; each fold holds out two, half the run apart)"
+        out = RESULTS / "rdqn" / f"value_bench_vision_{run.parts[-3]}.md"
+    else:
+        roots = [q for q in sorted((DATA / "demos").iterdir()) if (q / f"crops_k{k}_96.npy").exists()
+                 and (q / f"decisions_k{k}.npz").exists() and is_demo(Recording(q).meta)
+                 and Recording(q).meta["setting"].get("difficulty") == "medium"]
+        sessions = [Session.demo(r, k, weights) for r in roots]
+        folds = max(2, args.folds)
+        held = [{i for i in range(len(sessions)) if i % folds == f} for f in range(folds)]
+        source = f"{len(sessions)} human Medium sessions with crops ({folds} folds, a share of the sessions held out in turn)"
+        out = RESULTS / "rdqn" / "value_bench_vision.md"
+    log(f"{len(sessions)} sessions with crops, {sum(s.n for s in sessions)} decisions; {len(held)} folds")
     names = [n for n in VARIANTS if not args.only or n in args.only.split(";")]
     results: dict[str, list[dict]] = {}
-    for fold in range(max(2, args.folds) if args.folds > 1 else 1):
-        test = [s for i, s in enumerate(sessions) if i % max(2, args.folds) == fold]
+    for fold, ids in enumerate(held):
+        test = [s for i, s in enumerate(sessions) if i in ids]
         train_set = [s for s in sessions if s not in test]
         for name in names:
             log(f"{name}, fold {fold} (held out: {', '.join(s.name for s in test)})")
@@ -180,8 +231,8 @@ def main(argv=None) -> int:
     base = results.get("vector")
     lines = ["# Does the advisor value outcomes better with pictures?", "",
              f"{datetime.now():%Y-%m-%d %H:%M}. scripts/value_bench_vision.py. The advisor of rdqn_medium_v3 (sarsa, gamma {gamma}, "
-             f"n {cfg['n_step']}, target every {cfg['target_every']}), {args.updates} updates, on {len(sessions)} human Medium "
-             f"sessions with crops, {args.folds} folds (a third held out in turn). Mean over folds; in brackets the mean "
+             f"n {cfg['n_step']}, target every {cfg['target_every']}), {args.updates} updates, on {source}, "
+             f"{sum(s.n for s in sessions)} decisions. Mean over folds; in brackets the mean "
              f"difference from `vector` in the same fold, and its spread.", "",
              "| Input | Correlation | Bias | Lose AUC | Win AUC |", "|---|---|---|---|---|"]
     for name, rs in results.items():
@@ -194,7 +245,8 @@ def main(argv=None) -> int:
                 cell += f" ({diff.mean():+.{d}f} ± {diff.std():.{d}f})"
             cells.append(cell)
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
-    path = RESULTS / "rdqn" / "value_bench_vision.md"
+    path = out
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines), f"\n-> {path}")
     return 0

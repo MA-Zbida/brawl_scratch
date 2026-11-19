@@ -38,7 +38,6 @@ from brawl import actions, observation, rdqn  # noqa: E402
 from brawl.config import resolve_config  # noqa: E402
 from brawl.paths import CONFIGS, RESULTS  # noqa: E402
 from brawl.record import Recording  # noqa: E402
-from train import demo_sessions  # noqa: E402
 
 AHEAD = 60  # decisions (3 s) for the lose and win AUCs
 VARIANTS = {
@@ -166,6 +165,8 @@ def main(argv=None) -> int:
     base, env = base_cfg["train"]["rdqn"], base_cfg["env"]
     k, weights = int(env["k"]), (float(env["damage_weight"]), float(env["ko_weight"]))
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    from train import demo_sessions  # here, not at the top: train.py takes the screen (Windows only)
+
     roots = demo_sessions(base["demo_levels"], k)
     sessions = [Session(r, k, weights) for r in roots]
     test = sessions[::3]

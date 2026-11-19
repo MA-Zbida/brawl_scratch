@@ -1317,3 +1317,27 @@ gains a little correlation in both folds (+0.018, +0.012). But they do not see l
 earlier, and an update costs 20x more (205 against 10 ms on a GPU). **Reading:** the vector already carries
 what the value needs; the advisor's plateau is not a perception problem. Vision stays parked; the next lever
 is behaviour: the failed recoveries (35% of lost stocks).
+
+**Decision:** vision stays parked as raw pixels. Next, two things, in this order. (1) The recovery reflex,
+A/B tonight against Hard. (2) A fighter-state network (neutral, attacking, dodging, recovering, hitstun),
+trained on hand labels from the night traces, its output added to the vector. It goes live only if it
+improves the hit prediction or the value offline. Also seen while watching night 4: the agent is predictable
+(runs in, light, then down-light or heavy), a habit Medium pays for; Hard will not.
+
+## 2026-11-19: the recovery reflex (brawl/reflex.py), night 5 planned
+
+A hand-written rule over the observation vector, so it can be replayed on a trace. It takes over beyond a
+ledge while falling, or anywhere below the stage's top. Above the top it drifts in. Below the top it climbs
+beside the nearer ledge, never under the stage. Falling, it presses: jumps (3 per airtime), then up + heavy,
+then a dodge (recovery and dodge are counted as given back by a hit). Off the screen it goes on from the
+last place seen. It never presses down. Replayed on night 4's 700,000 decisions, it would act on 13.2% of
+them (off stage: 13.3%). It reaches 77% of the 137 self-falls. Of the falls it does not reach, 8 ended
+under the stage (steering at the centre would have led there; the rule climbs beside the ledge instead).
+In the other ~30, Wu Shang was standing on the stage just before the stock was lost: probably KOs whose
+"+2" credit was misread, not falls. Assumptions to check by eye in the game: 3 jumps, a hit gives the
+recovery back, up-left/up-right + heavy is the recovery.
+
+advised_night5 (configs/experiments/advised_night5.yaml): against **Hard**, about 10 h. The human clone
+under night 4's advisor, beta 10 after 30 minutes. The reflex is off and on in turns every 5 minutes, off
+first (progress.csv "reflex", "reflex_decisions"; the trace marks each decision it took). Crops saved for
+the fighter-state labels.

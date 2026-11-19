@@ -275,7 +275,7 @@ def train_ppo(env, cfg: dict, run_dir: Path, *, realtime: bool, stop=lambda: Fal
 RDQN_PROGRESS = ("rollout", "steps", "game_frames", "wall_s", "play_s", "stall_s", "stall_frames", "stocks_taken",
                  "stocks_lost", "damage_dealt", "damage_taken", "reward", "stall_stocks_lost", "stall_damage_taken",
                  "late_frames", "sense_ms", "over_budget", "pauses", "updates", "learner_lag", "weights_loaded", "fell",
-                 "opponent_fell", "rollbacks", "beta", "prior")
+                 "opponent_fell", "rollbacks", "beta", "prior", "reflex", "reflex_decisions")
 TRACE_ROWS = 6000  # decisions per shard of a run's trace (5 minutes)
 BEST_WINDOW = 30  # blocks (30 minutes at 1,200 decisions): the window over which the best policy is judged
 
@@ -304,7 +304,7 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
 
     import torch
 
-    from brawl import observation, rdqn, vision
+    from brawl import observation, rdqn, reflex, vision
 
     now, sleep = now or time.perf_counter, sleep or time.sleep
     q = cfg["rdqn"]
@@ -352,6 +352,13 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
     prior, arm = (priors[0] if priors else None), 0
     beta_max, after, ramp, clip = (float(q.get(key) or 0) for key in ("beta", "beta_after", "beta_ramp", "adv_clip"))
     beta = 0.0
+    # the recovery reflex (brawl/reflex.py) takes over off the stage: always (true), never (false), or in turns
+    # with the agent alone ("ab", every reflex_every blocks, off first); progress.csv's "reflex" says which
+    mode = q.get("reflex") or False
+    if mode not in (False, True, "ab"):
+        raise SystemExit(f"train.rdqn.reflex: {mode!r}; false, true or ab")
+    reflex_turn = int(q.get("reflex_every") or 1) * int(cfg["n_steps"])
+    reflex_on = False
     file = open(run_dir / "progress.csv", "w", newline="", encoding="utf-8")
     rows = csv.DictWriter(file, fieldnames=RDQN_PROGRESS)
     rows.writeheader()
@@ -362,7 +369,7 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
 
     def new() -> dict:
         return dict(stocks_taken=0, stocks_lost=0, damage_dealt=0.0, damage_taken=0.0, reward=0.0, late_frames=0,
-                    game_frames=0, pauses=0, fell=0, opponent_fell=0)
+                    game_frames=0, pauses=0, fell=0, opponent_fell=0, reflex_decisions=0)
 
     (run_dir / "trace").mkdir(exist_ok=True)
     trace: list = []
@@ -376,7 +383,7 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
         extra = {"crops": np.stack(cols[6]).astype(np.uint8)} if keep_crops else {}
         np.savez_compressed(run_dir / "trace" / f"shard_{int(cols[0][0]):07d}.npz", step=np.array(cols[0]), **extra,
                             obs=np.array(cols[1], np.float16), action=np.array(cols[2]), reward=np.array(cols[3], np.float32),
-                            events=np.array(cols[4], np.float32), readable=np.array(cols[5]),
+                            events=np.array(cols[4], np.float32), readable=np.array(cols[5]), reflex=np.array(cols[7], bool),
                             events_doc=np.array(["damage_dealt", "damage_taken", "ko_scored", "ko_lost", "fell",
                                                  "opponent_fell"]), features=np.array(observation.FEATURES))
 
@@ -448,6 +455,13 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
                 j = int(rng.choice(rdqn.N_ACTIONS, p=explore_p))
             else:
                 j = int(values[0, 0].argmax())
+            reflex_on = mode is True or (mode == "ab" and (step - 1) // reflex_turn % 2 == 1)
+            took_over = False
+            if reflex_on:
+                r = reflex.recover(obs)
+                if r is not None:
+                    j, took_over = rdqn.joint(r), True
+                    s["reflex_decisions"] += 1
             crops_now = (np.stack([vision.crop(env.frame, env.builder.last[who]) for who in (observation.AGENT, observation.OPPONENT)])
                     if keep_crops else None)  # what the decision saw, cut from the full-size frame
             nxt, reward, _, _, info = env.step(rdqn.split(j))
@@ -469,7 +483,7 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
             s["game_frames"] += timing.frames
             sense.append(info["sense_s"])
             trace.append((step, before, j, reward, (e.damage_dealt, e.damage_taken, e.ko_scored, e.ko_lost, e.fell,
-                                                         e.opponent_fell), info["sense"].readable, crops_now))
+                                                         e.opponent_fell), info["sense"].readable, crops_now, took_over))
             dump()
             unreadable = 0 if info["sense"].readable else unreadable + 1
             if unreadable >= int(q["watchdog_decisions"]):
@@ -486,7 +500,7 @@ def train_rdqn(env, cfg: dict, run_dir: Path, demo_roots: list, *, realtime: boo
                        "sense_ms": round(float(np.median(sense)) * 1000, 1),
                        "over_budget": round(float(np.mean(np.array(sense) > budget_s)), 4), "updates": updates.value,
                        "learner_lag": round(updates.value / max(per * step, 1e-9), 3), "weights_loaded": loaded,
-                       "rollbacks": rollback.value, "beta": round(beta, 3), "prior": arm, **s}
+                       "rollbacks": rollback.value, "beta": round(beta, 3), "prior": arm, "reflex": int(reflex_on), **s}
                 rows.writerow({k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items()})
                 file.flush()
                 minutes = max(s["game_frames"] / 3600, 1e-9)

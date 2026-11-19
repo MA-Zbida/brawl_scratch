@@ -115,10 +115,11 @@ def test_the_live_loop_samples_from_a_cloned_policy_when_given_one(tmp_path, mon
              margin_weight=0.0, live_margin_weight=0.0, demo_fraction=0.25, pretrain_updates=10, updates_per_decision=0.5,
              epsilon=0.0, explore="human", rollback=1.0, sync_every=10, capacity=5000, threads=1, device="cpu",
              watchdog_decisions=10000, bootstrap="sarsa", prior=[str(tmp_path / "clone.zip"), str(tmp_path / "other.zip")], prior_every=1, beta=10.0, beta_after=60,
-             beta_ramp=120, adv_clip=0.1, trace_crops=True)
+             beta_ramp=120, adv_clip=0.1, trace_crops=True, reflex="ab", reflex_every=2)
     cfg = dict(init=None, total_steps=180, n_steps=60, checkpoint_every=2, gamma=0.99, seed=0, rdqn=q)
     game = Game()
     game.keys = SimpleNamespace(release_all=lambda: None)
+    game.x = 1400.0  # beyond the right ledge (1305): the reflex has something to do when it is on
     env = BrawlEnv(game, game, Perception(game), window=0)
     monkeypatch.setattr(learn, "TRACE_ROWS", 50)  # several shards, written off the play thread
     saved = learn.train_rdqn(env, cfg, tmp_path / "run", [demo], realtime=False, reward_weights=(0.01, 1.0), log=lambda m: None)
@@ -127,6 +128,11 @@ def test_the_live_loop_samples_from_a_cloned_policy_when_given_one(tmp_path, mon
     rows = list(csv.DictReader(open(tmp_path / "run" / "progress.csv", encoding="utf-8")))
     assert saved.name == "qnet.pt" and [float(r["beta"]) for r in rows] == [0.0, 5.0, 10.0]  # pure clone, ramp, full
     assert [int(r["prior"]) for r in rows] == [0, 1, 0]  # the two clones take turns, a block each
+    assert [int(r["reflex"]) for r in rows] == [0, 0, 1]  # the reflex: off for two blocks, then on
+    took = np.concatenate([np.load(f)["reflex"] for f in sorted((tmp_path / "run" / "trace").glob("*.npz"))])
+    assert not took[:120].any() and took.sum() == int(rows[2]["reflex_decisions"]) > 0  
+    acts = np.concatenate([np.load(f)["action"] for f in sorted((tmp_path / "run" / "trace").glob("*.npz"))])
+    assert (acts[took] == rdqn.joint((actions.DIRECTION_NAMES.index("left"), 0))).all()  # off it, above the top: drift back in
     actions_taken = np.concatenate([np.load(f)["action"] for f in sorted((tmp_path / "run" / "trace").glob("*.npz"))])
     assert len(np.unique(actions_taken)) > 20  # sampled, not one best action
     crops = np.concatenate([np.load(f)["crops"] for f in sorted((tmp_path / "run" / "trace").glob("*.npz"))])

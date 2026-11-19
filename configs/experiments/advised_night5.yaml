@@ -1,0 +1,22 @@
+name: advised_night5
+description: >
+  A/B night against Hard (about 10 hours): does the recovery reflex (brawl/reflex.py) stop the self-falls?
+  On night 4, against Medium, 35% of the stocks lost were falls nobody was credited for, at low damage, and
+  the agent used the recovery (up + heavy) on 7.5% of its decisions off stage. Here the reflex is on and off
+  in turns every 5 minutes, off first (progress.csv "reflex"; trace "reflex" marks the decisions it took).
+  The base is the human clone (distillation added nothing on night 4) under night 4's advisor, which has only
+  seen Medium: both arms share it. Also the first measurement against Hard (set it in the game), and both
+  fighters' crops for the fighter-state network's labels.
+base: rdqn_medium_v3.yaml
+seeds: [0]
+overrides:
+  env: {difficulty: hard}
+  train:
+    init: runs/advised_night4/default/seed0/qnet.pt
+    total_steps: 700000
+    rdqn:
+      prior: runs/bc/medium_v4/policy.zip
+      beta: 10.0
+      trace_crops: true
+      reflex: ab
+      reflex_every: 5

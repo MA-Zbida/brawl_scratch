@@ -11,7 +11,7 @@ agent scores **+0.50 reward per minute**, against **−0.08** for the cloned pol
 **20 stocks taken to 14 lost, against 15 to 16**, and **6 virtual matches won to 1, against 4 to 3**. Each
 was measured in 30 minutes of frozen-policy play (6 × 5 min blocks, back to back:
 [results/play/](results/play/)). The same gap held during training: +0.38 ± 0.06 against −0.11 ± 0.19
-over a 7-hour night.
+over a 7-hour night. Over a 10-hour night the advised agent is even on stocks with the Medium bot (399 taken, 386 lost) and ahead on damage; a third of the stocks it loses are its own failed recoveries, the next thing to fix.
 
 ![Reward per minute over each training run](results/figures/rl_runs.png)
 
@@ -75,7 +75,7 @@ Every result, including the negative ones, is in [research/LAB_NOTEBOOK.md](rese
 | Recurrent Q-learning, acting greedily | −2 to −4 reward per minute | First copied its own last action. Then its values inflated overnight (−1.85 → −4.3). Then it stood still once exploration stopped |
 | Uniform exploration | The fighter threw its weapon away | Replaced by exploring with the human's action frequencies |
 | Fighter crops (CNN) added to the vector state | Worse value estimates (lose AUC 0.61 against 0.73) | Overfits on 2.5 h of data; the vector already carries what the crops show |
-| Distilling the advised play into a new clone | Under test (A/B within one night) | – |
+| Distilling the advised play into a new clone | No better than the original clone (−0.09 ± 0.10 over a 10 h A/B night, alternating every 5 min) | The online advisor, not the base policy, is the bound |
 
 ## Engineering
 

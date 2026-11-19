@@ -1275,3 +1275,26 @@ errors, and confounded.
 **Night 4 planned** (advised_night4, about 10 h): the human clone and the distilled clone take turns every
 5 minutes under one advisor (train.rdqn.prior as a list, prior_every; progress.csv "prior"), so drift in
 the laptop's speed falls on both arms. No crops.
+
+## 2026-11-19: night 4, the A/B night (distilled clone against the human clone)
+
+advised_night4: 10 h, 700,000 decisions, completed. The human clone (medium_v4) and the distilled clone
+(advised_v1) took turns every 5 minutes under one advisor (night 2's Q-network, sarsa, beta 10). Crops saved
+(6.2 GB). Sensing 33 ms median, over budget 1.0%, one rollback, learner lag 0.48 (night 2: 0.71).
+
+| Phase | Human clone | Distilled | Paired (distilled - human) |
+|---|---|---|---|
+| No advice (15 min each) | +0.59 +- 0.31 | +0.68 +- 0.34 | +0.09 +- 0.05 (3 cycles) |
+| Full advice (4.4 h each) | +0.34 +- 0.07 | +0.23 +- 0.08 | -0.09 +- 0.10 (52 cycles) |
+
+Under full advice, stocks 182 - 174 and 179 - 173: identical. **Distillation does not help**; night 3's -0.29
+was noise and the slow afternoon. Over the whole night, 399 - 386 stocks: against Medium the advised agent is
+even on stocks and ahead on damage (+0.28 reward per minute, the plateau of nights 1 and 2 again). The
+advisor, not the base, is what is bounded.
+
+**Where stocks are lost.** 137 of 386 lost stocks (35%) were falls nobody was credited for (0.25 per
+minute; Mordex 0.05). Before them the agent was off stage for about 3 s at low damage (median 30%, against
+71% for stocks lost to a hit), steering toward the stage 66% of decisions, but using up + heavy (the
+recovery) on only 7.5%. It comes back from 97% of off-stage spells; the 3% it does not cost a third of the
+stocks. Recovery is rare and its failure is delayed and sparse: the kind of skill the value learning does
+not find. Without those falls the agent would lose about 0.42 stocks a minute against 0.69 taken.

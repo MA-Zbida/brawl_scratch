@@ -1298,3 +1298,22 @@ minute; Mordex 0.05). Before them the agent was off stage for about 3 s at low d
 recovery) on only 7.5%. It comes back from 97% of off-stage spells; the 3% it does not cost a third of the
 stocks. Recovery is rare and its failure is delayed and sparse: the kind of skill the value learning does
 not find. Without those falls the agent would lose about 0.42 stocks a minute against 0.69 taken.
+
+## 2026-11-19: the vision value test at RL scale (night 4's trace, on Kaggle)
+
+The laptop froze unpacking the crops (13 GB against 7.8 GB of RAM), so the test ran on Kaggle
+(scripts/pack_trace.py packs the trace and the code, 6.2 GB). Same advisor and training as the bench on human
+data, now 700,000 decisions of the agent's own play (280x the human data), 8 time segments, 2 folds, each
+holding out two segments half the run apart (results/rdqn/value_bench_vision_advised_night4.md).
+
+| Input | Correlation | Lose AUC | Win AUC |
+|---|---|---|---|
+| vector | 0.442 | 0.771 | 0.846 |
+| vector + crops (3e-5) | 0.457 (+0.015 +- 0.003) | 0.771 (+0.001) | 0.844 (-0.002) |
+| vector + crops (1e-4) | 0.420 (-0.022) | 0.776 (+0.006) | 0.794 (-0.051) |
+
+With enough data the pictures no longer hurt (on human data: -0.117 lose AUC), and the slower learning rate
+gains a little correlation in both folds (+0.018, +0.012). But they do not see lost or won stocks coming any
+earlier, and an update costs 20x more (205 against 10 ms on a GPU). **Reading:** the vector already carries
+what the value needs; the advisor's plateau is not a perception problem. Vision stays parked; the next lever
+is behaviour: the failed recoveries (35% of lost stocks).

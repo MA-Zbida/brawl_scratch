@@ -6,6 +6,8 @@ the countdown. Press **F10** to stop early.
 
     python scripts/play.py runs/bc/medium_v4/policy.zip --difficulty medium --minutes 5
     python scripts/play.py runs/bc/medium_v4/policy.zip --difficulty medium --minutes 5 --blocks 6   # gate N1
+    python scripts/play.py runs/advised_night4/default/seed0/best.pt --prior runs/bc/medium_v4/policy.zip --difficulty medium
+                                                                      # the advised clone, as the nights played it (--reflex: with the reflex)
     python scripts/play.py random --difficulty easy --minutes 1       # no policy: random actions
     python scripts/play.py scripted --playing mordex --difficulty medium --minutes 60   # label Mordex's moves
 
@@ -188,6 +190,7 @@ def main(argv=None) -> int:
                    help="with a qnet.pt: sample from this cloned policy.zip, shifted by the Q-network's advantages")
     p.add_argument("--beta", type=float, default=10.0, help="with --prior: strength of the shift")
     p.add_argument("--adv-clip", type=float, default=0.1, help="with --prior: advantages clipped to this")
+    p.add_argument("--reflex", action="store_true", help="the recovery reflex (brawl/reflex.py) takes over when falling off the stage")
     p.add_argument("--detector", type=Path, default=DETECTOR)
     p.add_argument("--name", default=None, help="report name (default: policy folder, level and regime)")
     p.add_argument("--countdown", type=int, default=5)
@@ -217,6 +220,10 @@ def main(argv=None) -> int:
         from brawl.rdqn import Greedy
 
         greedy = Greedy(Path(args.policy), epsilon=0.0, seed=args.seed)
+        if not args.prior:
+            print("WARNING: a Q-network alone, playing its best action. This is not the agent of the advised runs (the clone, "
+                  "advised by the Q-network): add --prior runs/bc/medium_v4/policy.zip. Alone it repeats itself and walks off "
+                  "the stage (2026-11-13).", flush=True)
         if args.prior:  # the clone, advised by this Q-network, as the live run played it
             from brawl.rdqn import Advised
 
@@ -232,6 +239,14 @@ def main(argv=None) -> int:
     script = crops = None
 
     def choose(obs):
+        if args.reflex and not scripted:
+            from brawl import reflex
+
+            taken = reflex.recover(obs)
+            if taken is not None:
+                if greedy is not None:
+                    greedy(obs)  # the network's memory still sees every decision
+                return taken
         if scripted:
             action = script(env.sense)
             crops.before(obs, action)

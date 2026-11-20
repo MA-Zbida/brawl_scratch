@@ -18,6 +18,15 @@ starting), the network will only see the past.
     b / backspace  back one clip (to change a label)
     q / Esc        quit; everything is saved after every key, and the next run resumes
 
+Rules (2026-11-20), so the labels stay consistent:
+- Label what Mordex is doing **in the framed frame**. The other frames only help to recognise it. What he
+  did before is not part of the label: the network sees consecutive frames, and the agent's memory keeps
+  the history (a dodge 3 frames ago that is over by the framed frame: label what he does now).
+- A move counts from the first frame its pose differs, to the frame he is free again: an attack's wind-up,
+  swing and end lag are all "attacking"; flying and tumbling after a hit are all "hurt".
+- Two at once: hurt > dodging > recovering > attacking > neutral.
+- Unsure after about 3 seconds: 0. Consistent and fast beats perfect.
+
 The clips are drawn half from night 4 (Medium) and half from night 5 (Hard), shuffled, and over-sample the
 moments that matter: 35% in the half second before Wu Shang takes damage, 15% just after Mordex took
 damage, 15% with Mordex off the stage, 35% anywhere. Labels: <BRAWL_DATA>/labels/fighter_state/labels.csv.

@@ -60,10 +60,11 @@ def test_a_hit_gives_the_recovery_back():
     assert name(reflex.recover(state(-600, below=True, vy=0.3, jumps=3, heavy_ago=30, hit_ago=10))) == "up-right+heavy"
 
 
-def test_below_the_top_it_climbs_beside_the_ledge_never_under_the_stage():
-    assert name(reflex.recover(state(-400, below=True, vy=0.3, jumps=3))) == "up+heavy"        # in the band: straight up
-    assert name(reflex.recover(state(-300, below=True, vy=0.3, jumps=3))) == "up-left+heavy"   # under the stage: out
-    assert name(reflex.recover(state(320, below=True, vy=0.3, jumps=4, heavy_ago=5, dodge_ago=5))) == "right+none"
+def test_beside_the_stage_below_its_top_it_holds_toward_it():
+    # night 5: rising straight up beside the ledge, or away from it, let him fall past the wall he could cling to
+    assert name(reflex.recover(state(-400, below=True, vy=0.3, jumps=3))) == "up-right+heavy"
+    assert name(reflex.recover(state(-370, below=True, vy=0.3, jumps=4, heavy_ago=5, dodge_ago=5))) == "right+none"
+    assert name(reflex.recover(state(330, below=True, vy=0.3, jumps=4, heavy_ago=5, dodge_ago=5))) == "left+none"
 
 
 def test_it_never_holds_down():

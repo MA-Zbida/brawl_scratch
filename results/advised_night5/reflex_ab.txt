@@ -1,0 +1,21 @@
+== no advice: 30 blocks
+  reflex off  15 min: reward/min -3.770 +- 0.259, stocks 2-23 (0.13/1.53 per min), self-falls 0.200/min (3), opp falls 0.000/min, damage 37/274 per min, reflex took 0.0%
+  reflex on   15 min: reward/min -3.527 +- 0.334, stocks 4-23 (0.27/1.53 per min), self-falls 0.333/min (5), opp falls 0.067/min, damage 44/270 per min, reflex took 13.9%
+  paired (on - off) over 3 cycles: reward/min +0.243 +- 0.120 (t 2.03); stocks lost per 5 min +0.00 +- 1.00; self-falls per 5 min +0.67 +- 0.88
+== ramp: 29 blocks
+  reflex off  15 min: reward/min -3.503 +- 0.360, stocks 4-22 (0.27/1.47 per min), self-falls 0.133/min (2), opp falls 0.133/min, damage 46/277 per min, reflex took 0.0%
+  reflex on   14 min: reward/min -3.638 +- 0.309, stocks 4-22 (0.29/1.57 per min), self-falls 0.286/min (4), opp falls 0.000/min, damage 58/293 per min, reflex took 15.0%
+  paired (on - off) over 2 cycles: reward/min -0.702 +- 0.349 (t -2.01); stocks lost per 5 min +1.50 +- 0.50; self-falls per 5 min +1.50 +- 0.50
+== full advice: 524 blocks
+  reflex off 263 min: reward/min -3.497 +- 0.076, stocks 60-364 (0.23/1.38 per min), self-falls 0.141/min (37), opp falls 0.011/min, damage 45/279 per min, reflex took 0.0%
+  reflex on  261 min: reward/min -3.851 +- 0.076, stocks 54-451 (0.21/1.73 per min), self-falls 0.349/min (91), opp falls 0.023/min, damage 46/279 per min, reflex took 16.5%
+  paired (on - off) over 52 cycles: reward/min -0.366 +- 0.089 (t -4.11); stocks lost per 5 min +1.71 +- 0.21; self-falls per 5 min +1.04 +- 0.17
+== whole night: 583 blocks
+  reflex off 293 min: reward/min -3.511 +- 0.071, stocks 66-409 (0.23/1.40 per min), self-falls 0.143/min (42), opp falls 0.017/min, damage 45/279 per min, reflex took 0.0%
+  reflex on  290 min: reward/min -3.824 +- 0.072, stocks 62-496 (0.21/1.71 per min), self-falls 0.345/min (100), opp falls 0.024/min, damage 46/279 per min, reflex took 16.3%
+  paired (on - off) over 58 cycles: reward/min -0.320 +- 0.087 (t -3.68); stocks lost per 5 min +1.57 +- 0.21; self-falls per 5 min +1.00 +- 0.16
+== full advice by thirds
+  third 1: reflex off -3.65, lost 126, fell 9 | reflex on -3.88, lost 147, fell 27
+  third 2: reflex off -3.51, lost 121, fell 17 | reflex on -3.78, lost 158, fell 38
+  third 3: reflex off -3.33, lost 117, fell 11 | reflex on -3.90, lost 146, fell 26
+== timing: sense median 34.1 ms, over budget 0.0019, rollbacks 0, pauses 0, learner lag 0.587, decisions 699600

@@ -11,9 +11,10 @@ the stage), and otherwise returns None: the agent decides. Beyond the screen's e
 the observation keeps his last place with a speed of zero: the rule goes on from there (on night 4, 483 times
 off the screen from off the stage, 1.8 s each, 27 of them ended in a lost stock).
 
-Where to go: above the stage's top, onto it. Below it, up the side of the stage, just beyond the nearer
-ledge (BAND): toward it from farther out, away from it from under the stage, straight up in the band. On
-night 4, 8 of the falls the rule did not reach ended under the stage, where "toward the centre" leads.
+Where to go: always toward the stage. Beside it below the top, that presses him against its side, where he
+clings and gets a jump back. (Night 5's first version rose straight up beside the ledge and steered away
+from it under the stage: it doubled the self-falls, 0.35 against 0.14 a minute, the falls ending straight
+down beside the wall with nothing left to press.)
 
 What to press, while falling (rising, a jump is still carrying him: hold the direction only):
 1. Above the stage's top and near the ledge: nothing; drift and keep the jumps (he may land).
@@ -33,7 +34,6 @@ DIR = {n: actions.DIRECTION_NAMES.index(n) for n in actions.DIRECTION_NAMES}
 UP_OF = {DIR["none"]: DIR["up"], DIR["left"]: DIR["up-left"], DIR["right"]: DIR["up-right"]}
 JUMPS = 3              # per airtime, the ground jump included
 FAR = 250.0            # pixels beyond the ledge from which it jumps even above the stage's top
-BAND = (20.0, 100.0)   # pixels beyond the ledge in which, below the top, it rises straight up
 LAST = observation.HISTORY  # the history's last entry is the action just taken
 
 
@@ -56,11 +56,7 @@ def recover(obs) -> tuple[int, int] | None:
         return None
     left = obs[F["agent_x"]] < 0  # the nearer ledge is the left one
     gap = -obs[F["agent_to_left_ledge" if left else "agent_to_right_ledge"]] * observation.LEDGE  # beyond it; < 0 under
-    inward, outward = (DIR["right"], DIR["left"]) if left else (DIR["left"], DIR["right"])
-    if not below:
-        side = inward
-    else:
-        side = outward if gap < BAND[0] else inward if gap > BAND[1] else DIR["none"]
+    side = DIR["right"] if left else DIR["left"]
     if not falling or (not below and gap < FAR):
         return side, NONE
     up, last = UP_OF[side], _last_button(obs)

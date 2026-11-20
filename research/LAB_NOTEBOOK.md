@@ -1341,3 +1341,25 @@ advised_night5 (configs/experiments/advised_night5.yaml): against **Hard**, abou
 under night 4's advisor, beta 10 after 30 minutes. The reflex is off and on in turns every 5 minutes, off
 first (progress.csv "reflex", "reflex_decisions"; the trace marks each decision it took). Crops saved for
 the fighter-state labels.
+
+## 2026-11-20: night 5 against Hard; the reflex made recovery worse
+
+advised_night5: 10 h, 699,600 decisions, completed (sensing 34 ms, over budget 0.2%, no rollback).
+results/advised_night5/{summary.md, reflex_ab.txt}.
+
+**Hard outclasses the agent.** Reflex off, the whole night: stocks 66 - 409 (0.23 taken, 1.40 lost a minute),
+damage 45 dealt against 279 taken a minute, -3.5 reward a minute (against Medium on night 4: +0.28, even
+on stocks). Over the night the off arm rose only from -3.65 to -3.33 (thirds of full advice). Self-falls
+are 10% of the stocks lost here (42 of 409): against Hard the fight itself is lost, 6 to 1 on damage.
+
+**The reflex hurt** (paired over 52 cycles of full advice): -0.37 +- 0.09 reward a minute (t -4.1), +1.7
+stocks lost per 5 minutes, self-falls 0.35 against 0.14 a minute. It took 16.5% of the decisions in its
+blocks. Why, from the trace: 61% of its falls had a takeover in the "under the stage" branch, and the falls
+end the same way: beside the ledge, below the top, the rule went straight up (the band 20-100 px beyond the
+ledge) or away from the stage, with jumps, recovery and dodge spent, and fell straight down past the wall.
+Holding toward the stage there makes the fighter cling to its side and get a jump back; night 4's clone did
+that (toward the stage 66% of decisions off stage) and came back from 97% of spells. The band and the
+outward steering were my error. Fixed: the rule now always holds toward the stage. Not yet tested live.
+
+**Human demonstrations:** only the 9 Medium sessions remain prepared (110 min, the human 166 - 36). None
+against Hard.

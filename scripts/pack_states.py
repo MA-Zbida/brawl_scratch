@@ -33,6 +33,8 @@ from brawl.paths import DATA  # noqa: E402
 import label_states  # noqa: E402
 import train_states  # noqa: E402
 
+sys.path.remove(str(ROOT / "scripts"))  # leave the path as found: scripts/train.py would shadow other "train" modules
+
 RUNS = label_states.RUNS
 EVERY = 4
 CELL = '''

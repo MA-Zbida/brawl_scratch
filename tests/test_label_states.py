@@ -4,8 +4,11 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+SCRIPTS = str(Path(__file__).resolve().parents[1] / "scripts")
+sys.path.insert(0, SCRIPTS)
 import label_states  # noqa: E402
+
+sys.path.remove(SCRIPTS)  # scripts/train.py would shadow the legacy "train" alias (tests/test_compat.py)
 
 from brawl import observation  # noqa: E402
 

@@ -1,0 +1,20 @@
+name: advised_night6
+description: >
+  A/B night against Medium (about 10 hours): the corrected recovery reflex (brawl/reflex.py, always toward
+  the stage) on and off in turns every 5 minutes, off first. Night 5's first version doubled the self-falls
+  (it rose straight up beside the ledge instead of clinging to the stage's side). Against Medium the
+  self-falls are 35% of the stocks lost (night 4), so this is where the reflex can show its worth. The human
+  clone under night 4's advisor (the last one trained against Medium), as on night 4's human-clone arm.
+  No crops (nights 4 and 5 hold enough for the fighter-state labels).
+base: rdqn_medium_v3.yaml
+seeds: [0]
+overrides:
+  env: {difficulty: medium}
+  train:
+    init: runs/advised_night4/default/seed0/qnet.pt
+    total_steps: 700000
+    rdqn:
+      prior: runs/bc/medium_v4/policy.zip
+      beta: 10.0
+      reflex: ab
+      reflex_every: 5

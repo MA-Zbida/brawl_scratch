@@ -87,9 +87,9 @@ def prepare(runs: list[Path], total: int, out: Path, seed: int = 0, log=print) -
                 for i in rng.choice(idx, size=min(per_shard[name], len(idx)), replace=False):
                     picked[int(i)] = name
             if picked:
-                c = z["crops"]
+                c = z["crops"]  # decompressed once per shard, released after it
                 for i, name in picked.items():
-                    crops.append(c[i - BEFORE:i + AFTER + 1, WHO])
+                    crops.append(c[i - BEFORE:i + AFTER + 1, WHO].copy())  # a copy: a view would keep the whole shard (110 MB) alive
                     source.append((run.parts[-3], int(steps[i])))
                     stratum.append(name)
             if s_i % 10 == 0:

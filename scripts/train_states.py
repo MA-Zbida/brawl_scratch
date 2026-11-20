@@ -372,7 +372,7 @@ def main(argv=None) -> int:
         pre.load_state_dict(torch.load(args.encoder, map_location="cpu"))
         log(f"pretrained network from {args.encoder}")
     elif args.pretrain is not None:
-        pre, pre_info = pretrain(sorted(args.pretrain.rglob("shard_*.npz")), args.pretrain_steps, device, log)
+        pre, pre_info = pretrain(sorted(args.pretrain.rglob("*shard_*.npz")), args.pretrain_steps, device, log)
         pre = pre.cpu()
         torch.save(pre.state_dict(), args.out / "states" / "pretrained.pt")
     variants = {"frame": (1, None), "context": (T, None)}

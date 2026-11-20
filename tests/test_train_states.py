@@ -66,3 +66,20 @@ def test_the_labels_pack_keeps_the_frame_and_the_five_before_it(tmp_path, monkey
     assert d["clip"].tolist() == [0, 4] and d["label"].tolist() == [1, 4]
     assert d["crops"].shape == (2, train_states.T, 96, 96)
     assert d["crops"][0, -1, 0, 0] == label_states.BEFORE and d["crops"][0, 0, 0, 0] == label_states.BEFORE - train_states.T + 1
+
+
+def test_the_pretraining_folder_links_every_fourth_shard_without_copying(tmp_path):
+    import os
+
+    import pack_states
+
+    runs = []
+    for night in ("advised_night4", "advised_night5"):
+        run = tmp_path / "runs" / night / "default" / "seed0"
+        for k in range(9):
+            shard(run / "trace" / f"shard_{k * 60 + 1:07d}.npz", start=k * 60 + 1)
+        runs.append(run)
+    out = pack_states.link_shards(runs, tmp_path / "states_pretrain")
+    assert [p.name for p in out][:3] == ["advised_night4_shard_0000001.npz", "advised_night4_shard_0000241.npz",
+                                          "advised_night4_shard_0000481.npz"] and len(out) == 6
+    assert os.stat(out[0]).st_nlink == 2  # the same file, not a copy

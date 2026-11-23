@@ -13,6 +13,15 @@ was measured in 30 minutes of frozen-policy play (6 × 5 min blocks, back to bac
 [results/play/](results/play/)). The same gap held during training: +0.38 ± 0.06 against −0.11 ± 0.19
 over a 7-hour night. Over a 10-hour night the advised agent is even on stocks with the Medium bot (399 taken, 386 lost) and ahead on damage; a third of the stocks it loses are its own failed recoveries, the next thing to fix.
 
+**Since then.** Against the Hard bot the agent is outclassed (66 stocks taken to 409 lost over 5 hours,
+damage 45 dealt to 279 taken per minute). A first hand-written recovery reflex doubled the self-falls in an
+interleaved A/B night (t = -4.1); a corrected version is on test. Fighter crops added nothing to the value at
+700,000 decisions; a supervised fighter-state network (what Mordex is doing now and 100 ms ahead) is being
+trained from hand labels and free targets.
+
+**Technical report:** [research/REPORT.md](research/REPORT.md) states the problem formally and explains, with
+theory, why each method failed or worked and what should come next.
+
 ![Reward per minute over each training run](results/figures/rl_runs.png)
 
 *Each line is one overnight run in the live game (10-minute blocks, 95% bands). The grey band is the
